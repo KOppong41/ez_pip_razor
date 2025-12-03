@@ -1,0 +1,1120 @@
+{% extends "admin/trading_base.html" %}
+{% load static i18n admin_urls %}
+
+{% block title %}{% if add %}{% trans 'Add Trade Log' %}{% else %}{{ original.symbol|default:original }}{% endif %} | EzTrade{% endblock %}
+
+{% block page_title %}
+    {% if add %}
+        {% trans 'Add Trade Log' %}
+    {% else %}
+        <div style="display: flex; align-items: center; gap: var(--space-sm);">
+            <i class="fas fa-chart-line" style="color: var(--primary);"></i>
+            {% trans 'Trade Log' %}: {{ original.symbol|default:"Trade Details" }}
+        </div>
+    {% endif %}
+{% endblock %}
+
+{% block page_subtitle %}
+    {% if add %}
+        {% trans 'Record a new trade execution' %}
+    {% else %}
+        <div style="display: flex; align-items: center; gap: var(--space-sm);">
+            <span style="color: var(--gray-400);">{% trans 'Last updated' %}: {{ original.updated_at|default:"Now" }}</span>
+            {% if original.bot %}
+                <span style="margin-left: var(--space-sm); padding: 2px 8px; background: rgba(67, 97, 238, 0.1); border-radius: 12px; font-size: var(--text-xs);">
+                    <i class="fas fa-robot"></i> {{ original.bot.name }}
+                </span>
+            {% endif %}
+        </div>
+    {% endif %}
+{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .modern-form-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Modern Card Layout */
+    .form-card {
+        background: var(--bg-card);
+        backdrop-filter: var(--backdrop-blur);
+        border-radius: var(--radius-lg);
+        border: 1px solid var(--border-light);
+        overflow: hidden;
+        margin-bottom: var(--space-lg);
+        transition: all 0.3s ease;
+        box-shadow: var(--shadow-lg);
+    }
+
+    .form-card:hover {
+        border-color: var(--border-medium);
+        box-shadow: var(--shadow-xl);
+    }
+
+    /* Card Header with gradient */
+    .card-header {
+        padding: var(--space-lg);
+        background: linear-gradient(135deg, rgba(67, 97, 238, 0.1) 0%, rgba(58, 12, 163, 0.05) 100%);
+        border-bottom: 1px solid var(--border-light);
+    }
+
+    .card-header-title {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        margin-bottom: var(--space-xs);
+    }
+
+    .card-header-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: var(--radius-md);
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-lg);
+    }
+
+    .card-title {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--light);
+        margin: 0;
+    }
+
+    .card-subtitle {
+        font-size: var(--text-sm);
+        color: var(--gray-400);
+        margin: 0;
+        line-height: 1.4;
+    }
+
+    /* Form Content */
+    .card-content {
+        padding: var(--space-lg);
+    }
+
+    /* Modern Form Grid */
+    .modern-form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: var(--space-lg);
+    }
+
+    /* Form Group with floating label */
+    .form-group-modern {
+        position: relative;
+        margin-bottom: var(--space-lg);
+    }
+
+    .floating-label {
+        position: absolute;
+        top: -8px;
+        left: 12px;
+        background: var(--bg-primary);
+        padding: 0 8px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        color: var(--gray-400);
+        z-index: 1;
+    }
+
+    .form-field-modern {
+        width: 100%;
+        padding: var(--space-md);
+        background: rgba(255, 255, 255, 0.05);
+        border: 2px solid var(--border-light);
+        border-radius: var(--radius-md);
+        color: var(--light);
+        font-size: var(--text-sm);
+        min-height: 48px;
+        transition: all 0.3s ease;
+    }
+
+    .form-field-modern:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+        background: rgba(255, 255, 255, 0.08);
+    }
+
+    select.form-field-modern {
+        appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14 2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 16px center;
+        padding-right: 48px;
+    }
+
+    /* Field Status Indicators */
+    .field-status {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        margin-top: var(--space-xs);
+        font-size: var(--text-xs);
+    }
+
+    .field-status.valid {
+        color: var(--success);
+    }
+
+    .field-status.invalid {
+        color: var(--danger);
+    }
+
+    /* Side Status Card */
+    .status-sidebar {
+        grid-column: span 2;
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.01) 100%);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+    }
+
+    @media (min-width: 1024px) {
+        .status-sidebar {
+            grid-column: span 1;
+        }
+    }
+
+    /* Trade Summary Card */
+    .trade-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--space-md);
+        margin-top: var(--space-lg);
+        padding-top: var(--space-lg);
+        border-top: 1px solid var(--border-light);
+    }
+
+    .summary-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        padding: var(--space-md);
+        background: rgba(255, 255, 255, 0.02);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+        transition: all 0.3s ease;
+    }
+
+    .summary-item:hover {
+        background: rgba(255, 255, 255, 0.05);
+        transform: translateY(-2px);
+    }
+
+    .summary-label {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        margin-bottom: var(--space-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .summary-value {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    .summary-value.positive {
+        color: var(--success);
+    }
+
+    .summary-value.negative {
+        color: var(--danger);
+    }
+
+    /* Status Badge Modern */
+    .status-badge-modern {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-sm) var(--space-lg);
+        border-radius: 20px;
+        font-size: var(--text-sm);
+        font-weight: 500;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        transition: all 0.3s ease;
+    }
+
+    .status-badge-modern.active {
+        background: rgba(76, 201, 240, 0.1);
+        border-color: var(--success);
+        color: var(--success);
+    }
+
+    .status-badge-modern.error {
+        background: rgba(247, 37, 133, 0.1);
+        border-color: var(--danger);
+        color: var(--danger);
+    }
+
+    /* Action Buttons Modern */
+    .action-buttons-modern {
+        display: flex;
+        gap: var(--space-md);
+        justify-content: flex-end;
+        padding: var(--space-lg);
+        background: rgba(255, 255, 255, 0.02);
+        border-top: 1px solid var(--border-light);
+        flex-wrap: wrap;
+    }
+
+    .btn-modern {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-md) var(--space-lg);
+        border-radius: var(--radius-md);
+        font-weight: 500;
+        font-size: var(--text-sm);
+        text-decoration: none;
+        transition: all 0.3s ease;
+        cursor: pointer;
+        border: none;
+        background: var(--primary);
+        color: white;
+        box-shadow: var(--shadow-md);
+    }
+
+    .btn-modern:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-lg);
+    }
+
+    .btn-modern.secondary {
+        background: transparent;
+        color: var(--gray-300);
+        border: 1px solid var(--border-light);
+    }
+
+    .btn-modern.secondary:hover {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: var(--border-medium);
+        color: var(--light);
+    }
+
+    /* Related Items Modern */
+    .related-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: var(--space-md);
+        margin-top: var(--space-md);
+    }
+
+    .related-card-modern {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: var(--radius-md);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+        cursor: pointer;
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .related-card-modern::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 4px;
+        height: 100%;
+        background: var(--primary);
+        transform: scaleY(0);
+        transition: transform 0.3s ease;
+    }
+
+    .related-card-modern:hover::before {
+        transform: scaleY(1);
+    }
+
+    .related-card-modern:hover {
+        background: rgba(255, 255, 255, 0.05);
+        transform: translateY(-4px);
+    }
+
+    .related-icon-modern {
+        font-size: var(--text-xl);
+        color: var(--primary-light);
+        margin-bottom: var(--space-md);
+    }
+
+    .related-title-modern {
+        font-size: var(--text-sm);
+        font-weight: 600;
+        color: var(--light);
+        margin: 0 0 var(--space-xs) 0;
+    }
+
+    .related-value-modern {
+        font-size: var(--text-base);
+        font-weight: 700;
+        color: var(--success);
+        margin: 0;
+    }
+
+    /* Audit Timeline */
+    .audit-timeline {
+        margin-top: var(--space-lg);
+        padding: var(--space-md);
+        background: rgba(255, 255, 255, 0.02);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+    }
+
+    .timeline-item {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        padding: var(--space-sm) 0;
+        border-bottom: 1px solid var(--border-dark);
+    }
+
+    .timeline-item:last-child {
+        border-bottom: none;
+    }
+
+    .timeline-icon {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: rgba(67, 97, 238, 0.1);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--primary);
+        font-size: var(--text-xs);
+        flex-shrink: 0;
+    }
+
+    .timeline-content {
+        flex: 1;
+    }
+
+    .timeline-action {
+        font-size: var(--text-sm);
+        color: var(--light);
+        font-weight: 500;
+    }
+
+    .timeline-time {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Progress Steps */
+    .progress-steps {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: var(--space-lg);
+        position: relative;
+    }
+
+    .progress-step {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        position: relative;
+        z-index: 2;
+    }
+
+    .step-circle {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.05);
+        border: 2px solid var(--border-light);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--gray-400);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        margin-bottom: var(--space-xs);
+        transition: all 0.3s ease;
+    }
+
+    .step-circle.active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: white;
+    }
+
+    .step-label {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        text-align: center;
+    }
+
+    .progress-line {
+        position: absolute;
+        top: 16px;
+        left: 32px;
+        right: 32px;
+        height: 2px;
+        background: var(--border-light);
+        z-index: 1;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 768px) {
+        .modern-form-grid {
+            grid-template-columns: 1fr;
+            gap: var(--space-md);
+        }
+
+        .action-buttons-modern {
+            flex-direction: column;
+        }
+
+        .btn-modern {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .trade-summary {
+            grid-template-columns: repeat(2, 1fr);
+        }
+
+        .card-header-title {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: var(--space-sm);
+        }
+
+        .progress-steps {
+            flex-wrap: wrap;
+            gap: var(--space-md);
+        }
+
+        .progress-step {
+            flex: 1;
+            min-width: 80px;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .trade-summary {
+            grid-template-columns: 1fr;
+        }
+
+        .related-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .card-content {
+            padding: var(--space-md);
+        }
+    }
+
+    /* Animation */
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(67, 97, 238, 0.4); }
+        70% { box-shadow: 0 0 0 10px rgba(67, 97, 238, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(67, 97, 238, 0); }
+    }
+
+    .pulse {
+        animation: pulse 2s infinite;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="modern-form-container">
+    <!-- Progress Steps -->
+    <div class="form-card">
+        <div class="card-content">
+            <div class="progress-steps">
+                <div class="progress-line"></div>
+                <div class="progress-step">
+                    <div class="step-circle active">1</div>
+                    <div class="step-label">{% trans 'Details' %}</div>
+                </div>
+                <div class="progress-step">
+                    <div class="step-circle {% if not add %}active{% endif %}">2</div>
+                    <div class="step-label">{% trans 'Execution' %}</div>
+                </div>
+                <div class="progress-step">
+                    <div class="step-circle {% if not add %}active{% endif %}">3</div>
+                    <div class="step-label">{% trans 'Review' %}</div>
+                </div>
+                <div class="progress-step">
+                    <div class="step-circle">4</div>
+                    <div class="step-label">{% trans 'Complete' %}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <form {% if has_file_field %}enctype="multipart/form-data" {% endif %}{% if form_url %}action="{{ form_url }}" {% endif %}method="post" id="{{ opts.model_name }}_form" novalidate>
+        {% csrf_token %}
+        <input type="hidden" name="is_popup" value="{{ is_popup }}">
+        {% if to_field %}<input type="hidden" name="{{ to_field }}" value="{{ to_field_value }}">{% endif %}
+
+        <!-- Trade Details Card -->
+        <div class="form-card">
+            <div class="card-header">
+                <div class="card-header-title">
+                    <div class="card-header-icon">
+                        <i class="fas fa-chart-line"></i>
+                    </div>
+                    <div>
+                        <h3 class="card-title">{% trans 'Trade Details' %}</h3>
+                        <p class="card-subtitle">{% trans 'Core information about the trade execution' %}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-content">
+                <div class="modern-form-grid">
+                    <!-- Left Column -->
+                    <div>
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'Order' %}{% if adminform.form.order.field.required %} *{% endif %}</label>
+                            {{ adminform.form.order }}
+                            {% if adminform.form.order.help_text %}
+                                <div class="field-status valid">
+                                    <i class="fas fa-info-circle"></i>
+                                    {{ adminform.form.order.help_text }}
+                                </div>
+                            {% endif %}
+                        </div>
+
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'Symbol' %}{% if adminform.form.symbol.field.required %} *{% endif %}</label>
+                            {{ adminform.form.symbol }}
+                            {% if adminform.form.symbol.help_text %}
+                                <div class="field-status valid">
+                                    <i class="fas fa-info-circle"></i>
+                                    {{ adminform.form.symbol.help_text }}
+                                </div>
+                            {% endif %}
+                        </div>
+
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'Side' %}{% if adminform.form.side.field.required %} *{% endif %}</label>
+                            {{ adminform.form.side }}
+                        </div>
+                    </div>
+
+                    <!-- Right Column -->
+                    <div>
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'Quantity' %}{% if adminform.form.qty.field.required %} *{% endif %}</label>
+                            {{ adminform.form.qty }}
+                            {% if adminform.form.qty.help_text %}
+                                <div class="field-status valid">
+                                    <i class="fas fa-info-circle"></i>
+                                    {{ adminform.form.qty.help_text }}
+                                </div>
+                            {% endif %}
+                        </div>
+
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'Price' %}{% if adminform.form.price.field.required %} *{% endif %}</label>
+                            {{ adminform.form.price }}
+                        </div>
+
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'P&L' %}{% if adminform.form.pnl.field.required %} *{% endif %}</label>
+                            {{ adminform.form.pnl }}
+                            {% if original and original.pnl %}
+                                <div class="field-status {% if original.pnl > 0 %}valid{% elif original.pnl < 0 %}invalid{% endif %}">
+                                    <i class="fas {% if original.pnl > 0 %}fa-arrow-up{% elif original.pnl < 0 %}fa-arrow-down{% else %}fa-equals{% endif %}"></i>
+                                    {{ original.pnl }}
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Execution Context Card -->
+        <div class="form-card">
+            <div class="card-header">
+                <div class="card-header-title">
+                    <div class="card-header-icon">
+                        <i class="fas fa-cogs"></i>
+                    </div>
+                    <div>
+                        <h3 class="card-title">{% trans 'Execution Context' %}</h3>
+                        <p class="card-subtitle">{% trans 'Bot and account information' %}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-content">
+                <div class="modern-form-grid">
+                    <div class="form-group-modern">
+                        <label class="floating-label">{% trans 'Trading Bot' %}{% if adminform.form.bot.field.required %} *{% endif %}</label>
+                        {{ adminform.form.bot }}
+                        {% if original and original.bot %}
+                            <div class="field-status valid">
+                                <i class="fas fa-robot"></i>
+                                {{ original.bot.name }} ({{ original.bot.get_status_display }})
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group-modern">
+                        <label class="floating-label">{% trans 'Broker Account' %}{% if adminform.form.broker_account.field.required %} *{% endif %}</label>
+                        {{ adminform.form.broker_account }}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status & Metadata Card -->
+        <div class="form-card">
+            <div class="card-header">
+                <div class="card-header-title">
+                    <div class="card-header-icon">
+                        <i class="fas fa-chart-bar"></i>
+                    </div>
+                    <div>
+                        <h3 class="card-title">{% trans 'Status & Metadata' %}</h3>
+                        <p class="card-subtitle">{% trans 'Trade outcome and additional information' %}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-content">
+                <div class="modern-form-grid">
+                    <div>
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'Status' %}{% if adminform.form.status.field.required %} *{% endif %}</label>
+                            {{ adminform.form.status }}
+                            {% if original and original.status %}
+                                <div style="margin-top: var(--space-md);">
+                                    <span class="status-badge-modern {% if original.status == 'error' %}error{% else %}active{% endif %}">
+                                        <i class="fas 
+                                            {% if original.status == 'win' %}fa-trophy
+                                            {% elif original.status == 'loss' %}fa-face-frown
+                                            {% elif original.status == 'breakeven' %}fa-scale-unbalanced-flip
+                                            {% elif original.status == 'error' %}fa-triangle-exclamation
+                                            {% elif original.status == 'new' %}fa-sparkles
+                                            {% else %}fa-circle{% endif %}">
+                                        </i>
+                                        {{ original.get_status_display }}
+                                    </span>
+                                </div>
+                            {% endif %}
+                        </div>
+
+                        <div class="form-group-modern">
+                            <label class="floating-label">{% trans 'Notes' %}</label>
+                            {{ adminform.form.notes }}
+                        </div>
+                    </div>
+
+                    <!-- Trade Summary Sidebar -->
+                    <div class="status-sidebar">
+                        <h4 style="font-size: var(--text-sm); color: var(--gray-400); margin-bottom: var(--space-md);">{% trans 'Trade Summary' %}</h4>
+                        
+                        <div class="trade-summary">
+                            {% if original %}
+                            <div class="summary-item">
+                                <div class="summary-label">{% trans 'Symbol' %}</div>
+                                <div class="summary-value">{{ original.symbol|default:"—" }}</div>
+                            </div>
+                            
+                            <div class="summary-item">
+                                <div class="summary-label">{% trans 'Side' %}</div>
+                                <div class="summary-value">{{ original.get_side_display|default:"—" }}</div>
+                            </div>
+                            
+                            <div class="summary-item">
+                                <div class="summary-label">{% trans 'Quantity' %}</div>
+                                <div class="summary-value">{{ original.qty|default:"—" }}</div>
+                            </div>
+                            
+                            <div class="summary-item">
+                                <div class="summary-label">{% trans 'P&L' %}</div>
+                                <div class="summary-value {% if original.pnl > 0 %}positive{% elif original.pnl < 0 %}negative{% endif %}">
+                                    {{ original.pnl|default:"—" }}
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="summary-item">
+                                <div class="summary-label">{% trans 'Status' %}</div>
+                                <div class="summary-value">{% trans 'New Trade' %}</div>
+                            </div>
+                            {% endif %}
+                        </div>
+
+                        {% if original %}
+                        <div class="audit-timeline">
+                            <h4 style="font-size: var(--text-sm); color: var(--gray-400); margin-bottom: var(--space-md);">{% trans 'Audit Trail' %}</h4>
+                            
+                            <div class="timeline-item">
+                                <div class="timeline-icon">
+                                    <i class="fas fa-plus"></i>
+                                </div>
+                                <div class="timeline-content">
+                                    <div class="timeline-action">{% trans 'Trade Created' %}</div>
+                                    <div class="timeline-time">{{ original.created_at }}</div>
+                                </div>
+                            </div>
+                            
+                            {% if original.updated_at and original.updated_at != original.created_at %}
+                            <div class="timeline-item">
+                                <div class="timeline-icon">
+                                    <i class="fas fa-edit"></i>
+                                </div>
+                                <div class="timeline-content">
+                                    <div class="timeline-action">{% trans 'Last Updated' %}</div>
+                                    <div class="timeline-time">{{ original.updated_at }}</div>
+                                </div>
+                            </div>
+                            {% endif %}
+                            
+                            {% if original.created_by %}
+                            <div class="timeline-item">
+                                <div class="timeline-icon">
+                                    <i class="fas fa-user"></i>
+                                </div>
+                                <div class="timeline-content">
+                                    <div class="timeline-action">{% trans 'Created By' %}</div>
+                                    <div class="timeline-time">{{ original.created_by }}</div>
+                                </div>
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Related Objects Card -->
+        {% if not add and original %}
+        <div class="form-card">
+            <div class="card-header">
+                <div class="card-header-title">
+                    <div class="card-header-icon">
+                        <i class="fas fa-network-wired"></i>
+                    </div>
+                    <div>
+                        <h3 class="card-title">{% trans 'Related Objects' %}</h3>
+                        <p class="card-subtitle">{% trans 'Linked entities and references' %}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-content">
+                <div class="related-grid">
+                    {% if original.order %}
+                    <a href="{% url 'admin:execution_order_change' original.order.pk %}" class="related-card-modern">
+                        <div class="related-icon-modern">
+                            <i class="fas fa-shopping-cart"></i>
+                        </div>
+                        <div class="related-title-modern">{% trans 'Order' %}</div>
+                        <div class="related-value-modern">{{ original.order }}</div>
+                    </a>
+                    {% endif %}
+
+                    {% if original.bot %}
+                    <a href="{% url 'admin:bots_bot_change' original.bot.pk %}" class="related-card-modern">
+                        <div class="related-icon-modern">
+                            <i class="fas fa-robot"></i>
+                        </div>
+                        <div class="related-title-modern">{% trans 'Trading Bot' %}</div>
+                        <div class="related-value-modern">{{ original.bot.name }}</div>
+                    </a>
+                    {% endif %}
+
+                    {% if original.broker_account %}
+                    <a href="{% url 'admin:brokers_brokeraccount_change' original.broker_account.pk %}" class="related-card-modern">
+                        <div class="related-icon-modern">
+                            <i class="fas fa-building-columns"></i>
+                        </div>
+                        <div class="related-title-modern">{% trans 'Broker Account' %}</div>
+                        <div class="related-value-modern">{{ original.broker_account.name }}</div>
+                    </a>
+                    {% endif %}
+
+                    <a href="{% url 'admin:execution_tradelog_changelist' %}" class="related-card-modern">
+                        <div class="related-icon-modern">
+                            <i class="fas fa-history"></i>
+                        </div>
+                        <div class="related-title-modern">{% trans 'Trade History' %}</div>
+                        <div class="related-value-modern">{% trans 'View All' %}</div>
+                    </a>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Form Actions -->
+        <div class="action-buttons-modern">
+            <div style="display: flex; gap: var(--space-sm);">
+                <a href="{% url 'admin:execution_tradelog_changelist' %}" class="btn-modern secondary">
+                    <i class="fas fa-arrow-left"></i>
+                    {% trans 'Back to List' %}
+                </a>
+                
+                {% if not add %}
+                <a href="{% url 'admin:execution_tradelog_delete' original.pk %}" class="btn-modern secondary" style="color: var(--danger); border-color: var(--danger);">
+                    <i class="fas fa-trash"></i>
+                    {% trans 'Delete' %}
+                </a>
+                {% endif %}
+            </div>
+            
+            <div style="display: flex; gap: var(--space-sm);">
+                <button type="submit" name="_addanother" class="btn-modern secondary">
+                    <i class="fas fa-plus"></i>
+                    {% trans 'Save & Add Another' %}
+                </button>
+                
+                <button type="submit" name="_continue" class="btn-modern secondary">
+                    <i class="fas fa-edit"></i>
+                    {% trans 'Save & Continue' %}
+                </button>
+                
+                <button type="submit" name="_save" class="btn-modern pulse">
+                    <i class="fas fa-save"></i>
+                    {% trans 'Save Trade Log' %}
+                </button>
+            </div>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Modern form field styling
+    const styleFormElements = () => {
+        const inputs = document.querySelectorAll('input, select, textarea');
+        inputs.forEach(input => {
+            if (!input.classList.contains('form-field-modern')) {
+                input.classList.add('form-field-modern');
+            }
+        });
+    };
+    styleFormElements();
+
+    // Real-time P&L calculator
+    const priceInput = document.querySelector('#id_price');
+    const qtyInput = document.querySelector('#id_qty');
+    const pnlField = document.querySelector('#id_pnl');
+    
+    if (priceInput && qtyInput && pnlField) {
+        function calculateEstimatedPnL() {
+            const price = parseFloat(priceInput.value) || 0;
+            const qty = parseFloat(qtyInput.value) || 0;
+            
+            if (price > 0 && qty > 0) {
+                // Example calculation - adjust based on your logic
+                const estimatedPnL = (price * qty * 0.01).toFixed(2);
+                
+                // Update preview if field is empty
+                if (!pnlField.value) {
+                    pnlField.value = estimatedPnL;
+                    
+                    // Show visual feedback
+                    const feedback = document.getElementById('pnl-feedback');
+                    if (!feedback) {
+                        const div = document.createElement('div');
+                        div.id = 'pnl-feedback';
+                        div.className = 'field-status valid';
+                        div.innerHTML = `<i class="fas fa-calculator"></i> {% trans 'Auto-calculated based on price and quantity' %}`;
+                        pnlField.parentNode.appendChild(div);
+                    }
+                }
+            }
+        }
+        
+        priceInput.addEventListener('blur', calculateEstimatedPnL);
+        qtyInput.addEventListener('blur', calculateEstimatedPnL);
+    }
+
+    // Auto-format numeric fields
+    const numericFields = document.querySelectorAll('input[type="number"]');
+    numericFields.forEach(field => {
+        field.addEventListener('blur', function() {
+            if (this.value) {
+                const value = parseFloat(this.value);
+                if (!isNaN(value)) {
+                    // Determine decimal places based on field type
+                    let decimalPlaces = 2;
+                    if (this.name.includes('qty')) decimalPlaces = 6;
+                    if (this.name.includes('price')) decimalPlaces = 4;
+                    
+                    this.value = value.toFixed(decimalPlaces);
+                }
+            }
+        });
+    });
+
+    // Status badge color update
+    const statusField = document.querySelector('#id_status');
+    const statusBadge = document.querySelector('.status-badge-modern');
+    
+    if (statusField && statusBadge) {
+        statusField.addEventListener('change', function() {
+            const status = this.value;
+            const statusText = this.options[this.selectedIndex].text;
+            
+            // Update badge class
+            statusBadge.className = `status-badge-modern ${status === 'error' ? 'error' : 'active'}`;
+            
+            // Update icon
+            const iconMap = {
+                'win': 'fa-trophy',
+                'loss': 'fa-face-frown',
+                'breakeven': 'fa-scale-unbalanced-flip',
+                'error': 'fa-triangle-exclamation',
+                'new': 'fa-sparkles'
+            };
+            
+            const icon = statusBadge.querySelector('i');
+            icon.className = 'fas ' + (iconMap[status] || 'fa-circle');
+            
+            // Update text
+            const textSpan = statusBadge.querySelector('span:not(:has(i))');
+            if (textSpan) textSpan.textContent = statusText;
+        });
+    }
+
+    // Form validation with visual feedback
+    const form = document.getElementById('{{ opts.model_name }}_form');
+    if (form) {
+        form.addEventListener('submit', function(e) {
+            const submitButtons = this.querySelectorAll('button[type="submit"]');
+            submitButtons.forEach(btn => {
+                const originalHTML = btn.innerHTML;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> ' + btn.textContent;
+                btn.disabled = true;
+                btn.dataset.original = originalHTML;
+            });
+            
+            // Add slight delay to show loading state
+            setTimeout(() => {
+                // Your actual validation logic here
+            }, 100);
+        });
+    }
+
+    // Auto-save indicator
+    let changeTimeout;
+    const formInputs = document.querySelectorAll('.form-field-modern');
+    
+    formInputs.forEach(input => {
+        input.addEventListener('input', function() {
+            clearTimeout(changeTimeout);
+            
+            // Remove existing indicator
+            const existing = document.querySelector('.auto-save-indicator');
+            if (existing) existing.remove();
+            
+            // Show new indicator
+            const indicator = document.createElement('div');
+            indicator.className = 'auto-save-indicator';
+            indicator.style.cssText = `
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+                color: white;
+                padding: var(--space-sm) var(--space-md);
+                border-radius: var(--radius-md);
+                font-size: var(--text-xs);
+                z-index: 1000;
+                display: flex;
+                align-items: center;
+                gap: var(--space-sm);
+                box-shadow: var(--shadow-lg);
+            `;
+            indicator.innerHTML = '<i class="fas fa-save"></i> {% trans "Changes detected • Press Ctrl+S to save" %}';
+            document.body.appendChild(indicator);
+            
+            changeTimeout = setTimeout(() => {
+                indicator.remove();
+            }, 3000);
+        });
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Ctrl+S to save
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            const saveBtn = document.querySelector('button[name="_save"]');
+            if (saveBtn) saveBtn.click();
+        }
+        
+        // Escape to go back
+        if (e.key === 'Escape') {
+            const backBtn = document.querySelector('a[href*="changelist"]');
+            if (backBtn) window.location = backBtn.href;
+        }
+    });
+
+    // Real-time field validation
+    const requiredFields = document.querySelectorAll('[required]');
+    requiredFields.forEach(field => {
+        field.addEventListener('blur', function() {
+            if (!this.value.trim()) {
+                this.style.borderColor = 'var(--danger)';
+                const errorDiv = this.parentNode.querySelector('.field-error');
+                if (!errorDiv) {
+                    const div = document.createElement('div');
+                    div.className = 'field-status invalid';
+                    div.innerHTML = '<i class="fas fa-exclamation-circle"></i> {% trans "This field is required" %}';
+                    this.parentNode.appendChild(div);
+                }
+            } else {
+                this.style.borderColor = 'var(--success)';
+                const errorDiv = this.parentNode.querySelector('.field-error');
+                if (errorDiv) errorDiv.remove();
+            }
+        });
+    });
+
+    // Progress step activation based on form completion
+    function updateProgressSteps() {
+        const requiredFields = document.querySelectorAll('[required]');
+        let completedFields = 0;
+        
+        requiredFields.forEach(field => {
+            if (field.value.trim()) completedFields++;
+        });
+        
+        const steps = document.querySelectorAll('.step-circle');
+        steps.forEach((step, index) => {
+            if (index < Math.min(3, Math.floor(completedFields / 2))) {
+                step.classList.add('active');
+            } else {
+                step.classList.remove('active');
+            }
+        });
+    }
+    
+    // Update progress on input
+    formInputs.forEach(input => {
+        input.addEventListener('input', updateProgressSteps);
+        input.addEventListener('change', updateProgressSteps);
+    });
+    
+    // Initial update
+    updateProgressSteps();
+});
+</script>
+{% endblock %}

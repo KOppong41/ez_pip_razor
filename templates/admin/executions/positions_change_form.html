@@ -1,0 +1,247 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{% if add %}{% trans "Add Position" %}{% else %}{% trans "Change Position" %}{% endif %} | EzTrade{% endblock %}
+{% block page_title %}{% if add %}{% trans "Add Position" %}{% else %}{% trans "Change Position" %}{% endif %}{% endblock %}
+{% block page_subtitle %}{% if add %}{% trans "Capture new exposure" %}{% else %}{% trans "Review and edit live exposure details" %}{% endif %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .position-form-container {
+        max-width: 1100px;
+        margin: 0 auto;
+    }
+
+    .position-card-header {
+        display: flex;
+        justify-content: space-between;
+        gap: var(--space-md);
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+
+    .position-card-header .card-title {
+        margin-bottom: var(--space-xs);
+    }
+
+    .position-hero-meta {
+        color: var(--gray-400);
+        font-size: var(--text-sm);
+        margin-top: var(--space-xs);
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-sm);
+    }
+
+    .position-header-actions {
+        display: flex;
+        gap: var(--space-sm);
+        flex-wrap: wrap;
+        align-items: center;
+    }
+
+    .position-header-actions .btn {
+        padding: var(--space-sm) var(--space-md);
+    }
+
+    .position-summary {
+        background: rgba(15, 23, 42, 0.5);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        padding: var(--space-lg);
+        margin-bottom: var(--space-lg);
+        display: grid;
+        gap: var(--space-sm);
+    }
+
+    .position-summary .summary-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: var(--space-xs) 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .position-summary .summary-item:last-child {
+        border-bottom: none;
+    }
+
+    .position-summary .summary-label {
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        color: var(--gray-400);
+        letter-spacing: 0.05em;
+    }
+
+    .position-summary .summary-value {
+        font-size: var(--text-sm);
+        color: var(--light);
+        font-weight: 600;
+        text-align: right;
+    }
+
+    .submit-row {
+        background: rgba(15, 23, 42, 0.6);
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        padding: var(--space-md) 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-sm);
+    }
+
+    .submit-row input[type="submit"] {
+        min-width: 180px;
+        border-radius: var(--radius-md);
+        border: none;
+        padding: var(--space-sm) var(--space-lg);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+    }
+
+    .submit-row input[name="_save"] {
+        background: #0ea5e9;
+        color: white;
+        box-shadow: var(--shadow-sm);
+    }
+
+    .submit-row input[name="_addanother"],
+    .submit-row input[name="_continue"] {
+        background: linear-gradient(135deg, #7c3aed, #4c1d95);
+        color: white;
+        box-shadow: var(--shadow-sm);
+    }
+
+    .deletelink-box {
+        margin-left: auto;
+    }
+
+    .deletelink {
+        background: var(--danger);
+        color: white;
+        padding: var(--space-sm) var(--space-lg);
+        border-radius: var(--radius-md);
+        text-decoration: none;
+        font-weight: 600;
+        box-shadow: var(--shadow-sm);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="position-form-container">
+    <div class="card">
+        <div class="card-header position-card-header">
+            <div>
+                <h3 class="card-title">{% if add %}{% trans "New Position" %}{% else %}{% trans "Change position" %}{% endif %}</h3>
+                {% if not add and original %}
+                <div class="position-hero-meta">
+                    <span>
+                        {{ original.symbol }} {{ original.qty|default:"0.00000000"|floatformat:8 }} @
+                        {{ original.avg_price|default:"0.00"|floatformat:8 }}
+                    </span>
+                    <span>
+                        {% if original.qty > 0 %}{% trans "Long" %}{% elif original.qty < 0 %}{% trans "Short" %}{% else %}{% trans "Flat" %}{% endif %}
+                    </span>
+                    <span>
+                        {{ original.status|capfirst|default:"Open" }}
+                    </span>
+                </div>
+                {% endif %}
+            </div>
+            <div class="position-header-actions">
+                <a href="{% url 'admin:execution_position_changelist' %}" class="btn btn-outline">
+                    <i class="fas fa-list"></i> {% trans "All positions" %}
+                </a>
+                {% if not add and original %}
+                <a href="{% url opts|admin_urlname:'history' original.pk|admin_urlquote %}" class="btn btn-outline">
+                    <i class="fas fa-clock-rotate-left"></i> {% trans "History" %}
+                </a>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if not add and original %}
+        <div class="position-summary">
+            <div class="summary-item">
+                <span class="summary-label">{% trans "Broker account" %}</span>
+                <span class="summary-value">
+                    {{ original.broker_account|default:"-" }}
+                </span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">{% trans "Owner" %}</span>
+                <span class="summary-value">
+                    {% if original.owner %}{{ original.owner }}{% else %}{% trans "Unassigned" %}{% endif %}
+                </span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">{% trans "Qty / Side" %}</span>
+                <span class="summary-value">
+                    {{ original.qty|default:"0.00000000"|floatformat:8 }}
+                    {% if original.qty > 0 %}
+                        ({% trans "Long" %})
+                    {% elif original.qty < 0 %}
+                        ({% trans "Short" %})
+                    {% else %}
+                        ({% trans "Flat" %})
+                    {% endif %}
+                </span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">{% trans "Avg. price" %}</span>
+                <span class="summary-value">
+                    {{ original.avg_price|default:"-" }}
+                </span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">{% trans "Stop / Target" %}</span>
+                <span class="summary-value">
+                    {{ original.sl|default:"-" }} / {{ original.tp|default:"-" }}
+                </span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">{% trans "Status" %}</span>
+                <span class="summary-value">
+                    {{ original.status|capfirst|default_if_none:"Open" }}
+                </span>
+            </div>
+        </div>
+        {% endif %}
+
+        <form {% if has_file_field %}enctype="multipart/form-data" {% endif %}{% if form_url %}action="{{ form_url }}" {% endif %}method="post" id="{{ opts.model_name }}_form" novalidate>
+            {% csrf_token %}
+            {% block form_top %}{% endblock %}
+            <input type="hidden" name="is_popup" value="{{ is_popup }}">
+            {% if to_field %}<input type="hidden" name="{{ to_field }}" value="{{ to_field_value }}">{% endif %}
+            {% if adminform.form.hidden_fields %}
+                {% for hidden in adminform.form.hidden_fields %}
+                    {{ hidden }}
+                {% endfor %}
+            {% endif %}
+
+            {% if save_on_top %}{% submit_row %}{% endif %}
+
+            {% if errors %}
+                <p class="errornote">
+                    {% if errors|length == 1 %}{% trans "Please correct the error below." %}{% else %}{% trans "Please correct the errors below." %}{% endif %}
+                </p>
+                {{ adminform.form.non_field_errors }}
+            {% endif %}
+
+            {% for fieldset in adminform %}
+                {% include "admin/includes/fieldset.html" %}
+            {% endfor %}
+
+            {% for inline_admin_formset in inline_admin_formsets %}
+                {% include inline_admin_formset.opts.template %}
+            {% endfor %}
+
+            {% submit_row %}
+            {% prepopulated_fields_js %}
+        </form>
+    </div>
+</div>
+{% endblock %}

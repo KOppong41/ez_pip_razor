@@ -1,0 +1,596 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{% if add %}{% trans 'Add Celery Activity' %}{% else %}{{ original.task_name|default:original }}{% endif %} | EzTrade{% endblock %}
+
+{% block page_title %}{{ original.task_name|default:"Celery Activity" }}{% endblock %}
+
+{% block page_subtitle %}{% trans 'View Celery task execution details and logs' %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .celery-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Level badges for form view */
+    .level-badge-large {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-md) var(--space-lg);
+        border-radius: var(--radius-lg);
+        font-size: var(--text-base);
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .level-info {
+        background: var(--info);
+        color: white;
+    }
+
+    .level-warning {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+
+    .level-error {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .level-debug {
+        background: rgba(148, 163, 184, 0.2);
+        color: var(--gray-400);
+    }
+
+    .level-critical {
+        background: var(--danger);
+        color: white;
+    }
+
+    /* Message display */
+    .message-display {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        padding: var(--space-lg);
+        font-family: 'Courier New', monospace;
+        font-size: var(--text-sm);
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 400px;
+        overflow-y: auto;
+    }
+
+    /* Task ID display */
+    .task-id-display {
+        font-family: 'Courier New', monospace;
+        font-size: var(--text-sm);
+        color: var(--primary-light);
+        background: rgba(67, 97, 238, 0.1);
+        padding: var(--space-md);
+        border-radius: var(--radius-md);
+        border: 1px solid rgba(67, 97, 238, 0.2);
+        word-break: break-all;
+    }
+
+    /* Timestamp display */
+    .timestamp-display {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--light);
+        background: rgba(255, 255, 255, 0.05);
+        padding: var(--space-lg);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+        text-align: center;
+    }
+
+    /* Form sections */
+    .form-section {
+        background: var(--bg-card);
+        border-radius: var(--radius-lg);
+        padding: var(--space-xl);
+        border: 1px solid var(--border-light);
+        margin-bottom: var(--space-lg);
+    }
+
+    .section-header {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        margin-bottom: var(--space-lg);
+        padding-bottom: var(--space-md);
+        border-bottom: 1px solid var(--border-light);
+    }
+
+    .section-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: var(--radius-md);
+        background: var(--primary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-lg);
+    }
+
+    .section-title {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--light);
+        margin: 0;
+    }
+
+    .section-subtitle {
+        font-size: var(--text-sm);
+        color: var(--gray-400);
+        margin: var(--space-xs) 0 0 0;
+    }
+
+    /* Form grid */
+    .form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: var(--space-lg);
+    }
+
+    .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-sm);
+    }
+
+    .form-label {
+        font-size: var(--text-sm);
+        font-weight: 500;
+        color: var(--gray-300);
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+    }
+
+    .form-label .required {
+        color: var(--danger);
+    }
+
+    .form-control {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        color: var(--light);
+        font-size: var(--text-sm);
+        transition: all 0.3s ease;
+        width: 100%;
+        font-family: inherit;
+    }
+
+    .form-control:focus {
+        outline: none;
+        border-color: var(--primary);
+        background: rgba(255, 255, 255, 0.08);
+        box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+    }
+
+    .form-control[readonly] {
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--gray-400);
+        cursor: not-allowed;
+    }
+
+    .form-text {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        line-height: 1.4;
+        margin-top: var(--space-xs);
+    }
+
+    /* Full width fields */
+    .form-group-full {
+        grid-column: 1 / -1;
+    }
+
+    /* Action buttons */
+    .form-actions {
+        display: flex;
+        gap: var(--space-md);
+        justify-content: flex-end;
+        padding: var(--space-lg) 0;
+        border-top: 1px solid var(--border-light);
+        margin-top: var(--space-lg);
+        flex-wrap: wrap;
+    }
+
+    .btn-save {
+        background: var(--primary);
+        color: white;
+        border: none;
+        padding: var(--space-md) var(--space-lg);
+        border-radius: var(--radius-md);
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+    }
+
+    .btn-save:hover {
+        background: var(--primary-light);
+        transform: translateY(-1px);
+    }
+
+    .btn-save-secondary {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--gray-300);
+        border: 1px solid var(--border-light);
+        padding: var(--space-md) var(--space-lg);
+        border-radius: var(--radius-md);
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+    }
+
+    .btn-save-secondary:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--light);
+        text-decoration: none;
+        border-color: var(--border-medium);
+    }
+
+    .btn-delete {
+        background: var(--danger);
+        color: white;
+        border: none;
+        padding: var(--space-md) var(--space-lg);
+        border-radius: var(--radius-md);
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+    }
+
+    .btn-delete:hover {
+        background: #e11d74;
+        transform: translateY(-1px);
+        text-decoration: none;
+        color: white;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .form-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .form-section {
+            padding: var(--space-lg);
+        }
+
+        .form-actions {
+            flex-direction: column;
+        }
+
+        .form-actions .btn {
+            width: 100%;
+            text-align: center;
+            justify-content: center;
+        }
+
+        .section-header {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: var(--space-sm);
+        }
+    }
+
+    @media (max-width: 480px) {
+        .form-section {
+            padding: var(--space-md);
+        }
+
+        .level-badge-large {
+            padding: var(--space-md);
+            font-size: var(--text-sm);
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="celery-container">
+    <!-- Header Actions -->
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <a href="{% url 'admin:core_celeryactivity_changelist' %}" class="btn btn-outline">
+            <i class="fas fa-arrow-left"></i> {% trans 'All Celery Activities' %}
+        </a>
+        
+        {% if not add and original %}
+        <div style="display: flex; gap: var(--space-md); align-items: center; flex-wrap: wrap;">
+            <span class="level-badge-large level-{{ original.level|lower }}">
+                <i class="fas 
+                    {% if original.level == 'INFO' %}fa-info-circle
+                    {% elif original.level == 'WARNING' %}fa-exclamation-triangle
+                    {% elif original.level == 'ERROR' %}fa-times-circle
+                    {% elif original.level == 'DEBUG' %}fa-bug
+                    {% elif original.level == 'CRITICAL' %}fa-skull
+                    {% else %}fa-circle{% endif %}">
+                </i>
+                {{ original.get_level_display|default:original.level }}
+            </span>
+        </div>
+        {% endif %}
+    </div>
+
+    <form {% if has_file_field %}enctype="multipart/form-data" {% endif %}{% if form_url %}action="{{ form_url }}" {% endif %}method="post" id="{{ opts.model_name }}_form" novalidate>
+        {% csrf_token %}
+        {% block form_top %}{% endblock %}
+        <input type="hidden" name="is_popup" value="{{ is_popup }}">
+        {% if to_field %}<input type="hidden" name="{{ to_field }}" value="{{ to_field_value }}">{% endif %}
+        
+        {% if adminform.form.hidden_fields %}
+            {% for hidden in adminform.form.hidden_fields %}
+                {{ hidden }}
+            {% endfor %}
+        {% endif %}
+
+        <!-- Basic Information Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon">
+                    <i class="fas fa-info-circle"></i>
+                </div>
+                <div>
+                    <h3 class="section-title">{% trans 'Activity Information' %}</h3>
+                    <p class="section-subtitle">{% trans 'Core details about this Celery activity' %}</p>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="{{ adminform.form.ts.id_for_label }}" class="form-label">
+                        {% trans 'Timestamp' %} <span class="required">*</span>
+                    </label>
+                    {{ adminform.form.ts }}
+                    <div class="form-text">{% trans 'When this activity was recorded' %}</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="{{ adminform.form.level.id_for_label }}" class="form-label">
+                        {% trans 'Level' %} <span class="required">*</span>
+                    </label>
+                    {{ adminform.form.level }}
+                    <div class="form-text">{% trans 'Log level severity' %}</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="{{ adminform.form.component.id_for_label }}" class="form-label">{% trans 'Component' %}</label>
+                    {{ adminform.form.component }}
+                    <div class="form-text">{% trans 'System component that generated this activity' %}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Task Information Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon">
+                    <i class="fas fa-tasks"></i>
+                </div>
+                <div>
+                    <h3 class="section-title">{% trans 'Task Information' %}</h3>
+                    <p class="section-subtitle">{% trans 'Celery task execution details' %}</p>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="{{ adminform.form.task_name.id_for_label }}" class="form-label">{% trans 'Task Name' %}</label>
+                    {{ adminform.form.task_name }}
+                    <div class="form-text">{% trans 'Name of the Celery task' %}</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="{{ adminform.form.task_id.id_for_label }}" class="form-label">{% trans 'Task ID' %}</label>
+                    {{ adminform.form.task_id }}
+                    <div class="form-text">{% trans 'Unique identifier for this task execution' %}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Message Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon">
+                    <i class="fas fa-comment-alt"></i>
+                </div>
+                <div>
+                    <h3 class="section-title">{% trans 'Message' %}</h3>
+                    <p class="section-subtitle">{% trans 'Detailed activity message and context' %}</p>
+                </div>
+            </div>
+
+            <div class="form-group-full">
+                <label for="{{ adminform.form.message.id_for_label }}" class="form-label">
+                    {% trans 'Message' %} <span class="required">*</span>
+                </label>
+                {{ adminform.form.message }}
+                <div class="form-text">{% trans 'Full activity message with execution details' %}</div>
+            </div>
+
+            {% if not add and original.message %}
+            <div style="margin-top: var(--space-lg);">
+                <label class="form-label">{% trans 'Message Preview' %}</label>
+                <div class="message-display">
+                    {{ original.message }}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Form Actions -->
+        <div class="form-actions">
+            <button type="submit" name="_save" class="btn-save">
+                <i class="fas fa-save"></i> {% trans 'Save' %}
+            </button>
+            <button type="submit" name="_addanother" class="btn-save-secondary">
+                <i class="fas fa-plus"></i> {% trans 'Save and add another' %}
+            </button>
+            <button type="submit" name="_continue" class="btn-save-secondary">
+                <i class="fas fa-edit"></i> {% trans 'Save and continue editing' %}
+            </button>
+            {% if not add %}
+            <a href="{% url opts|admin_urlname:'delete' original.pk|admin_urlquote %}" class="btn-delete">
+                <i class="fas fa-trash"></i> {% trans 'Delete' %}
+            </a>
+            {% endif %}
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Real-time form validation
+    const form = document.getElementById('{{ opts.model_name }}_form');
+    const requiredFields = form.querySelectorAll('[required]');
+    
+    requiredFields.forEach(field => {
+        field.addEventListener('blur', function() {
+            if (this.value.trim() === '') {
+                this.style.borderColor = 'var(--danger)';
+                this.style.boxShadow = '0 0 0 3px rgba(247, 37, 133, 0.1)';
+            } else {
+                this.style.borderColor = 'var(--border-light)';
+                this.style.boxShadow = 'none';
+            }
+        });
+    });
+
+    // Level badge preview
+    const levelField = document.getElementById('id_level');
+    const levelPreview = document.querySelector('.level-badge-large');
+    
+    if (levelField && levelPreview) {
+        levelField.addEventListener('change', function() {
+            const level = this.value.toLowerCase();
+            levelPreview.className = `level-badge-large level-${level}`;
+            levelPreview.querySelector('i').className = getLevelIcon(level);
+            levelPreview.textContent = this.options[this.selectedIndex].text;
+            levelPreview.appendChild(levelPreview.querySelector('i').cloneNode(true));
+        });
+    }
+
+    function getLevelIcon(level) {
+        switch(level) {
+            case 'info': return 'fas fa-info-circle';
+            case 'warning': return 'fas fa-exclamation-triangle';
+            case 'error': return 'fas fa-times-circle';
+            case 'debug': return 'fas fa-bug';
+            case 'critical': return 'fas fa-skull';
+            default: return 'fas fa-circle';
+        }
+    }
+
+    // Form submission enhancement
+    form.addEventListener('submit', function(e) {
+        let isValid = true;
+        requiredFields.forEach(field => {
+            if (field.value.trim() === '') {
+                field.style.borderColor = 'var(--danger)';
+                field.style.boxShadow = '0 0 0 3px rgba(247, 37, 133, 0.1)';
+                isValid = false;
+            }
+        });
+        
+        if (!isValid) {
+            e.preventDefault();
+            showNotification('{% trans "Please fill in all required fields." %}', 'error');
+        }
+    });
+
+    // Message field auto-resize
+    const messageField = document.getElementById('id_message');
+    if (messageField) {
+        messageField.style.minHeight = '120px';
+        messageField.style.resize = 'vertical';
+    }
+
+    // Helper function for notifications
+    function showNotification(message, type) {
+        const notification = document.createElement('div');
+        notification.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: var(--space-md) var(--space-lg);
+            border-radius: var(--radius-md);
+            color: white;
+            font-weight: 500;
+            z-index: 10000;
+            max-width: 400px;
+            box-shadow: var(--shadow-lg);
+            transition: all 0.3s ease;
+            transform: translateX(100%);
+        `;
+        
+        if (type === 'success') {
+            notification.style.background = 'var(--success)';
+        } else {
+            notification.style.background = 'var(--danger)';
+        }
+        
+        notification.textContent = message;
+        document.body.appendChild(notification);
+        
+        // Animate in
+        setTimeout(() => {
+            notification.style.transform = 'translateX(0)';
+        }, 100);
+        
+        // Animate out and remove
+        setTimeout(() => {
+            notification.style.transform = 'translateX(100%)';
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.parentNode.removeChild(notification);
+                }
+            }, 300);
+        }, 4000);
+    }
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Save on Ctrl+S
+        if (e.ctrlKey && e.key === 's') {
+            e.preventDefault();
+            document.querySelector('button[name="_save"]').click();
+        }
+        
+        // Back to list on Ctrl+B
+        if (e.ctrlKey && e.key === 'b') {
+            e.preventDefault();
+            window.location.href = '{% url "admin:core_celeryactivity_changelist" %}';
+        }
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,62 @@
+# Django
+*.log
+*.pot
+*.pyc
+__pycache__/
+db.sqlite3
+media/
+staticfiles/
+local_settings.py
+
+# Virtual environment
+env/
+venv/
+ENV/
+.venv/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+*.py[cod]
+*$py.class
+.Python
+
+# Environment files
+.env
+*.env
+
+# Backup and temp files
+*.bak
+*.tmp
+*.swp
+*.swo
+*~
+
+# Test / coverage
+.coverage
+htmlcov/
+.tox/
+pytest_cache/
+junit.xml
+
+# Migrations (optional - uncomment if you want to exclude)
+# */migrations/*
+
+# Node (if frontend or build tools are added)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Reports / build artifacts
+dist/
+build/
+tmp.py
+map.py

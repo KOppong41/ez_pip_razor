@@ -1,0 +1,107 @@
+﻿{% extends "admin/base.html" %}
+{% load i18n static %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{% if title and title != "Site administration" %}{{ title }} | {% endif %}EzTrade | Admin{% endblock %}
+
+{% block extrastyle %}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+    :root {
+        --primary: #4361ee;
+        --primary-light: #4895ef;
+        --secondary: #3f37c9;
+        --success: #4cc9f0;
+        --danger: #f72585;
+        --warning: #f8961e;
+        --info: #4cc9f0;
+        --dark: #0f172a;
+        --panel: rgba(15, 23, 42, 0.9);
+        --light: #f8fafc;
+        --muted: #9ca3af;
+        --border: rgba(148, 163, 184, 0.2);
+        --shadow-xl: 0 20px 25px -5px rgba(0,0,0,0.35), 0 10px 10px -5px rgba(0,0,0,0.3);
+    }
+    body, html {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: var(--light);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    }
+    #header, #nav-sidebar, .breadcrumbs { display: none !important; }
+    #container { background: transparent; margin: 0; padding: 0; }
+    #content { margin: 0; padding: 0; }
+    .ez-shell { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    .ez-header { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: 16px; padding: 14px 18px; margin: 16px 16px 0 16px; display: flex; justify-content: space-between; align-items: center; box-shadow: var(--shadow-xl); }
+    .ez-brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--light); font-weight: 700; }
+    .ez-logo { width: 32px; height: 32px; border-radius: 10px; background: var(--primary); display: flex; align-items: center; justify-content: center; }
+    .ez-breadcrumb { color: var(--muted); font-size: 13px; }
+    .ez-breadcrumb a { color: var(--muted); text-decoration: none; }
+    .ez-breadcrumb a:hover { color: var(--light); }
+    .ez-user { position: relative; display: inline-flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 12px; background: rgba(255,255,255,0.06); border: 1px solid var(--border); cursor: pointer; }
+    .ez-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--primary); display: inline-flex; align-items: center; justify-content: center; font-weight: 700; }
+    .ez-menu { display: none; position: absolute; right: 0; top: 44px; min-width: 180px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-xl); z-index: 20; }
+    .ez-menu a { display: block; padding: 10px 12px; color: var(--light); text-decoration: none; font-size: 13px; }
+    .ez-menu a:hover { background: rgba(255,255,255,0.08); }
+    .ez-user.open .ez-menu { display: block; }
+    .ez-card { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; padding: 20px; margin: 16px; box-shadow: var(--shadow-xl); }
+</style>
+{% endblock %}
+
+{% block branding %}{% endblock %}
+{% block nav-global %}{% endblock %}
+
+{% block content %}
+<div class="ez-header">
+    <div>
+        <a href="{% url 'admin:index' %}" class="ez-brand">
+            <div class="ez-logo"><i class="fas fa-chart-line"></i></div>
+            <span>EzTrade</span>
+        </a>
+        <div class="ez-breadcrumb">
+            <a href="{% url 'admin:index' %}">{% trans "Dashboard" %}</a> / <span>{{ title|default:"" }}</span>
+        </div>
+    </div>
+    {% if has_permission %}
+    <div class="ez-user" id="ez-user">
+        <span class="ez-avatar">{{ request.user.get_username|default:'AD'|slice:':2'|upper }}</span>
+        <span>{{ request.user.get_username }}</span>
+        <i class="fas fa-chevron-down" style="font-size:11px;"></i>
+        <div class="ez-menu" id="ez-menu">
+            {% if request.user.is_authenticated %}
+                <a href="{% url 'admin:auth_user_change' request.user.pk %}">{% trans "Profile settings" %}</a>
+                <a href="{% url 'admin:password_change' %}">{% trans "Change password" %}</a>
+                <a href="{% url 'admin:logout' %}">{% trans "Log out" %}</a>
+            {% else %}
+                <a href="{% url 'admin:login' %}">{% trans "Log in" %}</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="ez-shell">
+    <div class="ez-card">
+        {% block messages %}{{ block.super }}{% endblock %}
+        {% block content_inner %}{{ block.super }}{% endblock %}
+    </div>
+</div>
+{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const user = document.getElementById('ez-user');
+    if (user) {
+        user.addEventListener('click', function(e) {
+            e.stopPropagation();
+            user.classList.toggle('open');
+        });
+        document.addEventListener('click', function() {
+            user.classList.remove('open');
+        });
+    }
+});
+</script>
+{% endblock %}
+
+

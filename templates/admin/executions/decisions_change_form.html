@@ -1,0 +1,444 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{% if add %}{% trans 'Add Decision' %}{% else %}{{ original.id|default:original }}{% endif %} | EzTrade{% endblock %}
+
+{% block page_title %}
+    {% if add %}
+        {% trans 'Add Decision' %}
+    {% else %}
+        {% trans 'Decision' %} #{{ original.id|default:"" }}
+    {% endif %}
+{% endblock %}
+{% block page_subtitle %}
+    {% if add %}
+        {% trans 'Create a new trading decision' %}
+    {% else %}
+        {% trans 'Review and manage trading decision details' %}
+    {% endif %}
+{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .decision-form-container {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 0 var(--space-sm);
+    }
+
+    /* Compact form sections */
+    .form-section {
+        background: var(--bg-card);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        border: 1px solid var(--border-light);
+        margin-bottom: var(--space-md);
+    }
+
+    .section-header {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        margin-bottom: var(--space-md);
+        padding-bottom: var(--space-sm);
+        border-bottom: 1px solid var(--border-light);
+    }
+
+    .section-icon {
+        width: 24px;
+        height: 24px;
+        border-radius: var(--radius-sm);
+        background: var(--primary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-sm);
+        flex-shrink: 0;
+    }
+
+    .section-title {
+        font-size: var(--text-base);
+        font-weight: 600;
+        color: var(--light);
+        margin: 0;
+    }
+
+    .section-subtitle {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        margin: 0;
+    }
+
+    /* Compact form grid */
+    .form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: var(--space-md);
+    }
+
+    .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .form-label {
+        font-size: var(--text-sm);
+        font-weight: 500;
+        color: var(--gray-300);
+        margin: 0;
+    }
+
+    .form-control {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        padding: var(--space-sm);
+        color: var(--light);
+        font-size: var(--text-sm);
+        min-height: 36px;
+    }
+
+    .form-text {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        line-height: 1.3;
+        margin: 0;
+    }
+
+    /* Compact related items */
+    .related-items {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--space-sm);
+        margin-top: var(--space-md);
+    }
+
+    .related-card {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        border: 1px solid var(--border-light);
+        cursor: pointer;
+    }
+
+    .related-icon {
+        font-size: var(--text-base);
+        color: var(--primary-light);
+        margin-bottom: var(--space-xs);
+    }
+
+    .related-title {
+        font-size: var(--text-xs);
+        font-weight: 600;
+        color: var(--light);
+        margin: 0 0 var(--space-xs) 0;
+    }
+
+    .related-value {
+        font-size: var(--text-base);
+        font-weight: 700;
+        color: var(--success);
+        margin: 0;
+    }
+
+    /* Compact form actions */
+    .form-actions {
+        display: flex;
+        gap: var(--space-sm);
+        justify-content: flex-end;
+        padding: var(--space-md) 0;
+        margin-top: var(--space-md);
+        flex-wrap: wrap;
+    }
+
+    /* Compact header actions */
+    .header-actions {
+        margin-bottom: var(--space-md);
+    }
+
+    /* Smaller status badges */
+    .status-badge {
+        padding: 2px 8px;
+        font-size: 0.7rem;
+    }
+
+    .status-badge i {
+        font-size: 0.5rem;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+        .decision-form-container {
+            padding: 0 var(--space-xs);
+        }
+
+        .form-section {
+            padding: var(--space-sm);
+        }
+
+        .form-grid {
+            grid-template-columns: 1fr;
+            gap: var(--space-sm);
+        }
+
+        .form-actions {
+            flex-direction: column;
+        }
+
+        .form-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .section-header {
+            margin-bottom: var(--space-sm);
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="decision-form-container">
+    <!-- Compact Header Actions -->
+    <div class="header-actions" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-sm);">
+        <a href="{% url 'admin:execution_decision_changelist' %}" class="btn btn-outline btn-sm">
+            <i class="fas fa-arrow-left"></i> {% trans 'All Decisions' %}
+        </a>
+        
+        {% if not add and original %}
+        <div style="display: flex; gap: var(--space-sm); align-items: center; flex-wrap: wrap;">
+            <span class="status-badge status-{{ original.status|default:'pending'|lower }}">
+                <i class="fas fa-circle"></i>
+                {{ original.get_status_display|default:"Pending" }}
+            </span>
+            {% if original.action %}
+            <span class="status-badge action-{{ original.action|lower }}">
+                <i class="fas fa-{% if original.action == 'BUY' %}arrow-up{% elif original.action == 'SELL' %}arrow-down{% else %}pause{% endif %}"></i>
+                {{ original.action }}
+            </span>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <form {% if has_file_field %}enctype="multipart/form-data" {% endif %}{% if form_url %}action="{{ form_url }}" {% endif %}method="post" id="{{ opts.model_name }}_form" novalidate>
+        {% csrf_token %}
+        {% block form_top %}{% endblock %}
+        <input type="hidden" name="is_popup" value="{{ is_popup }}">
+        {% if to_field %}<input type="hidden" name="{{ to_field }}" value="{{ to_field_value }}">{% endif %}
+        
+        {% if adminform.form.non_field_errors %}
+        <div class="alert alert-danger" style="margin-bottom: var(--space-md); padding: var(--space-sm);">
+            <strong>{% trans 'Form errors:' %}</strong>
+            <ul style="margin: var(--space-xs) 0 0 var(--space-md);">
+            {% for error in adminform.form.non_field_errors %}
+                <li>{{ error }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Basic Information Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon">
+                    <i class="fas fa-info-circle"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Decision Information' %}</div>
+                    <div class="section-subtitle">{% trans 'Core details and status' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% for field in adminform %}
+                    {% if field.name in "status,action,confidence,strategy" %}
+                    <div class="form-group">
+                        <label for="{{ field.id_for_label }}" class="form-label">
+                            {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                        </label>
+                        {{ field }}
+                        {% if field.help_text %}
+                        <div class="form-text">{{ field.help_text }}</div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Signal Information Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon">
+                    <i class="fas fa-bullseye"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Signal Information' %}</div>
+                    <div class="section-subtitle">{% trans 'Source signal details' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% for field in adminform %}
+                    {% if field.name == "signal" %}
+                    <div class="form-group">
+                        <label for="{{ field.id_for_label }}" class="form-label">
+                            {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                        </label>
+                        {{ field }}
+                        {% if field.help_text %}
+                        <div class="form-text">{{ field.help_text }}</div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                {% endfor %}
+
+                {% if not add and original.signal %}
+                <div class="form-group">
+                    <div class="form-label">{% trans 'Signal Details' %}</div>
+                    <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-light); border-radius: var(--radius-md); padding: var(--space-sm); color: var(--gray-300); font-size: var(--text-sm);">
+                        <strong>{{ original.signal.symbol }}</strong> · 
+                        {{ original.signal.direction }}<br>
+                        <small>Score: {{ original.signal.score|default:"N/A" }} | {{ original.signal.received_at|date:"M j, H:i" }}</small>
+                    </div>
+                    <div style="display: flex; gap: var(--space-xs); margin-top: var(--space-sm);">
+                        <a href="{% url 'admin:execution_signal_change' original.signal.id %}" class="btn btn-outline btn-sm">
+                            <i class="fas fa-external-link-alt"></i> {% trans 'View' %}
+                        </a>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Decision Details Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon">
+                    <i class="fas fa-brain"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Decision Details' %}</div>
+                    <div class="section-subtitle">{% trans 'Reasoning and metadata' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% for field in adminform %}
+                    {% if field.name in "reasoning,metadata" %}
+                    <div class="form-group">
+                        <label for="{{ field.id_for_label }}" class="form-label">
+                            {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                        </label>
+                        {{ field }}
+                        {% if field.help_text %}
+                        <div class="form-text">{{ field.help_text }}</div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Related Information -->
+        {% if not add and original %}
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon">
+                    <i class="fas fa-network-wired"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Related Information' %}</div>
+                    <div class="section-subtitle">{% trans 'Linked orders and execution' %}</div>
+                </div>
+            </div>
+
+            <div class="related-items">
+                <div class="related-card" onclick="location.href='{% url 'admin:execution_order_changelist' %}?decision__id__exact={{ original.id }}'">
+                    <div class="related-icon">
+                        <i class="fas fa-shopping-cart"></i>
+                    </div>
+                    <div class="related-title">{% trans 'Orders' %}</div>
+                    <div class="related-value">{{ original.orders.count|default:0 }}</div>
+                </div>
+
+                {% if original.bot %}
+                <div class="related-card" onclick="location.href='{% url 'admin:bots_bot_change' original.bot.id %}'">
+                    <div class="related-icon">
+                        <i class="fas fa-robot"></i>
+                    </div>
+                    <div class="related-title">{% trans 'Bot' %}</div>
+                    <div class="related-value" style="font-size: var(--text-sm);">{{ original.bot.name|truncatechars:12 }}</div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Compact Form Actions -->
+        <div class="form-actions">
+            <button type="submit" name="_save" class="btn btn-primary btn-sm">
+                <i class="fas fa-save"></i> {% trans 'Save' %}
+            </button>
+            <button type="submit" name="_addanother" class="btn btn-outline btn-sm">
+                <i class="fas fa-plus"></i> {% trans 'Save & Add Another' %}
+            </button>
+            <button type="submit" name="_continue" class="btn btn-outline btn-sm">
+                <i class="fas fa-edit"></i> {% trans 'Save & Continue' %}
+            </button>
+            {% if not add %}
+            <a href="{% url opts|admin_urlname:'delete' original.pk|admin_urlquote %}" class="btn btn-danger btn-sm">
+                <i class="fas fa-trash"></i> {% trans 'Delete' %}
+            </a>
+            {% endif %}
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Style form elements
+    const styleFormElements = () => {
+        const inputs = document.querySelectorAll('input, select, textarea');
+        inputs.forEach(input => {
+            if (!input.classList.contains('form-control')) {
+                input.classList.add('form-control');
+            }
+        });
+    };
+    styleFormElements();
+
+    // Confidence indicator
+    const confidenceInput = document.getElementById('id_confidence');
+    if (confidenceInput) {
+        const updateConfidenceDisplay = () => {
+            const value = parseFloat(confidenceInput.value) || 0;
+            const parent = confidenceInput.parentNode;
+            const existingIndicator = parent.querySelector('.confidence-indicator');
+            if (existingIndicator) existingIndicator.remove();
+
+            if (value > 0) {
+                let level = 'low';
+                if (value >= 0.7) level = 'high';
+                else if (value >= 0.4) level = 'medium';
+
+                const indicator = document.createElement('div');
+                indicator.className = `status-badge confidence-${level}`;
+                indicator.style.marginTop = '4px';
+                indicator.innerHTML = `<i class="fas fa-gauge-${level === 'high' ? 'high' : level === 'medium' ? 'med' : 'low'}"></i> ${(value * 100).toFixed(0)}%`;
+                parent.appendChild(indicator);
+            }
+        };
+        confidenceInput.addEventListener('input', updateConfidenceDisplay);
+        updateConfidenceDisplay();
+    }
+});
+</script>
+{% endblock %}

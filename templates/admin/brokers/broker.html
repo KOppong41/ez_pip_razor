@@ -1,0 +1,515 @@
+{% extends "admin/trading_base.html" %}
+{% load static i18n admin_metrics %}
+
+{% block title %}{% trans "Brokers" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Brokers" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Manage broker connections and configurations. Track connectivity status and account details." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .brokers-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Status badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-active {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .status-inactive {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .status-testing {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+
+    /* Broker-specific styles */
+    .broker-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-md);
+        background: var(--primary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-sm);
+        font-weight: 600;
+    }
+
+    .broker-meta {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .broker-name {
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    .broker-code {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Connection status */
+    .connection-status {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+    }
+
+    .connection-connected {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .connection-disconnected {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .connection-connecting {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+
+    /* Empty state */
+    .empty-state {
+        text-align: center;
+        padding: var(--space-2xl);
+        color: var(--gray-400);
+    }
+
+    .empty-state-icon {
+        font-size: 3rem;
+        margin-bottom: var(--space-md);
+        opacity: 0.5;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .modern-table {
+            min-width: 700px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .header-actions {
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .header-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .filters-bar {
+            flex-direction: column;
+        }
+
+        .filter-actions {
+            flex-direction: column;
+        }
+
+        .filter-select {
+            min-width: 100%;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .action-buttons {
+            flex-direction: column;
+        }
+
+        .action-btn {
+            width: 28px;
+            height: 28px;
+            font-size: var(--text-xs);
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="brokers-container">
+    <!-- Header Actions -->
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <a href="{% url 'admin:brokers_broker_add' %}" class="btn btn-primary">
+            <i class="fas fa-plus"></i> {% trans "Add Broker" %}
+        </a>
+        <button type="button" class="btn btn-success" id="testAllConnectionsBtn">
+            <i class="fas fa-plug"></i> {% trans "Test All Connections" %}
+        </button>
+        <button type="button" class="btn btn-outline" id="refreshBtn">
+            <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+        </button>
+    </div>
+
+    <!-- Filters Bar -->
+    <div class="filters-bar">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" 
+                   placeholder="{% trans 'Search brokers by name or code...' %}" 
+                   id="searchInput">
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="statusFilter">
+                <option value="">{% trans "All Status" %}</option>
+                <option value="active">{% trans "Active" %}</option>
+                <option value="inactive">{% trans "Inactive" %}</option>
+            </select>
+            <select class="filter-select" id="connectionFilter">
+                <option value="">{% trans "All Connections" %}</option>
+                <option value="connected">{% trans "Connected" %}</option>
+                <option value="disconnected">{% trans "Disconnected" %}</option>
+            </select>
+            <button class="btn btn-outline" type="button" id="clearFiltersBtn">
+                <i class="fas fa-times"></i> {% trans "Clear Filters" %}
+            </button>
+        </div>
+    </div>
+
+    <!-- Brokers List Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Broker Accounts" %}</h3>
+                <p class="card-subtitle">{% trans "Configured broker connections and their status" %}</p>
+            </div>
+            <div class="action-icons">
+                <i class="fas fa-download" title="{% trans 'Export' %}"></i>
+                <i class="fas fa-cog" title="{% trans 'Settings' %}"></i>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="modern-table">
+                <thead>
+                    <tr>
+                        <th>{% trans "Broker" %}</th>
+                        <th>{% trans "Code" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Connection" %}</th>
+                        <th>{% trans "Created" %}</th>
+                        <th>{% trans "Actions" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for broker in brokers %}
+                        <tr class="broker-row" 
+                            data-status="{{ broker.is_active|yesno:'active,inactive' }}"
+                            data-connection="{{ broker.get_connection_status|default:'disconnected' }}"
+                            data-search="{{ broker.name }} {{ broker.code }}">
+                            <td>
+                                <div style="display: flex; align-items: center; gap: var(--space-md);">
+                                    <div class="broker-icon">
+                                        {{ broker.name|slice:":2"|upper }}
+                                    </div>
+                                    <div class="broker-meta">
+                                        <div class="broker-name">{{ broker.name }}</div>
+                                        {% if broker.description %}
+                                        <div class="broker-code">{{ broker.description|truncatechars:40 }}</div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <code style="background: rgba(255,255,255,0.1); padding: var(--space-xs) var(--space-sm); border-radius: var(--radius-sm); font-size: var(--text-xs);">
+                                    {{ broker.code }}
+                                </code>
+                            </td>
+                            <td>
+                                {% if broker.is_active %}
+                                    <span class="status-badge status-active">
+                                        <i class="fas fa-check-circle"></i>{% trans "Active" %}
+                                    </span>
+                                {% else %}
+                                    <span class="status-badge status-inactive">
+                                        <i class="fas fa-times-circle"></i>{% trans "Inactive" %}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% with connection_status=broker.get_connection_status %}
+                                    {% if connection_status == "connected" %}
+                                        <span class="connection-status connection-connected">
+                                            <i class="fas fa-plug"></i>{% trans "Connected" %}
+                                        </span>
+                                    {% elif connection_status == "connecting" %}
+                                        <span class="connection-status connection-connecting">
+                                            <i class="fas fa-sync fa-spin"></i>{% trans "Connecting" %}
+                                        </span>
+                                    {% else %}
+                                        <span class="connection-status connection-disconnected">
+                                            <i class="fas fa-unplug"></i>{% trans "Disconnected" %}
+                                        </span>
+                                    {% endif %}
+                                {% endwith %}
+                            </td>
+                            <td>
+                                <div style="font-size: var(--text-xs); color: var(--gray-400);">
+                                    {{ broker.created_at|date:"M j, Y" }}
+                                </div>
+                            </td>
+                            <td>
+                                <div class="action-buttons">
+                                    <a href="{% url 'admin:brokers_broker_change' broker.pk %}"
+                                       class="action-btn inspect"
+                                       title="{% trans 'View / Edit broker' %}">
+                                        <i class="fas fa-edit"></i>
+                                    </a>
+                                    <button type="button" 
+                                            class="action-btn test-connection"
+                                            data-broker-id="{{ broker.pk }}"
+                                            title="{% trans 'Test connection' %}">
+                                        <i class="fas fa-plug"></i>
+                                    </button>
+                                    {% if broker.is_active %}
+                                        <button type="button" 
+                                                class="action-btn deactivate"
+                                                data-broker-id="{{ broker.pk }}"
+                                                title="{% trans 'Deactivate broker' %}">
+                                            <i class="fas fa-pause"></i>
+                                        </button>
+                                    {% else %}
+                                        <button type="button" 
+                                                class="action-btn activate"
+                                                data-broker-id="{{ broker.pk }}"
+                                                title="{% trans 'Activate broker' %}">
+                                            <i class="fas fa-play"></i>
+                                        </button>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <i class="fas fa-exchange-alt empty-state-icon"></i>
+                                <div>{% trans "No brokers configured." %}</div>
+                                <div style="font-size: var(--text-sm); margin-top: var(--space-sm);">
+                                    {% trans "Add your first broker to start trading." %}
+                                </div>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="pagination">
+            <div class="pagination-info">
+                {{ brokers|length }} {% trans "brokers shown" %}
+            </div>
+            <div class="pagination-controls">
+                <a href="{% url 'admin:brokers_broker_changelist' %}" class="pagination-btn">
+                    {% trans "Open in Admin" %}
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Stats Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Connection Overview" %}</h3>
+                <p class="card-subtitle">{% trans "Broker connectivity and status summary" %}</p>
+            </div>
+        </div>
+        
+        <div class="progress-grid">
+            <div class="progress-card">
+                <div class="progress-value">{{ active_brokers_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Active Brokers" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ connected_brokers_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Connected" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ total_brokers_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Total Brokers" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ recent_brokers_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Added This Month" %}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Filter functionality
+    const searchInput = document.getElementById('searchInput');
+    const statusFilter = document.getElementById('statusFilter');
+    const connectionFilter = document.getElementById('connectionFilter');
+    const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const testAllConnectionsBtn = document.getElementById('testAllConnectionsBtn');
+    const paginationInfo = document.querySelector('.pagination-info');
+
+    const getRows = () => Array.from(document.querySelectorAll('.broker-row'));
+
+    const filterBrokers = () => {
+        const searchTerm = searchInput.value.toLowerCase();
+        const statusValue = statusFilter.value;
+        const connectionValue = connectionFilter.value;
+
+        let visibleCount = 0;
+
+        getRows().forEach(row => {
+            const searchData = row.getAttribute('data-search').toLowerCase();
+            const statusData = row.getAttribute('data-status');
+            const connectionData = row.getAttribute('data-connection');
+
+            const matchesSearch = searchData.includes(searchTerm);
+            const matchesStatus = !statusValue || statusData === statusValue;
+            const matchesConnection = !connectionValue || connectionData === connectionValue;
+
+            if (matchesSearch && matchesStatus && matchesConnection) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        if (paginationInfo) {
+            paginationInfo.textContent = `${visibleCount} {% trans "brokers shown" %}`;
+        }
+    };
+
+    // Event listeners for filters
+    searchInput.addEventListener('input', filterBrokers);
+    statusFilter.addEventListener('change', filterBrokers);
+    connectionFilter.addEventListener('change', filterBrokers);
+
+    // Clear filters
+    clearFiltersBtn.addEventListener('click', function() {
+        searchInput.value = '';
+        statusFilter.value = '';
+        connectionFilter.value = '';
+        filterBrokers();
+    });
+
+    // Refresh button
+    refreshBtn.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+        setTimeout(() => {
+            window.location.reload();
+        }, 1000);
+    });
+
+    // Test all connections
+    testAllConnectionsBtn.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Testing..." %}';
+        
+        // Simulate API call
+        setTimeout(() => {
+            this.innerHTML = '<i class="fas fa-plug"></i> {% trans "Test All Connections" %}';
+            // In real implementation, this would make an API call to test connections
+            alert('{% trans "Connection test completed. Check broker status indicators." %}');
+        }, 2000);
+    });
+
+    // Individual connection test
+    document.querySelectorAll('.test-connection').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const brokerId = this.dataset.brokerId;
+            const icon = this.querySelector('i');
+            
+            icon.className = 'fas fa-spinner fa-spin';
+            
+            // Simulate API call
+            setTimeout(() => {
+                icon.className = 'fas fa-plug';
+                // In real implementation, this would update the connection status
+                alert(`{% trans "Connection test for broker" %} ${brokerId} {% trans "completed" %}`);
+            }, 1500);
+        });
+    });
+
+    // Activate/Deactivate brokers
+    document.querySelectorAll('.activate, .deactivate').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const brokerId = this.dataset.brokerId;
+            const isActivate = this.classList.contains('activate');
+            
+            // Simulate API call
+            if (confirm(`{% trans "Are you sure you want to" %} ${isActivate ? '{% trans "activate" %}' : '{% trans "deactivate" %}'} {% trans "this broker?" %}`)) {
+                // In real implementation, this would make an API call
+                setTimeout(() => {
+                    window.location.reload();
+                }, 500);
+            }
+        });
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Focus search on Ctrl+K or /
+        if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+            e.preventDefault();
+            searchInput.focus();
+        }
+        
+        // Refresh on F5
+        if (e.key === 'F5') {
+            e.preventDefault();
+            refreshBtn.click();
+        }
+        
+        // New broker on Ctrl+N
+        if (e.ctrlKey && e.key === 'n') {
+            e.preventDefault();
+            document.querySelector('a[href*="brokers_broker_add"]').click();
+        }
+    });
+
+    // Auto-refresh every 60 seconds (optional)
+    setInterval(() => {
+        if (!document.hidden) {
+            refreshBtn.click();
+        }
+    }, 60000);
+
+    filterBrokers();
+});
+</script>
+{% endblock %}

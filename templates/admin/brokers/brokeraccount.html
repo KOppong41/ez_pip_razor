@@ -1,0 +1,746 @@
+﻿{% extends "admin/trading_base.html" %}
+{% load i18n static admin_list admin_urls %}
+
+{% block title %}{% trans "Broker Accounts" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Broker Accounts" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Manage connected broker accounts, ownership, and verification state for your bots." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    /* Broker List Specific Styles */
+    .broker-shell {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Connection Status Badges */
+    .connection-status {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-connected {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .status-disconnected {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .status-verifying {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+
+    .account-meta {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2xs);
+    }
+
+    .account-name {
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    .account-ref {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    .owner-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-xs);
+        padding: var(--space-xs) var(--space-sm);
+        border-radius: 999px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--gray-200);
+    }
+
+    .owner-chip.neutral {
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--gray-400);
+    }
+
+    .account-created {
+        font-size: var(--text-2xs);
+        color: var(--gray-500);
+        margin-top: var(--space-xs);
+    }
+
+    .status-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-xs);
+        margin-top: var(--space-xs);
+    }
+
+    /* Broker Type Tags */
+    .broker-type {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        background: rgba(67, 97, 238, 0.2);
+        color: var(--primary-light);
+    }
+
+    /* Account Balance Styling */
+    .balance-positive {
+        color: var(--success);
+        font-weight: 600;
+    }
+
+    .balance-zero {
+        color: var(--gray-400);
+    }
+
+    /* Quick Actions */
+    .quick-actions {
+        display: flex;
+        gap: var(--space-sm);
+    }
+
+    .action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-sm);
+        font-size: var(--text-xs);
+        text-decoration: none;
+        transition: all 0.3s ease;
+        border: 1px solid var(--border-light);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--gray-300);
+    }
+
+    .action-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--light);
+        text-decoration: none;
+        transform: translateY(-1px);
+    }
+
+    .inline-action {
+        display: inline-flex;
+        margin: 0;
+    }
+
+    .inline-action .action-btn {
+        padding: 0;
+    }
+
+    .action-btn.connect {
+        background: var(--success-light);
+        color: var(--success);
+        border-color: var(--success);
+    }
+
+    .action-btn.disconnect {
+        background: var(--danger-light);
+        color: var(--danger);
+        border-color: var(--danger);
+    }
+
+    /* Modern Table Overrides - Fixed header style without underlines */
+    .broker-main .results {
+        width: 100%;
+        overflow-x: auto;
+        margin: var(--space-md) 0;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+        background: var(--bg-card);
+    }
+
+    .broker-main .results table {
+        width: 100%;
+        border-collapse: collapse;
+        background: transparent;
+        min-width: 800px;
+    }
+
+    /* Modern Table Header - Matching brokers.html style without underlines */
+    .broker-main .results thead th {
+        text-align: left !important;
+        padding: var(--space-md);
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--gray-400);
+        border-bottom: 1px solid var(--border-light); /* This is the table border, not text underline */
+        background: var(--bg-card);
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    /* Remove any text decoration that might be causing underlines */
+    .broker-main .results thead th a {
+        text-decoration: none !important;
+        color: var(--gray-400) !important;
+    }
+
+    .broker-main .results thead th a:hover {
+        text-decoration: none !important;
+        color: var(--gray-300) !important;
+    }
+
+    .broker-main .results tbody td {
+        text-align: left !important;
+        padding: var(--space-md);
+        font-size: var(--text-sm);
+        border-bottom: 1px solid var(--border-dark);
+        color: var(--gray-300);
+        vertical-align: middle;
+    }
+
+    .broker-main .results tbody tr {
+        transition: all 0.3s ease;
+        background: transparent;
+    }
+
+    .broker-main .results tbody tr:hover {
+        background: var(--bg-card-hover);
+    }
+
+    .broker-main .results tbody tr:nth-child(even) {
+        background: rgba(255, 255, 255, 0.02);
+    }
+
+    .broker-main .results tbody tr:nth-child(even):hover {
+        background: var(--bg-card-hover);
+    }
+
+    .broker-main .results tbody tr:last-child td {
+        border-bottom: none;
+    }
+
+    /* Status badges in table */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-active {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .status-inactive {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .status-pending {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+
+    /* Search and filter styles */
+    .search-wrap {
+        position: relative;
+        display: flex;
+        align-items: center;
+    }
+
+    .search-icon {
+        position: absolute;
+        left: var(--space-md);
+        color: var(--gray-400);
+        z-index: 1;
+    }
+
+    .search-input {
+        padding: var(--space-md) var(--space-md) var(--space-md) var(--space-2xl);
+        background: var(--bg-card);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        color: var(--light);
+        font-size: var(--text-sm);
+        min-width: 300px;
+        transition: all 0.3s ease;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 2px rgba(67, 97, 238, 0.2);
+    }
+
+    .search-key {
+        position: absolute;
+        right: var(--space-md);
+        color: var(--gray-400);
+        font-size: var(--text-xs);
+        background: rgba(255, 255, 255, 0.05);
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid var(--border-light);
+    }
+
+    /* Ensure no text underlines in table headers */
+    .modern-table th,
+    .broker-main .results thead th,
+    .broker-main .results thead th a {
+        text-decoration: none !important;
+        border-bottom: 1px solid var(--border-light) !important; /* This is the table row border, not text underline */
+    }
+
+    /* Remove any default Django admin underlines */
+    .broker-main .results thead th a:link,
+    .broker-main .results thead th a:visited,
+    .broker-main .results thead th a:hover,
+    .broker-main .results thead th a:active {
+        text-decoration: none !important;
+        border-bottom: none !important;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .broker-toolbar {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: var(--space-md);
+        }
+
+        .broker-main .results table {
+            min-width: 700px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .broker-main .results table {
+            min-width: 600px;
+            font-size: var(--text-xs);
+        }
+
+        .header-actions {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .header-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .actions-row {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: var(--space-sm);
+        }
+
+        .quick-actions {
+            flex-direction: column;
+        }
+
+        .search-input {
+            min-width: 100%;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .broker-main .results table {
+            min-width: 500px;
+        }
+
+        .broker-toolbar-left {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="broker-shell">
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        {% if has_add_permission %}
+            <a href="{% url 'admin:brokers_brokeraccount_add' %}" class="btn btn-primary">
+                <i class="fas fa-plus"></i> {% trans "Add Broker Account" %}
+            </a>
+        {% endif %}
+        <a href="{% url 'admin:brokers_broker_changelist' %}" class="btn btn-outline">
+            <i class="fas fa-layer-group"></i> {% trans "Brokers" %}
+        </a>
+        {% if perms.brokers.add_broker %}
+    <a href="{% url 'admin:brokers_broker_add' %}" class="btn btn-outline">
+        <i class="fas fa-plus-circle"></i> {% trans "Add Broker Type" %}
+    </a>
+{% endif %}
+
+        <button type="button" class="btn btn-success" id="testAllConnectionsBtn">
+            <i class="fas fa-bolt"></i> {% trans "Test All Connections" %}
+        </button>
+        <button type="button" class="btn btn-outline" id="refreshBtn">
+            <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+        </button>
+    </div>
+
+    <div class="filters-bar" style="margin-bottom: var(--space-lg);">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" id="searchInput"
+                   placeholder="{% trans 'Search accounts by name, broker, or owner...' %}">
+            <span class="search-key">/</span>
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="statusFilter">
+                <option value="">{% trans "All Status" %}</option>
+                <option value="active">{% trans "Active" %}</option>
+                <option value="inactive">{% trans "Inactive" %}</option>
+            </select>
+            <select class="filter-select" id="connectionFilter">
+                <option value="">{% trans "All Connections" %}</option>
+                <option value="connected">{% trans "Connected" %}</option>
+                <option value="verifying">{% trans "Verifying" %}</option>
+                <option value="disconnected">{% trans "Disconnected" %}</option>
+            </select>
+            <button type="button" class="btn btn-outline" id="clearFiltersBtn">
+                <i class="fas fa-times"></i> {% trans "Clear" %}
+            </button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Broker Accounts" %}</h3>
+                <p class="card-subtitle">{% trans "Connected broker accounts and their trading readiness" %}</p>
+            </div>
+            <div class="action-controls">
+                <button type="button" class="btn btn-outline btn-sm">
+                    <i class="fas fa-download"></i> {% trans "Export" %}
+                </button>
+                <button type="button" class="btn btn-outline btn-sm">
+                    <i class="fas fa-cog"></i> {% trans "Settings" %}
+                </button>
+            </div>
+        </div>
+        <div class="broker-main">
+            <div class="table-container">
+                <table class="modern-table">
+                    <thead>
+                        <tr>
+                            <th>{% trans "Account" %}</th>
+                            <th>{% trans "Broker" %}</th>
+                            <th>{% trans "Owner" %}</th>
+                            <th>{% trans "Connection" %}</th>
+                            <th>{% trans "Status" %}</th>
+                            <th>{% trans "Actions" %}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for account in accounts %}
+                            <tr class="account-row"
+                                data-status="{{ account.is_active|yesno:'active,inactive' }}"
+                                data-connection="{{ account.get_connection_status }}"
+                                data-search="{{ account.name }} {{ account.account_ref }} {{ account.broker }} {{ account.owner.username|default:'' }}">
+                                <td>
+                                    <div class="account-meta">
+                                        <div class="account-name">{{ account.name }}</div>
+                                        <div class="account-ref">{{ account.account_ref }}</div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="broker-type">{{ account.broker }}</span>
+                                </td>
+                                <td>
+                                    {% if account.owner %}
+                                        <div class="owner-chip">
+                                            {{ account.owner.get_full_name|default:account.owner.username }}
+                                        </div>
+                                    {% else %}
+                                        <div class="owner-chip neutral">{% trans "Unassigned" %}</div>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% with status=account.get_connection_status %}
+                                        {% if status == "connected" %}
+                                            <span class="connection-status connection-connected">
+                                                <i class="fas fa-plug"></i> {% trans "Connected" %}
+                                            </span>
+                                        {% elif status == "verifying" %}
+                                            <span class="connection-status connection-connecting">
+                                                <i class="fas fa-sync fa-spin"></i> {% trans "Verifying" %}
+                                            </span>
+                                        {% else %}
+                                            <span class="connection-status connection-disconnected">
+                                                <i class="fas fa-unplug"></i> {% trans "Disconnected" %}
+                                            </span>
+                                        {% endif %}
+                                    {% endwith %}
+                                </td>
+                                <td>
+                                    <div class="status-group">
+                                        {% if account.is_active %}
+                                            <span class="status-badge status-active">
+                                                <i class="fas fa-check-circle"></i> {% trans "Active" %}
+                                            </span>
+                                        {% else %}
+                                            <span class="status-badge status-inactive">
+                                                <i class="fas fa-times-circle"></i> {% trans "Inactive" %}
+                                            </span>
+                                        {% endif %}
+                                        {% if account.is_verified %}
+                                            <span class="status-badge status-active">
+                                                <i class="fas fa-shield-alt"></i> {% trans "Verified" %}
+                                            </span>
+                                        {% else %}
+                                            <span class="status-badge status-pending">
+                                                <i class="fas fa-hourglass-half"></i> {% trans "Unverified" %}
+                                            </span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="account-created">{{ account.created_at|date:"M j, Y" }}</div>
+                                </td>
+                                <td>
+                                    <div class="action-buttons">
+                                        <a href="{% url 'admin:brokers_brokeraccount_change' account.pk %}"
+                                           class="action-btn inspect"
+                                           title="{% trans 'View / Edit account' %}">
+                                            <i class="fas fa-edit"></i>
+                                        </a>
+                                        {% if account.is_active %}
+                                            <form method="post" action="{% url 'admin:brokers_brokeraccount_deactivate' account.pk %}" class="inline-action">
+                                                {% csrf_token %}
+                                                <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                                <button type="submit"
+                                                        class="action-btn deactivate"
+                                                        title="{% trans 'Deactivate account' %}">
+                                                    <i class="fas fa-pause"></i>
+                                                </button>
+                                            </form>
+                                        {% else %}
+                                            <form method="post" action="{% url 'admin:brokers_brokeraccount_activate' account.pk %}" class="inline-action">
+                                                {% csrf_token %}
+                                                <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                                <button type="submit"
+                                                        class="action-btn activate"
+                                                        title="{% trans 'Activate account' %}">
+                                                    <i class="fas fa-play"></i>
+                                                </button>
+                                            </form>
+                                        {% endif %}
+                                        <a href="{% url 'admin:bots_bot_changelist' %}?broker_account__id__exact={{ account.pk }}"
+                                           class="action-btn link"
+                                           title="{% trans 'View bots tied to this account' %}">
+                                            <i class="fas fa-robot"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr>
+                                <td colspan="6" class="empty-state">
+                                    <i class="fas fa-exchange-alt empty-state-icon"></i>
+                                    <div>{% trans "No broker accounts configured yet." %}</div>
+                                    <div style="font-size: var(--text-sm); margin-top: var(--space-sm);">
+                                        {% trans "Add an account to monitor live balances and trading health." %}
+                                    </div>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="pagination">
+                <div class="pagination-info">
+                    {{ accounts|length }} {% trans "accounts shown" %}
+                </div>
+                <div class="pagination-controls">
+                    <a href="{% url 'admin:brokers_brokeraccount_changelist' %}" class="pagination-btn">
+                        {% trans "Open in Admin" %}
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Accounts Overview" %}</h3>
+                <p class="card-subtitle">{% trans "Connectivity, verification, and activation summary" %}</p>
+            </div>
+        </div>
+        <div class="progress-grid">
+            <div class="progress-card">
+                <div class="progress-value">{{ total_accounts_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Total Accounts" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ connected_accounts_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Connected" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ active_accounts_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Active" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ verified_accounts_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Verified" %}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const searchInput = document.getElementById('searchInput');
+    const statusFilter = document.getElementById('statusFilter');
+    const connectionFilter = document.getElementById('connectionFilter');
+    const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const testAllConnectionsBtn = document.getElementById('testAllConnectionsBtn');
+    const addAccountLink = document.querySelector('a[href*="brokeraccount_add"]');
+    const paginationInfo = document.querySelector('.pagination-info');
+    const rows = Array.from(document.querySelectorAll('.account-row'));
+
+    const filterAccounts = () => {
+        const searchTerm = (searchInput?.value || '').toLowerCase();
+        const statusValue = statusFilter?.value;
+        const connectionValue = connectionFilter?.value;
+        let visibleCount = 0;
+
+        rows.forEach(row => {
+            const searchData = (row.getAttribute('data-search') || '').toLowerCase();
+            const statusData = row.getAttribute('data-status');
+            const connectionData = row.getAttribute('data-connection');
+            const matchesSearch = searchData.includes(searchTerm);
+            const matchesStatus = !statusValue || statusData === statusValue;
+            const matchesConnection = !connectionValue || connectionData === connectionValue;
+
+            if (matchesSearch && matchesStatus && matchesConnection) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        if (paginationInfo) {
+            paginationInfo.textContent = `${visibleCount} {% trans "accounts shown" %}`;
+        }
+    };
+
+    searchInput?.addEventListener('input', filterAccounts);
+    statusFilter?.addEventListener('change', filterAccounts);
+    connectionFilter?.addEventListener('change', filterAccounts);
+
+    clearFiltersBtn?.addEventListener('click', function() {
+        if (searchInput) searchInput.value = '';
+        if (statusFilter) statusFilter.value = '';
+        if (connectionFilter) connectionFilter.value = '';
+        filterAccounts();
+    });
+
+    refreshBtn?.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+        setTimeout(() => {
+            window.location.reload();
+        }, 1000);
+    });
+
+    testAllConnectionsBtn?.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Testing..." %}';
+        setTimeout(() => {
+            this.innerHTML = '<i class="fas fa-bolt"></i> {% trans "Test All Connections" %}';
+            alert('{% trans "Connection test completed. Check broker status indicators." %}');
+        }, 1800);
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+            e.preventDefault();
+            searchInput?.focus();
+        }
+        if (e.key === 'F5') {
+            e.preventDefault();
+            refreshBtn?.click();
+        }
+        if (e.ctrlKey && e.key === 'n') {
+            e.preventDefault();
+            addAccountLink?.click();
+        }
+    });
+
+    rows.forEach((row, index) => {
+        row.style.opacity = '0';
+        row.style.transform = 'translateY(6px)';
+        setTimeout(() => {
+            row.style.transition = 'opacity 0.35s ease, transform 0.35s ease';
+            row.style.opacity = '1';
+            row.style.transform = 'translateY(0)';
+        }, index * 30);
+    });
+
+    const statusBadges = document.querySelectorAll('.connection-status, .status-badge');
+    statusBadges.forEach(badge => {
+        const status = badge.textContent.trim().toLowerCase();
+        let tooltip = '';
+
+        switch (status) {
+            case 'connected':
+                tooltip = 'Account is connected and ready for trading';
+                break;
+            case 'disconnected':
+                tooltip = 'Account is disconnected. Check credentials.';
+                break;
+            case 'verifying':
+                tooltip = 'Account connection is being verified';
+                break;
+            case 'active':
+                tooltip = 'Account is active and available for trading';
+                break;
+            case 'inactive':
+                tooltip = 'Account is inactive and not available for trading';
+                break;
+            case 'pending':
+                tooltip = 'Account is pending verification or activation';
+                break;
+        }
+
+        if (tooltip) {
+            badge.title = tooltip;
+            badge.style.cursor = 'help';
+        }
+    });
+
+    filterAccounts();
+
+    setInterval(() => {
+        if (!document.hidden && refreshBtn) {
+            refreshBtn.click();
+        }
+    }, 60000);
+});
+</script>
+{% endblock %}

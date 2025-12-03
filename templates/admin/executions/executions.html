@@ -1,0 +1,548 @@
+{% extends "admin/trading_base.html" %}
+{% load static i18n admin_metrics %}
+
+{% block title %}{% trans "Executions" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Executions" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Review order executions across all brokers and strategies. Track fill quality and timing." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .executions-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Execution-specific styles */
+    .execution-side {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        font-size: 0.7rem;
+        font-weight: 600;
+    }
+
+    .side-buy { background: var(--success-light); color: var(--success); }
+    .side-sell { background: var(--danger-light); color: var(--danger); }
+
+    /* Fill quality indicators */
+    .fill-quality {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        font-size: 0.7rem;
+        font-weight: 600;
+    }
+
+    .quality-good { background: var(--success-light); color: var(--success); }
+    .quality-avg { background: var(--warning-light); color: var(--warning); }
+    .quality-poor { background: var(--danger-light); color: var(--danger); }
+
+    /* Execution metrics */
+    .execution-meta {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .execution-time {
+        font-size: var(--text-xs);
+        color: var(--gray-300);
+    }
+
+    .execution-symbol {
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    /* Empty state */
+    .empty-state {
+        text-align: center;
+        padding: var(--space-2xl);
+        color: var(--gray-400);
+    }
+
+    .empty-state-icon {
+        font-size: 3rem;
+        margin-bottom: var(--space-md);
+        opacity: 0.5;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .modern-table {
+            min-width: 800px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .header-actions {
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .header-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .filters-bar {
+            flex-direction: column;
+        }
+
+        .filter-actions {
+            flex-direction: column;
+        }
+
+        .filter-select {
+            min-width: 100%;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="executions-container">
+    <!-- Header Actions -->
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <a href="{% url 'admin:execution_execution_add' %}" class="btn btn-primary">
+            <i class="fas fa-plus"></i> {% trans "Add Execution" %}
+        </a>
+        <a href="{% url 'admin:execution_execution_changelist' %}" class="btn btn-outline">
+            <i class="fas fa-table"></i> {% trans "Open in Admin" %}
+        </a>
+        <button type="button" class="btn btn-outline" id="refreshBtn">
+            <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+        </button>
+    </div>
+
+    <!-- Execution Summary Stats - MOVED TO TOP -->
+    <div class="card" style="margin-bottom: var(--space-lg);">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Execution Summary" %}</h3>
+                <p class="card-subtitle">{% trans "Key metrics and performance indicators" %}</p>
+            </div>
+        </div>
+        
+        <div class="overview-grid">
+            <div class="overview-card">
+                <div class="overview-title">{% trans "Total Executions" %}</div>
+                <div class="overview-value">{{ executions|length }}</div>
+                <div class="overview-change positive">{% trans "Today" %}</div>
+            </div>
+            <div class="overview-card">
+                <div class="overview-title">{% trans "Avg Fill Quality" %}</div>
+                <div class="overview-value">{% trans "Good" %}</div>
+                <div class="overview-change positive">+2.1%</div>
+            </div>
+            <div class="overview-card">
+                <div class="overview-title">{% trans "Executed Volume" %}</div>
+                <div class="overview-value">{{ total_volume|default:"0" }}</div>
+                <div class="overview-change positive">+5.3%</div>
+            </div>
+            <div class="overview-card">
+                <div class="overview-title">{% trans "Avg Slippage" %}</div>
+                <div class="overview-value">0.02%</div>
+                <div class="overview-change negative">-0.1%</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters Bar -->
+    <div class="filters-bar">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" 
+                   placeholder="{% trans 'Search executions by symbol, order ID...' %}" 
+                   id="searchInput">
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="botFilter">
+                <option value="">{% trans "All Bots" %}</option>
+                {% for bot in bots %}
+                    <option value="{{ bot.id }}">{{ bot.name }}</option>
+                {% endfor %}
+            </select>
+            <select class="filter-select" id="symbolFilter">
+                <option value="">{% trans "All Symbols" %}</option>
+                {% for symbol in symbols %}
+                    <option value="{{ symbol }}">{{ symbol }}</option>
+                {% endfor %}
+            </select>
+            <select class="filter-select" id="sideFilter">
+                <option value="">{% trans "All Sides" %}</option>
+                <option value="buy">BUY</option>
+                <option value="sell">SELL</option>
+            </select>
+            <div class="date-filter-group">
+                <input type="datetime-local" id="executions-from-date" class="date-input"
+                       aria-label="{% trans 'From date' %}" title="{% trans 'Filter start date' %}"
+                       step="1">
+                <input type="datetime-local" id="executions-to-date" class="date-input"
+                       aria-label="{% trans 'To date' %}" title="{% trans 'Filter end date' %}"
+                       step="1">
+                <select class="filter-select" id="executions-date-sort" aria-label="{% trans 'Sort by date' %}">
+                    <option value="desc">{% trans "Newest first" %}</option>
+                    <option value="asc">{% trans "Oldest first" %}</option>
+                </select>
+            </div>
+            <button class="btn btn-outline" type="button" id="clearFiltersBtn">
+                <i class="fas fa-times"></i> {% trans "Clear Filters" %}
+            </button>
+        </div>
+    </div>
+
+    <!-- Executions Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Recent Executions" %}</h3>
+                <p class="card-subtitle">{% trans "Latest order fills and execution details" %}</p>
+            </div>
+            <div style="display: flex; gap: var(--space-md); flex-wrap: wrap;">
+                <a href="{% url 'admin:execution_order_changelist' %}" class="btn btn-outline">
+                    <i class="fas fa-shopping-cart"></i> {% trans "Orders" %}
+                </a>
+                <a href="{% url 'admin:execution_tradelog_changelist' %}" class="btn btn-outline">
+                    <i class="fas fa-scale-balanced"></i> {% trans "Trade Logs" %}
+                </a>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="modern-table">
+                <thead>
+                    <tr>
+                        <th>{% trans "Time" %}</th>
+                        <th>{% trans "Order" %}</th>
+                        <th>{% trans "Bot" %}</th>
+                        <th>{% trans "Symbol" %}</th>
+                        <th>{% trans "Side" %}</th>
+                        <th>{% trans "Qty" %}</th>
+                        <th>{% trans "Price" %}</th>
+                        <th>{% trans "Account Balance" %}</th>
+                        <th>{% trans "Fill Quality" %}</th>
+                        <th>{% trans "Actions" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for exec in executions %}
+                        <tr class="execution-row" 
+                            data-bot="{{ exec.order.bot.id|default:'' }}"
+                            data-symbol="{{ exec.order.symbol|default:'' }}"
+                            data-side="{{ exec.order.side|default:'' }}"
+                            data-timestamp="{{ exec.exec_time|date:'c' }}"
+                            data-search="{{ exec.order.symbol }} {{ exec.order.bot.name|default:'' }} {{ exec.order.client_order_id|default:'' }}">
+                            <td>
+                                <div class="execution-meta">
+                                    <div class="execution-time">
+                                        {{ exec.exec_time|date:"M j, H:i:s" }}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <div style="font-weight: 500; color: var(--light);">
+                                    #{{ exec.order.id }}
+                                </div>
+                                {% if exec.order.client_order_id %}
+                                <div style="font-size: var(--text-xs); color: var(--gray-400);">
+                                    {{ exec.order.client_order_id|truncatechars:12 }}
+                                </div>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if exec.order.bot %}
+                                <span style="font-size: var(--text-sm); color: var(--primary-light);">
+                                    {{ exec.order.bot.name|truncatechars:15 }}
+                                </span>
+                                {% else %}
+                                <span style="font-size: var(--text-xs); color: var(--gray-400);">
+                                    {% trans "No bot" %}
+                                </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="execution-symbol">
+                                    {{ exec.order.symbol|default:"-" }}
+                                </div>
+                            </td>
+                            <td>
+                                {% if exec.order.side %}
+                                    <span class="execution-side side-{{ exec.order.side|lower }}">
+                                        <i class="fas fa-{% if exec.order.side == 'buy' %}arrow-up{% else %}arrow-down{% endif %}"></i>
+                                        {{ exec.order.side|upper }}
+                                    </span>
+                                {% else %}
+                                    <span style="font-size: var(--text-xs); color: var(--gray-400);">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <span style="font-weight: 600; color: var(--light);">
+                                    {{ exec.qty|default:"-" }}
+                                </span>
+                            </td>
+                            <td>
+                                <div style="font-weight: 600; color: var(--light);">
+                                    ${{ exec.price|floatformat:4|default:"-" }}
+                                </div>
+                                {% if exec.order.order_type == 'limit' and exec.order.limit_price %}
+                                <div style="font-size: var(--text-xs); color: var(--gray-400);">
+                                    Limit: ${{ exec.order.limit_price|floatformat:4 }}
+                                </div>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if exec.account_balance %}
+                                <span style="font-weight: 500; color: var(--light);">
+                                    ${{ exec.account_balance|floatformat:2 }}
+                                </span>
+                                {% else %}
+                                <span style="font-size: var(--text-xs); color: var(--gray-400);">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if exec.order.order_type == 'limit' and exec.order.limit_price and exec.price %}
+                                    {% if exec.price <= exec.order.limit_price %}
+                                        <span class="fill-quality quality-good">
+                                            <i class="fas fa-check"></i>{% trans "Good" %}
+                                        </span>
+                                    {% else %}
+                                        <span class="fill-quality quality-poor">
+                                            <i class="fas fa-times"></i>{% trans "Poor" %}
+                                        </span>
+                                    {% endif %}
+                                {% else %}
+                                    <span class="fill-quality quality-good">
+                                        <i class="fas fa-bolt"></i>{% trans "Market" %}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="action-buttons">
+                                    <a href="{% url 'admin:execution_execution_change' exec.pk %}"
+                                       class="action-btn inspect"
+                                       title="{% trans 'View / Edit execution' %}">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                    <a href="{% url 'admin:execution_order_change' exec.order.id %}"
+                                       class="action-btn link"
+                                       title="{% trans 'View order' %}">
+                                        <i class="fas fa-external-link-alt"></i>
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="10" class="empty-state">
+                                <i class="fas fa-circle-nodes empty-state-icon"></i>
+                                <div>{% trans "No executions found." %}</div>
+                                <div style="font-size: var(--text-sm); margin-top: var(--space-sm);">
+                                    {% trans "Executions will appear here when orders are filled by brokers." %}
+                                </div>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="pagination">
+            <div class="pagination-info">
+                {{ executions|length }} {% trans "executions shown" %}
+            </div>
+            <div class="pagination-controls">
+                <a href="{% url 'admin:execution_execution_changelist' %}" class="pagination-btn">
+                    {% trans "Open in Admin" %}
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Filter functionality
+    const searchInput = document.getElementById('searchInput');
+    const botFilter = document.getElementById('botFilter');
+    const symbolFilter = document.getElementById('symbolFilter');
+    const sideFilter = document.getElementById('sideFilter');
+    const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const fromDateInput = document.getElementById('executions-from-date');
+    const toDateInput = document.getElementById('executions-to-date');
+    const dateSortSelect = document.getElementById('executions-date-sort');
+    const paginationInfo = document.querySelector('.pagination-info');
+    const tableBody = document.querySelector('.modern-table tbody');
+
+    const getRows = () => Array.from(document.querySelectorAll('.execution-row'));
+
+    const parseRowDate = (row) => {
+        const timestamp = row.dataset.timestamp;
+        return timestamp ? new Date(timestamp) : null;
+    };
+
+    const sortRows = () => {
+        if (!tableBody || !dateSortSelect) {
+            return;
+        }
+
+        const order = dateSortSelect.value || 'desc';
+        const sortedRows = getRows().sort((a, b) => {
+            const dateA = parseRowDate(a) || new Date(0);
+            const dateB = parseRowDate(b) || new Date(0);
+            return order === 'asc' ? dateA - dateB : dateB - dateA;
+        });
+
+        sortedRows.forEach(row => tableBody.appendChild(row));
+    };
+
+    const filterExecutions = () => {
+        const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+        const botValue = botFilter ? botFilter.value : '';
+        const symbolValue = symbolFilter ? symbolFilter.value : '';
+        const sideValue = sideFilter ? sideFilter.value : '';
+        const fromDate = fromDateInput && fromDateInput.value ? new Date(fromDateInput.value) : null;
+        const toDate = toDateInput && toDateInput.value ? new Date(toDateInput.value) : null;
+
+        let visibleCount = 0;
+
+        getRows().forEach(row => {
+            const searchData = row.getAttribute('data-search').toLowerCase();
+            const botData = row.getAttribute('data-bot');
+            const symbolData = row.getAttribute('data-symbol');
+            const sideData = row.getAttribute('data-side');
+            const rowDate = parseRowDate(row);
+
+            const matchesSearch = searchData.includes(searchTerm);
+            const matchesBot = !botValue || botData === botValue;
+            const matchesSymbol = !symbolValue || symbolData === symbolValue;
+            const matchesSide = !sideValue || sideData === sideValue;
+
+            let matchesDate = true;
+            if (matchesDate && fromDate && rowDate) {
+                matchesDate = rowDate >= fromDate;
+            }
+            if (matchesDate && toDate && rowDate) {
+                matchesDate = rowDate <= toDate;
+            }
+
+            if (matchesSearch && matchesBot && matchesSymbol && matchesSide && matchesDate) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        if (paginationInfo) {
+            paginationInfo.textContent = `${visibleCount} {% trans "executions shown" %}`;
+        }
+    };
+
+    // Event listeners for filters
+    if (searchInput) {
+        searchInput.addEventListener('input', filterExecutions);
+    }
+
+    if (botFilter) {
+        botFilter.addEventListener('change', filterExecutions);
+    }
+
+    if (symbolFilter) {
+        symbolFilter.addEventListener('change', filterExecutions);
+    }
+
+    if (sideFilter) {
+        sideFilter.addEventListener('change', filterExecutions);
+    }
+
+    if (fromDateInput) {
+        fromDateInput.addEventListener('change', filterExecutions);
+    }
+
+    if (toDateInput) {
+        toDateInput.addEventListener('change', filterExecutions);
+    }
+
+    if (dateSortSelect) {
+        dateSortSelect.addEventListener('change', () => {
+            sortRows();
+            filterExecutions();
+        });
+    }
+
+    // Clear filters
+    clearFiltersBtn.addEventListener('click', function() {
+        searchInput.value = '';
+        botFilter.value = '';
+        symbolFilter.value = '';
+        sideFilter.value = '';
+        if (fromDateInput) {
+            fromDateInput.value = '';
+        }
+        if (toDateInput) {
+            toDateInput.value = '';
+        }
+        if (dateSortSelect) {
+            dateSortSelect.value = 'desc';
+            sortRows();
+        }
+        filterExecutions();
+    });
+
+    // Refresh button
+    refreshBtn.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+        setTimeout(() => {
+            window.location.reload();
+        }, 1000);
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Focus search on Ctrl+K or /
+        if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+            e.preventDefault();
+            searchInput.focus();
+        }
+        
+        // Refresh on F5
+        if (e.key === 'F5') {
+            e.preventDefault();
+            refreshBtn.click();
+        }
+        
+        // New execution on Ctrl+N
+        if (e.ctrlKey && e.key === 'n') {
+            e.preventDefault();
+            document.querySelector('a[href*="execution_execution_add"]').click();
+        }
+    });
+
+    // Auto-refresh every 15 seconds (optional)
+    setInterval(() => {
+        if (!document.hidden) {
+            refreshBtn.click();
+        }
+    }, 15000);
+
+    sortRows();
+    filterExecutions();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,904 @@
+{% extends "admin/trading_base.html" %}
+{% load static i18n admin_metrics %}
+
+{% block title %}{% trans "Orders & Routing" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Orders & Routing" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Live audit of every order the bot tries to place. See routing decisions, broker status, and any errors at a glance." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .orders-container {
+        max-width: 1600px;
+        margin: 0 auto;
+    }
+
+    /* Metrics Grid */
+    .metrics-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--space-md);
+        margin-bottom: var(--space-xl);
+    }
+
+    .metric-card {
+        background: var(--bg-card);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+        text-align: center;
+        transition: all 0.3s ease;
+    }
+
+    .metric-card:hover {
+        border-color: var(--border-medium);
+        transform: translateY(-2px);
+    }
+
+    .metric-label {
+        font-size: var(--text-sm);
+        color: var(--gray-400);
+        margin-bottom: var(--space-sm);
+        font-weight: 500;
+    }
+
+    .metric-value {
+        font-size: var(--text-2xl);
+        font-weight: 700;
+        margin-bottom: var(--space-xs);
+        color: var(--light);
+    }
+
+    .metric-change {
+        font-size: var(--text-xs);
+        font-weight: 500;
+    }
+
+    .metric-change.positive {
+        color: var(--success);
+    }
+
+    .metric-change.negative {
+        color: var(--danger);
+    }
+
+    .metric-change.neutral {
+        color: var(--gray-400);
+    }
+
+    /* Filters Bar */
+    .filters-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: var(--space-md);
+        padding: var(--space-lg);
+        background: var(--bg-card);
+        border-radius: var(--radius-lg);
+        border: 1px solid var(--border-light);
+        margin-bottom: var(--space-lg);
+        flex-wrap: wrap;
+    }
+
+    .search-box {
+        position: relative;
+        flex: 1;
+        min-width: 300px;
+    }
+
+    .search-input {
+        width: 100%;
+        padding: var(--space-md) var(--space-md) var(--space-md) var(--space-2xl);
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        color: var(--light);
+        font-size: var(--text-sm);
+        transition: all 0.3s ease;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: var(--primary);
+        background: rgba(255, 255, 255, 0.08);
+        box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+    }
+
+    .search-icon {
+        position: absolute;
+        left: var(--space-md);
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--gray-500);
+        font-size: var(--text-sm);
+    }
+
+    .filter-actions {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        flex-wrap: wrap;
+    }
+
+    .filter-select {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        color: var(--light);
+        font-size: var(--text-sm);
+        min-width: 150px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+
+    .filter-select:focus {
+        outline: none;
+        border-color: var(--primary);
+    }
+
+    /* Status Badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-new {
+        background: rgba(67, 97, 238, 0.2);
+        color: var(--primary-light);
+    }
+
+    .status-ack {
+        background: rgba(76, 201, 240, 0.2);
+        color: var(--success);
+    }
+
+    .status-filled {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .status-part_filled {
+        background: rgba(248, 150, 30, 0.2);
+        color: var(--warning);
+    }
+
+    .status-canceled {
+        background: rgba(247, 37, 133, 0.2);
+        color: var(--danger);
+    }
+
+    .status-error {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    /* Pills for various elements */
+    .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .pill-account {
+        background: rgba(139, 69, 19, 0.2);
+        color: #d2691e;
+    }
+
+    .pill-symbol {
+        background: rgba(67, 97, 238, 0.2);
+        color: var(--primary-light);
+    }
+
+    .pill-side-long {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .pill-side-short {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    /* Order Information */
+    .order-info {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .order-id {
+        font-weight: 600;
+        color: var(--light);
+        font-size: var(--text-sm);
+    }
+
+    .order-meta {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    .bot-info {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .bot-name {
+        font-size: var(--text-sm);
+        color: var(--light);
+    }
+
+    .signal-meta {
+        font-size: var(--text-xs);
+        color: var(--gray-500);
+    }
+
+    /* Price Information */
+    .price-info {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .price-main {
+        font-size: var(--text-sm);
+        color: var(--light);
+    }
+
+    .price-sl-tp {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Error Text */
+    .error-text {
+        font-size: var(--text-xs);
+        color: var(--danger);
+        background: rgba(247, 37, 133, 0.1);
+        padding: var(--space-xs) var(--space-sm);
+        border-radius: var(--radius-sm);
+        border: 1px solid rgba(247, 37, 133, 0.2);
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: help;
+    }
+
+    .error-text.expanded {
+        white-space: normal;
+        overflow: visible;
+        max-width: none;
+    }
+
+    /* Action Buttons */
+    .action-buttons {
+        display: flex;
+        gap: var(--space-xs);
+        justify-content: flex-end;
+    }
+
+    .action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-sm);
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        color: var(--gray-400);
+        text-decoration: none;
+        transition: all 0.3s ease;
+        font-size: var(--text-sm);
+    }
+
+    .action-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--light);
+        text-decoration: none;
+        transform: translateY(-1px);
+    }
+
+    .action-btn.inspect:hover {
+        background: var(--primary-light);
+        color: white;
+        border-color: var(--primary);
+    }
+
+    .action-btn.exec:hover {
+        background: var(--warning-light);
+        color: var(--warning);
+        border-color: var(--warning);
+    }
+
+    .action-btn.delete:hover {
+        background: var(--danger-light);
+        color: var(--danger);
+        border-color: var(--danger);
+    }
+
+    /* Kill Switch */
+    .kill-switch-btn {
+        background: var(--danger);
+        color: white;
+        border: none;
+        padding: var(--space-md) var(--space-lg);
+        border-radius: var(--radius-md);
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+    }
+
+    .kill-switch-btn:hover {
+        background: #e11d74;
+        transform: translateY(-1px);
+    }
+
+    .kill-switch-btn.active {
+        background: var(--success);
+    }
+
+    .kill-switch-btn.active:hover {
+        background: #3aa8d4;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1200px) {
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .modern-table {
+            min-width: 1000px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .filters-bar {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .search-box {
+            min-width: 100%;
+        }
+
+        .filter-actions {
+            justify-content: space-between;
+            width: 100%;
+        }
+
+        .metrics-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .header-actions {
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .header-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .action-buttons {
+            flex-direction: column;
+        }
+
+        .action-btn {
+            width: 28px;
+            height: 28px;
+            font-size: var(--text-xs);
+        }
+    }
+
+    @media (max-width: 480px) {
+        .filter-actions {
+            flex-direction: column;
+        }
+
+        .filter-select {
+            min-width: 100%;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="orders-container">
+    <!-- Header Actions -->
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <a href="{% url 'admin:execution_order_changelist' %}" class="btn btn-outline">
+            <i class="fas fa-table"></i> {% trans "Open in Admin" %}
+        </a>
+        <a href="{% url 'admin:execution_execution_changelist' %}" class="btn btn-outline">
+            <i class="fas fa-bolt"></i> {% trans "Executions" %}
+        </a>
+        <button type="button" class="kill-switch-btn" id="killSwitchBtn">
+            <i class="fas fa-skull-crossbones"></i> {% trans "Kill Switch (Orders)" %}
+        </button>
+    </div>
+
+    <!-- Quick Metrics -->
+    <div class="metrics-grid">
+        <div class="metric-card">
+            <div class="metric-label">{% trans "Total Orders (this page)" %}</div>
+            <div class="metric-value" id="totalOrders">
+                {{ orders|length }}
+            </div>
+            <div class="metric-change neutral">
+                {% if page_obj %}
+                    {% blocktrans %}Page {{ page_obj.number }} of {{ paginator.num_pages }}{% endblocktrans %}
+                {% else %}
+                    {% trans "Recent orders" %}
+                {% endif %}
+            </div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">{% trans "Filled vs Canceled" %}</div>
+            <div class="metric-value" id="filledRatio">
+                {% widthratio filled_orders|default:0 orders|length 100 %}%
+            </div>
+            <div class="metric-change positive" id="filledChange">
+                {% trans "Calculating..." %}
+            </div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">{% trans "Error Rate" %}</div>
+            <div class="metric-value" id="errorRate">
+                {% widthratio error_orders|default:0 orders|length 100 %}%
+            </div>
+            <div class="metric-change negative" id="errorChange">
+                {% trans "Monitoring" %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters Bar -->
+    <div class="filters-bar">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" 
+                   placeholder="{% trans 'Search by symbol, order ID, account or bot…' %}" 
+                   id="searchInput">
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="statusFilter">
+                <option value="">{% trans "All Status" %}</option>
+                <option value="new">{% trans "New" %}</option>
+                <option value="ack">{% trans "Ack" %}</option>
+                <option value="filled">{% trans "Filled" %}</option>
+                <option value="part_filled">{% trans "Part Filled" %}</option>
+                <option value="canceled">{% trans "Canceled" %}</option>
+                <option value="error">{% trans "Error" %}</option>
+            </select>
+            <select class="filter-select" id="sideFilter">
+                <option value="">{% trans "All Sides" %}</option>
+                <option value="buy">{% trans "Buy" %}</option>
+                <option value="sell">{% trans "Sell" %}</option>
+            </select>
+            <div class="date-filter-group">
+                <input type="datetime-local" id="orders-from-date" class="date-input"
+                       aria-label="{% trans 'From date' %}" title="{% trans 'Filter start date' %}"
+                       step="1">
+                <input type="datetime-local" id="orders-to-date" class="date-input"
+                       aria-label="{% trans 'To date' %}" title="{% trans 'Filter end date' %}"
+                       step="1">
+                <select class="filter-select" id="orders-date-sort" aria-label="{% trans 'Sort by date' %}">
+                    <option value="desc">{% trans "Newest first" %}</option>
+                    <option value="asc">{% trans "Oldest first" %}</option>
+                </select>
+            </div>
+            <button class="btn btn-outline" type="button" id="refreshBtn">
+                <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+            </button>
+        </div>
+    </div>
+
+    <!-- Orders Table -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Recent Orders" %}</h3>
+                <p class="card-subtitle">
+                    {% trans "Each row links bot → order → executions. Use the standard admin view when you need full raw fields." %}
+                </p>
+            </div>
+            <div style="display: flex; gap: var(--space-md); flex-wrap: wrap;">
+                <a href="{% url 'admin:execution_signal_changelist' %}" class="btn btn-outline">
+                    <i class="fas fa-wave-square"></i> {% trans "Signals" %}
+                </a>
+                <a href="{% url 'admin:execution_decision_changelist' %}" class="btn btn-outline">
+                    <i class="fas fa-brain"></i> {% trans "Decisions" %}
+                </a>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="modern-table">
+                <thead>
+                    <tr>
+                        <th>{% trans "Time" %}</th>
+                        <th>{% trans "Order" %}</th>
+                        <th>{% trans "Bot / Signal" %}</th>
+                        <th>{% trans "Account" %}</th>
+                        <th>{% trans "Symbol" %}</th>
+                        <th>{% trans "Side / Qty" %}</th>
+                        <th>{% trans "Price / SL / TP" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Error" %}</th>
+                        <th>{% trans "Actions" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for order in orders %}
+                        <tr class="order-row" 
+                            data-status="{{ order.status }}"
+                            data-side="{{ order.side }}"
+                            data-search="{{ order.client_order_id }} {{ order.symbol }} {{ order.broker_account.name }} {{ order.bot.name|default:'' }}"
+                            data-timestamp="{{ order.created_at|date:'c' }}">
+                            <td>
+                                <span style="font-size: var(--text-xs); color: var(--gray-300);">
+                                    {{ order.created_at|date:"M j, H:i:s" }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="order-info">
+                                    <div class="order-id">{{ order.client_order_id }}</div>
+                                    <div class="order-meta">#{{ order.id }}</div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="bot-info">
+                                    <div class="bot-name">
+                                        {% if order.bot %}
+                                            {{ order.bot.name }}
+                                        {% else %}
+                                            <span style="color: var(--gray-500);">{% trans "No bot linked" %}</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="signal-meta">
+                                        {% if order.signal %}
+                                            {% trans "Signal" %}: #{{ order.signal.id }}
+                                        {% else %}
+                                            {% trans "Signal not recorded" %}
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="pill pill-account">
+                                    <i class="fas fa-building-columns"></i>
+                                    {{ order.broker_account.name }}
+                                    {% if order.broker_account.login %}
+                                        · {{ order.broker_account.login }}
+                                    {% endif %}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="pill pill-symbol">
+                                    <i class="fas fa-coins"></i>{{ order.symbol }}
+                                </span>
+                            </td>
+                            <td>
+                                <div style="display: flex; flex-direction: column; gap: var(--space-xs);">
+                                    {% if order.side == "buy" %}
+                                        <span class="pill pill-side-long">
+                                            <i class="fas fa-arrow-up"></i>{% trans "BUY" %}
+                                        </span>
+                                    {% else %}
+                                        <span class="pill pill-side-short">
+                                            <i class="fas fa-arrow-down"></i>{% trans "SELL" %}
+                                        </span>
+                                    {% endif %}
+                                    <span style="font-size: var(--text-xs); color: var(--gray-300);">
+                                        {{ order.qty }}
+                                    </span>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="price-info">
+                                    <div class="price-main">
+                                        {% trans "Price" %}: {{ order.price|default:"-" }}
+                                    </div>
+                                    <div class="price-sl-tp">
+                                        SL: {{ order.sl|default:"-" }} · TP: {{ order.tp|default:"-" }}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="status-badge status-{{ order.status }}">
+                                    {% if order.status == "new" %}
+                                        <i class="fas fa-sparkles"></i>{% trans "New" %}
+                                    {% elif order.status == "ack" %}
+                                        <i class="fas fa-circle-check"></i>{% trans "Ack" %}
+                                    {% elif order.status == "filled" %}
+                                        <i class="fas fa-check-double"></i>{% trans "Filled" %}
+                                    {% elif order.status == "part_filled" %}
+                                        <i class="fas fa-tint"></i>{% trans "Part filled" %}
+                                    {% elif order.status == "canceled" %}
+                                        <i class="fas fa-ban"></i>{% trans "Canceled" %}
+                                    {% else %}
+                                        <i class="fas fa-triangle-exclamation"></i>{% trans "Error" %}
+                                    {% endif %}
+                                </span>
+                            </td>
+                            <td>
+                                {% if order.last_error %}
+                                    <span class="error-text" title="{{ order.last_error }}">
+                                        {{ order.last_error|truncatechars:30 }}
+                                    </span>
+                                {% else %}
+                                    <span class="error-text" style="color: var(--success); border-color: rgba(16, 185, 129, 0.6); background: rgba(16, 185, 129, 0.12);">
+                                        {% trans "Routed successfully � no broker error" %}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="action-buttons">
+                                    <a href="{% url 'admin:execution_order_change' order.pk %}"
+                                       class="action-btn inspect" title="{% trans 'View / Edit order' %}">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                    <a href="{% url 'admin:execution_execution_changelist' %}?order__id__exact={{ order.id }}"
+                                       class="action-btn exec" title="{% trans 'View executions' %}">
+                                        <i class="fas fa-bolt"></i>
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="10" style="text-align: center; color: var(--gray-400); padding: var(--space-xl);">
+                                <i class="fas fa-inbox" style="font-size: 2rem; margin-bottom: var(--space-md); display: block;"></i>
+                                {% trans "No orders found." %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="pagination">
+            <div class="pagination-info">
+                {{ orders|length }} {% trans "order(s) on this page" %}
+            </div>
+            <div class="pagination-controls">
+                {% if page_obj.has_previous %}
+                    <a href="?page={{ page_obj.previous_page_number }}" class="btn btn-outline btn-sm">
+                        &laquo; {% trans "Previous" %}
+                    </a>
+                {% endif %}
+                <span style="font-size:var(--text-xs);color:var(--gray-400);margin:0 var(--space-xs);">
+                    {% blocktrans %}Page {{ page_obj.number }} of {{ paginator.num_pages }}{% endblocktrans %}
+                </span>
+                {% if page_obj.has_next %}
+                    <a href="?page={{ page_obj.next_page_number }}" class="btn btn-outline btn-sm">
+                        {% trans "Next" %} &raquo;
+                    </a>
+                {% endif %}
+                <a href="{% url 'admin:execution_order_changelist' %}" class="btn btn-outline btn-sm">
+                    <i class="fas fa-table"></i> {% trans "Open full admin view" %}
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Filter functionality
+    const searchInput = document.getElementById('searchInput');
+    const statusFilter = document.getElementById('statusFilter');
+    const sideFilter = document.getElementById('sideFilter');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const killSwitchBtn = document.getElementById('killSwitchBtn');
+    const fromDateInput = document.getElementById('orders-from-date');
+    const toDateInput = document.getElementById('orders-to-date');
+    const dateSortSelect = document.getElementById('orders-date-sort');
+    const tableBody = document.querySelector('.modern-table tbody');
+
+    const getRows = () => Array.from(document.querySelectorAll('.order-row'));
+
+    const parseRowDate = (row) => {
+        const timestamp = row.dataset.timestamp;
+        return timestamp ? new Date(timestamp) : null;
+    };
+
+    const sortRows = () => {
+        if (!tableBody || !dateSortSelect) {
+            return;
+        }
+
+        const order = dateSortSelect.value || 'desc';
+        const sortedRows = getRows().sort((a, b) => {
+            const dateA = parseRowDate(a) || new Date(0);
+            const dateB = parseRowDate(b) || new Date(0);
+            return order === 'asc' ? dateA - dateB : dateB - dateA;
+        });
+
+        sortedRows.forEach(row => tableBody.appendChild(row));
+    };
+
+    function filterOrders() {
+        const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+        const statusValue = statusFilter ? statusFilter.value : '';
+        const sideValue = sideFilter ? sideFilter.value : '';
+        const fromDate = fromDateInput && fromDateInput.value ? new Date(fromDateInput.value) : null;
+        const toDate = toDateInput && toDateInput.value ? new Date(toDateInput.value) : null;
+
+        getRows().forEach(row => {
+            const searchData = row.getAttribute('data-search').toLowerCase();
+            const statusData = row.getAttribute('data-status');
+            const sideData = row.getAttribute('data-side');
+            const rowDate = parseRowDate(row);
+
+            const matchesSearch = searchData.includes(searchTerm);
+            const matchesStatus = !statusValue || statusData === statusValue;
+            const matchesSide = !sideValue || sideData === sideValue;
+
+            let matchesDate = true;
+            if (matchesDate && fromDate && rowDate) {
+                matchesDate = rowDate >= fromDate;
+            }
+            if (matchesDate && toDate && rowDate) {
+                matchesDate = rowDate <= toDate;
+            }
+
+            if (matchesSearch && matchesStatus && matchesSide && matchesDate) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        updateMetrics();
+    }
+
+    function updateMetrics() {
+        const visibleRows = getRows().filter(row => row.style.display !== 'none');
+        const totalOrders = visibleRows.length;
+        
+        const filledOrders = visibleRows.filter(row => row.getAttribute('data-status') === 'filled').length;
+        const errorOrders = visibleRows.filter(row => row.getAttribute('data-status') === 'error').length;
+
+        document.getElementById('totalOrders').textContent = totalOrders;
+        document.getElementById('filledRatio').textContent = totalOrders > 0 ? 
+            Math.round((filledOrders / totalOrders) * 100) + '%' : '0%';
+        document.getElementById('errorRate').textContent = totalOrders > 0 ? 
+            Math.round((errorOrders / totalOrders) * 100) + '%' : '0%';
+    }
+
+    // Event listeners for filters
+    if (searchInput) {
+        searchInput.addEventListener('input', filterOrders);
+    }
+
+    if (statusFilter) {
+        statusFilter.addEventListener('change', filterOrders);
+    }
+
+    if (sideFilter) {
+        sideFilter.addEventListener('change', filterOrders);
+    }
+
+    if (fromDateInput) {
+        fromDateInput.addEventListener('change', filterOrders);
+    }
+
+    if (toDateInput) {
+        toDateInput.addEventListener('change', filterOrders);
+    }
+
+    if (dateSortSelect) {
+        dateSortSelect.addEventListener('change', () => {
+            sortRows();
+            filterOrders();
+        });
+    }
+
+    // Refresh button
+    refreshBtn.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+        setTimeout(() => {
+            window.location.reload();
+        }, 1000);
+    });
+
+    // Kill switch functionality
+    if (killSwitchBtn) {
+        killSwitchBtn.addEventListener('click', function() {
+            const isActive = this.classList.contains('active');
+            const action = isActive ? 'enable' : 'disable';
+            
+            if (confirm(`Are you sure you want to ${action} all order routing? This will ${action} all order processing.`)) {
+                // Simulate API call
+                this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+                this.disabled = true;
+
+                setTimeout(() => {
+                    if (isActive) {
+                        this.classList.remove('active');
+                        this.innerHTML = '<i class="fas fa-skull-crossbones"></i> {% trans "Kill Switch (Orders)" %}';
+                    } else {
+                        this.classList.add('active');
+                        this.innerHTML = '<i class="fas fa-check"></i> {% trans "Orders Disabled" %}';
+                    }
+                    this.disabled = false;
+                }, 2000);
+            }
+        });
+    }
+
+    // Expand error text on click
+    const errorTexts = document.querySelectorAll('.error-text');
+    errorTexts.forEach(text => {
+        text.addEventListener('click', function() {
+            this.classList.toggle('expanded');
+        });
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Focus search on Ctrl+K or /
+        if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+            e.preventDefault();
+            searchInput.focus();
+        }
+        
+        // Refresh on F5
+        if (e.key === 'F5') {
+            e.preventDefault();
+            refreshBtn.click();
+        }
+    });
+
+    function resetSortAndFilters() {
+        if (dateSortSelect) {
+            dateSortSelect.value = 'desc';
+        }
+        sortRows();
+    }
+
+    clearFiltersBtn.addEventListener('click', function() {
+        searchInput.value = '';
+        statusFilter.value = '';
+        sideFilter.value = '';
+        if (fromDateInput) {
+            fromDateInput.value = '';
+        }
+        if (toDateInput) {
+            toDateInput.value = '';
+        }
+        resetSortAndFilters();
+        filterOrders();
+    });
+
+    // Initial metrics calculation
+    resetSortAndFilters();
+    filterOrders();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,620 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n static admin_list admin_urls %}
+
+{% block title %}{% trans "Trading Bots" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Trading Bots" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Manage your bots: edit settings, start / pause / stop, or create new bots." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .bot-shell {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    .bot-header-actions {
+        display: flex;
+        gap: var(--space-md);
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    /* Modern Table Styles */
+    .bot-main .results {
+        width: 100%;
+        overflow-x: auto;
+        margin: var(--space-md) 0;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+        background: var(--bg-card);
+    }
+
+    .bot-main .results table {
+        width: 100%;
+        border-collapse: collapse;
+        background: transparent;
+        min-width: 900px;
+    }
+
+    /* Table Headers - No underlines */
+    .bot-main .results thead th {
+        text-align: left !important;
+        padding: var(--space-md);
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--gray-400);
+        border-bottom: 1px solid var(--border-light);
+        background: var(--bg-card);
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .bot-main .results thead th a {
+        text-decoration: none !important;
+        color: var(--gray-400) !important;
+    }
+
+    .bot-main .results thead th a:hover {
+        text-decoration: none !important;
+        color: var(--gray-300) !important;
+    }
+
+    /* Table Body */
+    .bot-main .results tbody td {
+        text-align: left !important;
+        padding: var(--space-sm) var(--space-md);
+        font-size: var(--text-sm);
+        border-bottom: 1px solid var(--border-dark);
+        color: var(--gray-300);
+        vertical-align: middle;
+        height: 52px; /* Fixed height to prevent row expansion */
+    }
+
+    .bot-main .results tbody td a {
+        text-decoration: none !important;
+        color: var(--primary-light) !important;
+        font-weight: 500;
+        transition: all 0.3s ease;
+    }
+
+    .bot-main .results tbody td a:hover {
+        text-decoration: none !important;
+        color: var(--primary) !important;
+    }
+
+    .bot-main .results tbody tr {
+        transition: all 0.3s ease;
+        background: transparent;
+    }
+
+    .bot-main .results tbody tr:hover {
+        background: var(--bg-card-hover);
+    }
+
+    .bot-main .results tbody tr:nth-child(even) {
+        background: rgba(255, 255, 255, 0.02);
+    }
+
+    .bot-main .results tbody tr:nth-child(even):hover {
+        background: var(--bg-card-hover);
+    }
+
+    .bot-main .results tbody tr:last-child td {
+        border-bottom: none;
+    }
+
+    /* Compact Horizontal Action Buttons */
+    .action-buttons {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        justify-content: flex-start;
+        flex-wrap: nowrap;
+        white-space: nowrap;
+    }
+
+    .action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 4px;
+        font-size: 11px;
+        text-decoration: none;
+        transition: all 0.2s ease;
+        border: 1px solid var(--border-light);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--gray-300);
+        flex-shrink: 0;
+    }
+
+    .action-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--light);
+        text-decoration: none;
+        transform: translateY(-1px);
+    }
+
+    .action-btn.edit {
+        background: var(--primary-light);
+        color: white;
+        border-color: var(--primary);
+    }
+
+    .action-btn.start {
+        background: var(--success-light);
+        color: var(--success);
+        border-color: var(--success);
+    }
+
+    .action-btn.pause {
+        background: var(--warning-light);
+        color: var(--warning);
+        border-color: var(--warning);
+    }
+
+    .action-btn.stop {
+        background: var(--danger-light);
+        color: var(--danger);
+        border-color: var(--danger);
+    }
+
+    .action-btn.view {
+        background: rgba(76, 201, 240, 0.2);
+        color: var(--info);
+        border-color: var(--info);
+    }
+
+    /* Status Badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-active { background: var(--success-light); color: var(--success); }
+    .status-paused { background: var(--warning-light); color: var(--warning); }
+    .status-stopped { background: var(--danger-light); color: var(--danger); }
+    .status-draft { background: rgba(255, 255, 255, 0.05); color: var(--gray-400); }
+
+    /* Bot Info Styling */
+    .bot-info {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .bot-name {
+        font-weight: 600;
+        color: var(--light);
+        font-size: var(--text-sm);
+    }
+
+    .bot-meta {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    .strategy-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-xs);
+    }
+
+    .strategy-tag {
+        display: inline-block;
+        padding: 2px var(--space-sm);
+        background: rgba(67, 97, 238, 0.2);
+        color: var(--primary-light);
+        border-radius: 8px;
+        font-size: var(--text-xs);
+    }
+
+    /* Card Styling */
+    .bot-card {
+        background: var(--bg-card);
+        backdrop-filter: var(--backdrop-blur);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-xl);
+        padding: var(--space-md) 0 var(--space-sm);
+        border: 1px solid var(--border-light);
+        margin-bottom: var(--space-lg);
+    }
+
+    .bot-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-md);
+        padding: 0 var(--space-lg) var(--space-md);
+        border-bottom: 1px solid var(--border-light);
+        flex-wrap: wrap;
+    }
+
+    .bot-toolbar-left {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        font-size: var(--text-sm);
+        color: var(--gray-400);
+        flex-wrap: wrap;
+    }
+
+    .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 20px;
+        font-size: var(--text-xs);
+        background: rgba(15, 118, 110, 0.18);
+        color: var(--success);
+        border: 1px solid rgba(34, 211, 238, 0.3);
+    }
+
+    /* Search and Actions */
+    .search-wrap {
+        position: relative;
+        flex: 1;
+        min-width: 200px;
+        max-width: 400px;
+    }
+
+    .search-input {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 20px;
+        border: 1px solid var(--border-light);
+        padding: var(--space-sm) var(--space-xl) var(--space-sm) var(--space-xl);
+        font-size: var(--text-sm);
+        color: var(--light);
+        width: 100%;
+        transition: all 0.3s ease;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: var(--primary);
+        background: rgba(255, 255, 255, 0.08);
+        box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+    }
+
+    .search-icon {
+        position: absolute;
+        left: var(--space-md);
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: var(--text-sm);
+        color: var(--gray-500);
+    }
+
+    .bot-main {
+        padding: var(--space-sm) var(--space-md) var(--space-md);
+    }
+
+    .actions-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        justify-content: space-between;
+        margin: var(--space-sm) var(--space-xs) 0;
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        flex-wrap: wrap;
+    }
+
+    .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: var(--space-sm);
+        font-size: var(--text-xs);
+        padding: var(--space-sm) 0;
+        margin-top: var(--space-md);
+        flex-wrap: wrap;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .bot-toolbar {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: var(--space-md);
+        }
+        .bot-main .results table { min-width: 800px; }
+    }
+
+    @media (max-width: 768px) {
+        .bot-shell { padding: 0 var(--space-sm); }
+        .bot-header-actions { flex-direction: column; gap: var(--space-sm); }
+        .bot-header-actions .btn { width: 100%; justify-content: center; }
+        .bot-card { margin-bottom: var(--space-md); border-radius: var(--radius-md); }
+        .bot-toolbar { padding: 0 var(--space-md) var(--space-md); }
+        .bot-toolbar-left { flex-direction: column; align-items: flex-start; gap: var(--space-sm); }
+        .bot-toolbar-actions { flex-direction: column; width: 100%; gap: var(--space-sm); }
+        .search-wrap { min-width: 100%; max-width: 100%; }
+        .bot-main { padding: var(--space-sm) var(--space-sm) var(--space-md); }
+        .bot-main .results table { min-width: 700px; font-size: var(--text-xs); }
+        .actions-row { flex-direction: column; align-items: flex-start; gap: var(--space-md); margin: var(--space-sm) 0 0; }
+        .pagination { justify-content: center; }
+        .action-buttons { justify-content: center; }
+    }
+
+    @media (max-width: 480px) {
+        .bot-shell { padding: 0 var(--space-xs); }
+        .bot-main .results table { min-width: 600px; }
+        .action-btn { width: 24px; height: 24px; font-size: 10px; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bot-shell">
+    <!-- Header Actions -->
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <div class="bot-header-actions">
+            {% if has_add_permission %}
+                {% url opts|admin_urlname:'add' as add_url %}
+                <a href="{{ add_url }}" class="btn btn-primary">
+                    <i class="fas fa-plus"></i> {% trans "New Bot" %}
+                </a>
+            {% endif %}
+            <button type="button" class="btn btn-success" id="bulkStartBtn">
+                <i class="fas fa-play"></i> {% trans "Start Selected" %}
+            </button>
+            <button type="button" class="btn btn-outline" id="refreshBtn">
+                <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+            </button>
+        </div>
+    </div>
+
+    <!-- Filters Bar -->
+    <div class="filters-bar">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" 
+                   placeholder="{% trans 'Search bots by name or strategy...' %}" 
+                   id="searchInput">
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="statusFilter">
+                <option value="">{% trans "All Status" %}</option>
+                <option value="active">{% trans "Active" %}</option>
+                <option value="paused">{% trans "Paused" %}</option>
+                <option value="stopped">{% trans "Stopped" %}</option>
+                <option value="draft">{% trans "Draft" %}</option>
+            </select>
+            <select class="filter-select" id="strategyFilter">
+                <option value="">{% trans "All Strategies" %}</option>
+                <option value="scalping">{% trans "Scalping" %}</option>
+                <option value="swing">{% trans "Swing" %}</option>
+                <option value="trend">{% trans "Trend" %}</option>
+                <option value="arbitrage">{% trans "Arbitrage" %}</option>
+            </select>
+            <button class="btn btn-outline" type="button" id="clearFiltersBtn">
+                <i class="fas fa-times"></i> {% trans "Clear Filters" %}
+            </button>
+        </div>
+    </div>
+
+    <!-- Bots List Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Trading Bots" %}</h3>
+                <p class="card-subtitle">{% trans "Active and configured trading bots with performance metrics" %}</p>
+            </div>
+            <div class="action-icons">
+                <i class="fas fa-download" title="{% trans 'Import' %}"></i>
+                <i class="fas fa-chart-line" title="{% trans 'Analytics' %}"></i>
+                <i class="fas fa-cog" title="{% trans 'Settings' %}"></i>
+            </div>
+        </div>
+
+        <div class="bot-main">
+            <form id="changelist-form" method="post" novalidate>
+                {% csrf_token %}
+                {% if cl.formset %}
+                    {{ cl.formset.management_form }}
+                {% endif %}
+
+                <div class="actions-row">
+                    <div class="actions-select">
+                        {% if action_form and cl.show_admin_actions %}
+                            {% admin_actions %}
+                        {% endif %}
+                    </div>
+                    <div class="bots-count">
+                        {% blocktrans with count=cl.result_count %}Showing {{ count }} bot(s){% endblocktrans %}
+                    </div>
+                </div>
+
+                {% result_list cl %}
+
+                <div class="pagination">
+                    {% pagination cl %}
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Quick Stats Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Bots Overview" %}</h3>
+                <p class="card-subtitle">{% trans "Trading bots performance and status summary" %}</p>
+            </div>
+        </div>
+        
+        <div class="progress-grid">
+            <div class="progress-card">
+                <div class="progress-value">{{ total_bots_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Total Bots" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ active_bots_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Active" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ profitable_bots_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Profitable" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ total_trades_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Total Trades" %}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Remove underlines from table elements
+    const removeUnderlines = () => {
+        document.querySelectorAll('.bot-main .results thead th, .bot-main .results thead th a, .bot-main .results tbody td a').forEach(el => {
+            el.style.textDecoration = 'none';
+        });
+    };
+
+    // Initialize elements
+    const searchInput = document.getElementById('searchInput');
+    const statusFilter = document.getElementById('statusFilter');
+    const strategyFilter = document.getElementById('strategyFilter');
+    const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const bulkStartBtn = document.getElementById('bulkStartBtn');
+
+    // Search functionality
+    if (searchInput) {
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+                e.preventDefault();
+                searchInput.focus();
+            }
+        });
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') searchInput.value = '';
+        });
+    }
+
+    // Refresh functionality
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', function() {
+            this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+            setTimeout(() => window.location.reload(), 1000);
+        });
+    }
+
+    // Clear filters
+    if (clearFiltersBtn) {
+        clearFiltersBtn.addEventListener('click', () => {
+            if (searchInput) searchInput.value = '';
+            if (statusFilter) statusFilter.value = '';
+            if (strategyFilter) strategyFilter.value = '';
+            document.getElementById('changelist-form').submit();
+        });
+    }
+
+    // Bulk actions
+    if (bulkStartBtn) {
+        bulkStartBtn.addEventListener('click', function() {
+            const selectedBots = document.querySelectorAll('input[type="checkbox"]:checked');
+            if (selectedBots.length === 0) {
+                alert('{% trans "Please select at least one bot to start." %}');
+                return;
+            }
+            if (confirm(`{% trans "Are you sure you want to start" %} ${selectedBots.length} {% trans "selected bot(s)?" %}`)) {
+                this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Starting..." %}';
+                setTimeout(() => {
+                    this.innerHTML = '<i class="fas fa-play"></i> {% trans "Start Selected" %}';
+                    alert(`{% trans "Started" %} ${selectedBots.length} {% trans "bot(s) successfully." %}`);
+                }, 2000);
+            }
+        });
+    }
+
+    // Add compact horizontal action buttons
+    const addActionButtons = () => {
+        document.querySelectorAll('.bot-main .results tbody tr').forEach(row => {
+            const actionCell = row.querySelector('td:last-child');
+            if (actionCell && !actionCell.querySelector('.action-buttons')) {
+                const botId = row.querySelector('input[type="checkbox"]')?.value;
+                if (botId) {
+                    const buttons = document.createElement('div');
+                    buttons.className = 'action-buttons';
+                    
+                    // Create button factory function
+                    const createButton = (className, icon, title, href = null, onClick = null) => {
+                        const btn = href ? document.createElement('a') : document.createElement('button');
+                        btn.className = `action-btn ${className}`;
+                        btn.innerHTML = `<i class="fas ${icon}"></i>`;
+                        btn.title = title;
+                        if (href) btn.href = href;
+                        if (onClick) btn.onclick = onClick;
+                        return btn;
+                    };
+
+                    buttons.appendChild(createButton('edit', 'fa-edit', '{% trans "Edit bot" %}', `${botId}/change/`));
+                    buttons.appendChild(createButton('start', 'fa-play', '{% trans "Start bot" %}', null, () => startBot(botId)));
+                    buttons.appendChild(createButton('pause', 'fa-pause', '{% trans "Pause bot" %}', null, () => pauseBot(botId)));
+                    buttons.appendChild(createButton('stop', 'fa-stop', '{% trans "Stop bot" %}', null, () => stopBot(botId)));
+                    buttons.appendChild(createButton('view', 'fa-eye', '{% trans "View bot details" %}', `${botId}/`));
+
+                    actionCell.innerHTML = '';
+                    actionCell.appendChild(buttons);
+                }
+            }
+        });
+    };
+
+    // Bot control functions
+    const startBot = (botId) => alert(`{% trans "Starting bot" %} ${botId}`);
+    const pauseBot = (botId) => alert(`{% trans "Pausing bot" %} ${botId}`);
+    const stopBot = (botId) => alert(`{% trans "Stopping bot" %} ${botId}`);
+
+    // Table animations
+    document.querySelectorAll('.bot-main .results tbody tr').forEach((row, index) => {
+        row.style.opacity = '0';
+        row.style.transform = 'translateX(-20px)';
+        setTimeout(() => {
+            row.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+            row.style.opacity = '1';
+            row.style.transform = 'translateX(0)';
+        }, index * 50);
+    });
+
+    // Bulk action confirmation
+    document.getElementById('changelist-form')?.addEventListener('submit', function(e) {
+        const actionSelect = this.querySelector('select[name="action"]');
+        if (actionSelect?.value) {
+            const selectedCount = this.querySelectorAll('input[type="checkbox"]:checked').length;
+            if (selectedCount > 0 && !confirm(`Are you sure you want to ${actionSelect.options[actionSelect.selectedIndex].text.toLowerCase()} ${selectedCount} selected bot(s)?`)) {
+                e.preventDefault();
+            }
+        }
+    });
+
+    // Initialize
+    removeUnderlines();
+    setTimeout(addActionButtons, 100);
+    
+    // Auto-refresh
+    setInterval(() => {
+        if (!document.hidden && refreshBtn) refreshBtn.click();
+    }, 60000);
+});
+</script>
+{% endblock %}

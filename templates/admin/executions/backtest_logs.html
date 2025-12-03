@@ -1,0 +1,166 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n static trade_log_tags %}
+
+{% block title %}{% trans "Backtest Data" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Backtest Data" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Download-ready trade outcomes for performance analysis and backtesting." %}{% endblock %}
+
+{% block content %}
+<div class="orders-container">
+    <div class="header-actions" style="margin-bottom: var(--space-xl); display:flex; justify-content:space-between; align-items:center; gap:var(--space-md); flex-wrap:wrap;">
+        <div style="display:flex; gap:var(--space-sm); align-items:center; flex-wrap:wrap;">
+            <a href="{% url 'admin:execution_tradelog_changelist' %}" class="btn btn-outline">
+                <i class="fas fa-table"></i> {% trans "Open Trade Logs" %}
+            </a>
+            <form method="get" style="display:flex; gap:var(--space-xs); align-items:center;">
+                <input type="text"
+                       name="symbol"
+                       value="{{ current_symbol }}"
+                       placeholder="{% trans 'Filter symbol (e.g. BTCUSDm)' %}"
+                       class="search-input"
+                       style="max-width:220px; padding:6px 10px; font-size:var(--text-xs);">
+                <select name="period" class="filter-select" style="min-width:140px; padding:6px 8px; font-size:var(--text-xs);">
+                    <option value="all" {% if current_period == 'all' %}selected{% endif %}>{% trans "All history" %}</option>
+                    <option value="today" {% if current_period == 'today' %}selected{% endif %}>{% trans "Today only" %}</option>
+                </select>
+                <button type="submit" class="btn btn-outline btn-sm">
+                    <i class="fas fa-filter"></i> {% trans "Apply" %}
+                </button>
+            </form>
+        </div>
+        <a href="{% url 'admin:execution_tradelog_backtest_export' %}{% if current_symbol or current_period %}?{% endif %}{% if current_symbol %}symbol={{ current_symbol|urlencode }}{% endif %}{% if current_symbol and current_period %}&{% endif %}{% if current_period and current_period != 'all' %}period={{ current_period|urlencode }}{% endif %}" class="btn btn-primary">
+            <i class="fas fa-file-download"></i> {% trans "Download CSV" %}
+        </a>
+    </div>
+
+    <div class="metrics-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--space-md);margin-bottom:var(--space-lg);">
+        <div class="metric-card card">
+            <div class="metric-label">{% trans "Total Trades (logs)" %}</div>
+            <div class="metric-value">{{ metrics.total_count|default:0 }}</div>
+            <div class="metric-change neutral">
+                {% if current_period == 'today' %}
+                    {% trans "Today" %}
+                {% else %}
+                    {% trans "All time" %}
+                {% endif %}
+            </div>
+        </div>
+        <div class="metric-card card">
+            <div class="metric-label">{% trans "Lifetime PnL" %}</div>
+            <div class="metric-value">{{ metrics.total_pnl }}</div>
+            <div class="metric-change {% if metrics.total_pnl and metrics.total_pnl|floatformat:2 > 0 %}positive{% else %}negative{% endif %}">
+                {% if metrics.total_pnl and metrics.total_pnl > 0 %}{% trans "Net profit" %}{% else %}{% trans "Net loss / flat" %}{% endif %}
+            </div>
+        </div>
+        <div class="metric-card card">
+            <div class="metric-label">{% trans "Win Rate" %}</div>
+            <div class="metric-value">{{ metrics.win_rate|floatformat:1 }}%</div>
+            <div class="metric-change {% if metrics.win_rate and metrics.win_rate > 50 %}positive{% else %}negative{% endif %}">
+                {{ metrics.win_count|default:0 }}W / {{ metrics.loss_count|default:0 }}L
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">{% trans "Backtest Rows" %}</div>
+                <div class="card-subtitle">{% trans "Each row is one trade outcome enriched with bot and order context." %}</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="modern-table">
+                <thead>
+                    <tr>
+                        <th>{% trans "Time" %}</th>
+                        <th>{% trans "Trade / Order" %}</th>
+                        <th>{% trans "Bot / Account" %}</th>
+                        <th>{% trans "Symbol / Side" %}</th>
+                        <th>{% trans "Qty / Price" %}</th>
+                        <th>{% trans "PnL" %}</th>
+                        <th>{% trans "Status" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in logs %}
+                    <tr>
+                        <td>{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
+                        <td>
+                            <div style="font-weight:600;">
+                                {% if log.order and log.order.client_order_id %}
+                                    {{ log.order.client_order_id }}
+                                {% else %}
+                                    #{{ log.order.id }}
+                                {% endif %}
+                            </div>
+                            <div style="font-size:var(--text-xs);color:var(--gray-400);">
+                                {% trans "Trade ID" %}: {{ log.id }} · {% trans "Order ID" %}: {{ log.order.id }}
+                            </div>
+                        </td>
+                        <td>
+                            <div style="font-size:var(--text-sm);">
+                                {% if log.bot %}
+                                    <i class="fas fa-robot" style="margin-right:4px;font-size:10px;"></i>
+                                    {{ log.bot.name }}
+                                {% else %}
+                                    <span style="color:var(--gray-500);">{% trans "No bot" %}</span>
+                                {% endif %}
+                            </div>
+                            <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px;">
+                                {% if log.broker_account %}
+                                    {{ log.broker_account.name }}
+                                {% else %}
+                                    {% trans "No account" %}
+                                {% endif %}
+                            </div>
+                        </td>
+                        <td>
+                            <div>{{ log.symbol }}</div>
+                            <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px;">
+                                {{ log.side|upper }}
+                            </div>
+                        </td>
+                        <td>
+                            <div style="font-size:var(--text-sm);color:var(--gray-200);">
+                                {% trans "Qty" %}: {{ log.qty }}
+                            </div>
+                            <div style="font-size:var(--text-xs);color:var(--gray-400);">
+                                {% trans "Price" %}: {{ log.price|format_currency }}
+                            </div>
+                        </td>
+                        <td>
+                            {% if log.pnl %}
+                                {% if log.pnl > 0 %}
+                                    <span class="pnl-chip pnl-positive">{{ log.pnl|format_currency }}</span>
+                                {% elif log.pnl < 0 %}
+                                    <span class="pnl-chip pnl-negative">{{ log.pnl|format_currency }}</span>
+                                {% else %}
+                                    <span class="pnl-chip pnl-flat">{{ log.pnl|format_currency }}</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="pnl-chip pnl-flat">{% trans "Pending" %}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="status-badge status-{{ log.status|default:'new' }}">
+                                {{ log.status }}
+                            </span>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="7" style="text-align:center;color:var(--gray-400);padding:var(--space-lg);">
+                            <i class="fas fa-inbox" style="font-size:var(--text-2xl);margin-bottom:var(--space-sm);display:block;"></i>
+                            {% trans "No backtest data available yet." %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

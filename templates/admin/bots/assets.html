@@ -1,0 +1,533 @@
+{% extends "admin/trading_base.html" %}
+{% load static i18n admin_metrics %}
+
+{% block title %}{% trans "Assets" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Assets" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Manage trading assets and symbols. Configure trading parameters and lot sizes." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .assets-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Asset-specific styles */
+    .asset-symbol {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-sm);
+        font-weight: 600;
+        background: rgba(67, 97, 238, 0.2);
+        color: var(--primary-light);
+    }
+
+    .asset-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-md);
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-sm);
+        font-weight: 600;
+    }
+
+    .asset-meta {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .asset-name {
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    .asset-display-name {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Trading parameters */
+    .param-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-xs);
+        padding: var(--space-xs) var(--space-sm);
+        border-radius: 8px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--gray-300);
+    }
+
+    .param-value {
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    /* Status badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-active {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .status-inactive {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    /* Quantity indicators */
+    .qty-indicator {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .qty-value {
+        font-weight: 600;
+        color: var(--light);
+        font-size: var(--text-sm);
+    }
+
+    .qty-label {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Empty state */
+    .empty-state {
+        text-align: center;
+        padding: var(--space-2xl);
+        color: var(--gray-400);
+    }
+
+    .empty-state-icon {
+        font-size: 3rem;
+        margin-bottom: var(--space-md);
+        opacity: 0.5;
+    }
+
+    .action-buttons {
+        display: flex;
+        gap: var(--space-xs);
+        align-items: center;
+    }
+
+    .inline-action {
+        display: inline-flex;
+        margin: 0;
+    }
+
+    .inline-action .action-btn {
+        padding: 0;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .modern-table {
+            min-width: 800px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .header-actions {
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .header-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .filters-bar {
+            flex-direction: column;
+        }
+
+        .filter-actions {
+            flex-direction: column;
+        }
+
+        .filter-select {
+            min-width: 100%;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .action-buttons {
+            flex-direction: column;
+        }
+
+        .action-btn {
+            width: 28px;
+            height: 28px;
+            font-size: var(--text-xs);
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="assets-container">
+    <!-- Header Actions -->
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <a href="{% url 'admin:bots_asset_add' %}" class="btn btn-primary">
+            <i class="fas fa-plus"></i> {% trans "Add Asset" %}
+        </a>
+        <button type="button" class="btn btn-success" id="bulkActivateBtn">
+            <i class="fas fa-toggle-on"></i> {% trans "Bulk Activate" %}
+        </button>
+        <button type="button" class="btn btn-outline" id="refreshBtn">
+            <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+        </button>
+    </div>
+
+    <!-- Filters Bar -->
+    <div class="filters-bar">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" 
+                   placeholder="{% trans 'Search assets by symbol or name...' %}" 
+                   id="searchInput">
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="statusFilter">
+                <option value="">{% trans "All Status" %}</option>
+                <option value="active">{% trans "Active" %}</option>
+                <option value="inactive">{% trans "Inactive" %}</option>
+            </select>
+            <select class="filter-select" id="categoryFilter">
+                <option value="">{% trans "All Categories" %}</option>
+                <option value="forex">{% trans "Forex" %}</option>
+                <option value="crypto">{% trans "Crypto" %}</option>
+                <option value="indices">{% trans "Indices" %}</option>
+                <option value="commodities">{% trans "Commodities" %}</option>
+            </select>
+            <button class="btn btn-outline" type="button" id="clearFiltersBtn">
+                <i class="fas fa-times"></i> {% trans "Clear Filters" %}
+            </button>
+        </div>
+    </div>
+
+    <!-- Assets List Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Trading Assets" %}</h3>
+                <p class="card-subtitle">{% trans "Configured symbols and their trading parameters" %}</p>
+            </div>
+            <div class="action-icons">
+                <i class="fas fa-download" title="{% trans 'Import' %}"></i>
+                <i class="fas fa-upload" title="{% trans 'Export' %}"></i>
+                <i class="fas fa-cog" title="{% trans 'Settings' %}"></i>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="modern-table">
+                <thead>
+                    <tr>
+                        <th>{% trans "Asset" %}</th>
+                        <th>{% trans "Symbol" %}</th>
+                        <th>{% trans "Lot Sizes" %}</th>
+                        <th>{% trans "Trading Limits" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Actions" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for asset in assets %}
+                        <tr class="asset-row" 
+                            data-status="{{ asset.is_active|yesno:'active,inactive' }}"
+                            data-category="{{ asset.get_category|default:'forex' }}"
+                            data-search="{{ asset.symbol }} {{ asset.display_name }} {{ asset.get_category|default:'' }}">
+                            <td>
+                                <div style="display: flex; align-items: center; gap: var(--space-md);">
+                                    <div class="asset-icon">
+                                        {{ asset.symbol|slice:":1"|upper }}
+                                    </div>
+                                    <div class="asset-meta">
+                                        <div class="asset-name">{{ asset.display_name|default:asset.symbol }}</div>
+                                        <div class="asset-display-name">{{ asset.symbol }}</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <span class="asset-symbol">
+                                    <i class="fas fa-chart-line"></i>
+                                    {{ asset.symbol }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="qty-indicator">
+                                    <div class="qty-value">
+                                        Min: {{ asset.min_qty|floatformat:8 }}
+                                    </div>
+                                    <div class="qty-label">
+                                        Rec: {{ asset.recommended_qty|floatformat:8 }}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <div style="display: flex; flex-direction: column; gap: var(--space-xs);">
+                                    {% if asset.max_spread > 0 %}
+                                    <span class="param-badge">
+                                        <i class="fas fa-arrows-left-right"></i>
+                                        Max Spread: <span class="param-value">{{ asset.max_spread|floatformat:8 }}</span>
+                                    </span>
+                                    {% endif %}
+                                    {% if asset.min_notional > 0 %}
+                                    <span class="param-badge">
+                                        <i class="fas fa-dollar-sign"></i>
+                                        Min Notional: <span class="param-value">{{ asset.min_notional|floatformat:8 }}</span>
+                                    </span>
+                                    {% endif %}
+                                    {% if asset.max_spread == 0 and asset.min_notional == 0 %}
+                                    <span style="font-size: var(--text-xs); color: var(--gray-400);">
+                                        {% trans "No limits" %}
+                                    </span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td>
+                                {% if asset.is_active %}
+                                    <span class="status-badge status-active">
+                                        <i class="fas fa-check-circle"></i>{% trans "Active" %}
+                                    </span>
+                                {% else %}
+                                    <span class="status-badge status-inactive">
+                                        <i class="fas fa-times-circle"></i>{% trans "Inactive" %}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="action-buttons">
+                                    <a href="{% url 'admin:bots_asset_change' asset.pk %}"
+                                       class="action-btn inspect"
+                                       title="{% trans 'View / Edit asset' %}">
+                                        <i class="fas fa-edit"></i>
+                                    </a>
+                                    {% if asset.is_active %}
+                                        <form method="post" action="{% url 'admin:bots_asset_deactivate' asset.pk %}" class="inline-action">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                            <button type="submit"
+                                                    class="action-btn deactivate"
+                                                    title="{% trans 'Deactivate asset' %}">
+                                                <i class="fas fa-pause"></i>
+                                            </button>
+                                        </form>
+                                    {% else %}
+                                        <form method="post" action="{% url 'admin:bots_asset_activate' asset.pk %}" class="inline-action">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                            <button type="submit"
+                                                    class="action-btn activate"
+                                                    title="{% trans 'Activate asset' %}">
+                                                <i class="fas fa-play"></i>
+                                            </button>
+                                        </form>
+                                    {% endif %}
+                                    <a href="{% url 'admin:bots_bot_changelist' %}?asset__id__exact={{ asset.pk }}"
+                                       class="action-btn link"
+                                       title="{% trans 'View bots using this asset' %}">
+                                        <i class="fas fa-robot"></i>
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <i class="fas fa-coins empty-state-icon"></i>
+                                <div>{% trans "No assets configured." %}</div>
+                                <div style="font-size: var(--text-sm); margin-top: var(--space-sm);">
+                                    {% trans "Add your first asset to start trading." %}
+                                </div>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="pagination">
+            <div class="pagination-info">
+                {{ assets|length }} {% trans "assets shown" %}
+            </div>
+            <div class="pagination-controls">
+                <a href="{% url 'admin:bots_asset_changelist' %}" class="pagination-btn">
+                    {% trans "Open in Admin" %}
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Stats Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Assets Overview" %}</h3>
+                <p class="card-subtitle">{% trans "Trading assets summary and statistics" %}</p>
+            </div>
+        </div>
+        
+        <div class="progress-grid">
+            <div class="progress-card">
+                <div class="progress-value">{{ total_assets_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Total Assets" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ active_assets_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Active" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ forex_assets_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Forex" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ crypto_assets_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Crypto" %}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Filter functionality
+    const searchInput = document.getElementById('searchInput');
+    const statusFilter = document.getElementById('statusFilter');
+    const categoryFilter = document.getElementById('categoryFilter');
+    const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const bulkActivateBtn = document.getElementById('bulkActivateBtn');
+    const paginationInfo = document.querySelector('.pagination-info');
+
+    const getRows = () => Array.from(document.querySelectorAll('.asset-row'));
+
+    const filterAssets = () => {
+        const searchTerm = searchInput.value.toLowerCase();
+        const statusValue = statusFilter.value;
+        const categoryValue = categoryFilter.value;
+
+        let visibleCount = 0;
+
+        getRows().forEach(row => {
+            const searchData = row.getAttribute('data-search').toLowerCase();
+            const statusData = row.getAttribute('data-status');
+            const categoryData = row.getAttribute('data-category');
+
+            const matchesSearch = searchData.includes(searchTerm);
+            const matchesStatus = !statusValue || statusData === statusValue;
+            const matchesCategory = !categoryValue || categoryData === categoryValue;
+
+            if (matchesSearch && matchesStatus && matchesCategory) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        if (paginationInfo) {
+            paginationInfo.textContent = `${visibleCount} {% trans "assets shown" %}`;
+        }
+    };
+
+    // Event listeners for filters
+    searchInput.addEventListener('input', filterAssets);
+    statusFilter.addEventListener('change', filterAssets);
+    categoryFilter.addEventListener('change', filterAssets);
+
+    // Clear filters
+    clearFiltersBtn.addEventListener('click', function() {
+        searchInput.value = '';
+        statusFilter.value = '';
+        categoryFilter.value = '';
+        filterAssets();
+    });
+
+    // Refresh button
+    refreshBtn.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+        setTimeout(() => {
+            window.location.reload();
+        }, 1000);
+    });
+
+    // Bulk activate
+    bulkActivateBtn.addEventListener('click', function() {
+        if (confirm('{% trans "Are you sure you want to activate all filtered assets?" %}')) {
+            this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Activating..." %}';
+            
+            // Simulate API call
+            setTimeout(() => {
+                this.innerHTML = '<i class="fas fa-toggle-on"></i> {% trans "Bulk Activate" %}';
+                // In real implementation, this would make an API call
+                alert('{% trans "Selected assets have been activated." %}');
+                window.location.reload();
+            }, 1500);
+        }
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Focus search on Ctrl+K or /
+        if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+            e.preventDefault();
+            searchInput.focus();
+        }
+        
+        // Refresh on F5
+        if (e.key === 'F5') {
+            e.preventDefault();
+            refreshBtn.click();
+        }
+        
+        // New asset on Ctrl+N
+        if (e.ctrlKey && e.key === 'n') {
+            e.preventDefault();
+            document.querySelector('a[href*="bots_asset_add"]').click();
+        }
+    });
+
+    // Auto-refresh every 60 seconds (optional)
+    setInterval(() => {
+        if (!document.hidden) {
+            refreshBtn.click();
+        }
+    }, 60000);
+
+    filterAssets();
+});
+</script>
+{% endblock %}

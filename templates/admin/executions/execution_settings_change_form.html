@@ -1,0 +1,710 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{% if add %}{% trans 'Add Execution Setting' %}{% else %}{{ original.key|default:original }}{% endif %} | EzTrade{% endblock %}
+
+{% block page_title %}
+    {% if add %}
+        {% trans 'Add Execution Setting' %}
+    {% else %}
+        {{ original.key|default:"Execution Setting" }}
+    {% endif %}
+{% endblock %}
+
+{% block page_subtitle %}
+    {% if add %}
+        {% trans 'Create a new global execution setting' %}
+    {% else %}
+        {% trans 'Manage execution parameters and trading configuration' %}
+    {% endif %}
+{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .execution-form-container {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 0 var(--space-sm);
+    }
+
+    /* Form sections */
+    .form-section {
+        background: var(--bg-card);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        border: 1px solid var(--border-light);
+        margin-bottom: var(--space-md);
+    }
+
+    .section-header {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        margin-bottom: var(--space-md);
+        padding-bottom: var(--space-sm);
+        border-bottom: 1px solid var(--border-light);
+    }
+
+    .section-icon {
+        width: 24px;
+        height: 24px;
+        border-radius: var(--radius-sm);
+        background: var(--primary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-sm);
+        flex-shrink: 0;
+    }
+
+    .section-title {
+        font-size: var(--text-base);
+        font-weight: 600;
+        color: var(--light);
+        margin: 0;
+    }
+
+    .section-subtitle {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        margin: 0;
+    }
+
+    /* Form grid */
+    .form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: var(--space-md);
+    }
+
+    .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .form-label {
+        font-size: var(--text-sm);
+        font-weight: 500;
+        color: var(--gray-300);
+        margin: 0;
+    }
+
+    .form-control {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        padding: var(--space-sm);
+        color: var(--light);
+        font-size: var(--text-sm);
+        min-height: 36px;
+    }
+
+    .form-text {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        line-height: 1.3;
+        margin: 0;
+    }
+
+    /* Readonly field styling */
+    .readonly-field {
+        background: rgba(255, 255, 255, 0.02) !important;
+        border: 1px solid var(--border-dark) !important;
+        color: var(--gray-400) !important;
+        cursor: not-allowed;
+    }
+
+    /* Value indicators */
+    .value-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        font-size: 0.7rem;
+        font-weight: 500;
+        margin-top: 4px;
+    }
+
+    .value-safe { background: var(--success-light); color: var(--success); }
+    .value-warning { background: var(--warning-light); color: var(--warning); }
+    .value-danger { background: var(--danger-light); color: var(--danger); }
+
+    /* Boolean toggle styling */
+    .boolean-toggle {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+    }
+
+    .toggle-label {
+        font-size: var(--text-sm);
+        color: var(--gray-300);
+    }
+
+    /* Parameter preview */
+    .param-preview {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: var(--radius-md);
+        padding: var(--space-md);
+        margin-top: var(--space-md);
+        border: 1px solid var(--border-light);
+    }
+
+    .preview-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: var(--space-md);
+    }
+
+    .preview-item {
+        text-align: center;
+    }
+
+    .preview-value {
+        font-size: var(--text-lg);
+        font-weight: 700;
+        color: var(--light);
+        margin-bottom: var(--space-xs);
+    }
+
+    .preview-label {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Form actions */
+    .form-actions {
+        display: flex;
+        gap: var(--space-sm);
+        justify-content: flex-end;
+        padding: var(--space-md) 0;
+        margin-top: var(--space-md);
+        flex-wrap: wrap;
+    }
+
+    /* Header actions */
+    .header-actions {
+        margin-bottom: var(--space-md);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+        .execution-form-container {
+            padding: 0 var(--space-xs);
+        }
+
+        .form-section {
+            padding: var(--space-sm);
+        }
+
+        .form-grid {
+            grid-template-columns: 1fr;
+            gap: var(--space-sm);
+        }
+
+        .form-actions {
+            flex-direction: column;
+        }
+
+        .form-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .section-header {
+            margin-bottom: var(--space-sm);
+        }
+
+        .preview-grid {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="execution-form-container">
+    <!-- Compact Header Actions -->
+    <div class="header-actions" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-sm);">
+        <a href="{% url 'admin:execution_executionsetting_changelist' %}" class="btn btn-outline btn-sm">
+            <i class="fas fa-arrow-left"></i> {% trans 'All Settings' %}
+        </a>
+        
+        {% if not add and original %}
+        <div style="display: flex; gap: var(--space-sm); align-items: center; flex-wrap: wrap;">
+            <span class="setting-key" style="font-size: var(--text-sm);">
+                <i class="fas fa-key"></i>
+                {{ original.key }}
+            </span>
+        </div>
+        {% endif %}
+    </div>
+
+    <form {% if has_file_field %}enctype="multipart/form-data" {% endif %}{% if form_url %}action="{{ form_url }}" {% endif %}method="post" id="{{ opts.model_name }}_form" novalidate>
+        {% csrf_token %}
+        {% block form_top %}{% endblock %}
+        <input type="hidden" name="is_popup" value="{{ is_popup }}">
+        {% if to_field %}<input type="hidden" name="{{ to_field }}" value="{{ to_field_value }}">{% endif %}
+        
+        {% if adminform.form.non_field_errors %}
+        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: var(--radius-md); padding: var(--space-sm); margin-bottom: var(--space-md); color: var(--danger); font-size: var(--text-sm);">
+            <strong>{% trans 'Form errors:' %}</strong>
+            <ul style="margin: var(--space-xs) 0 0 var(--space-md);">
+            {% for error in adminform.form.non_field_errors %}
+                <li>{{ error }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Decision Guardrails Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon" style="background: var(--info);">
+                    <i class="fas fa-brain"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Decision Guardrails' %}</div>
+                    <div class="section-subtitle">{% trans 'Trading decision thresholds and safety limits' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% with field=adminform.form.decision_min_score %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                    <div id="minScoreIndicator" class="value-indicator value-safe" style="display: none;">
+                        <i class="fas fa-check"></i><span id="minScoreText">{% trans "Safe Threshold" %}</span>
+                    </div>
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.decision_flip_score %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                    <div id="flipScoreIndicator" class="value-indicator value-warning" style="display: none;">
+                        <i class="fas fa-exclamation"></i><span id="flipScoreText">{% trans "Flip Threshold" %}</span>
+                    </div>
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.decision_allow_hedging %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.decision_flip_cooldown_min %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.decision_max_flips_per_day %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.decision_order_cooldown_sec %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+            </div>
+        </div>
+
+        <!-- Opposite Scalp Tuning Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon" style="background: var(--danger);">
+                    <i class="fas fa-bolt"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Opposite Scalp Tuning' %}</div>
+                    <div class="section-subtitle">{% trans 'Scalping strategy parameters and offsets' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% with field=adminform.form.decision_scalp_sl_offset %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.decision_scalp_tp_offset %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.decision_scalp_qty_multiplier %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+            </div>
+        </div>
+
+        <!-- Risk & Monitoring Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon" style="background: var(--warning);">
+                    <i class="fas fa-shield-alt"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Risk & Monitoring' %}</div>
+                    <div class="section-subtitle">{% trans 'Risk management and position monitoring parameters' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% with field=adminform.form.early_exit_max_unrealized_pct %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.trailing_trigger %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.trailing_distance %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.order_ack_timeout_seconds %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+            </div>
+        </div>
+
+        <!-- Psychology & Behavior Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon" style="background: var(--primary-light);">
+                    <i class="fas fa-heartbeat"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Psychology & Behavior' %}</div>
+                    <div class="section-subtitle">{% trans 'Loss streak cooling and drawdown-based sizing' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% with field=adminform.form.max_loss_streak_before_pause %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.loss_streak_cooldown_min %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.drawdown_soft_limit_pct %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.soft_size_multiplier %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.drawdown_hard_limit_pct %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.hard_size_multiplier %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+            </div>
+        </div>
+
+        <!-- Accounts & Sizing Section -->
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon" style="background: var(--primary);">
+                    <i class="fas fa-wallet"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'Accounts & Sizing' %}</div>
+                    <div class="section-subtitle">{% trans 'Account configuration and position sizing limits' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                {% with field=adminform.form.paper_start_balance %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.mt5_default_contract_size %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.bot_min_default_qty %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.max_order_lot %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+
+                {% with field=adminform.form.max_order_notional %}
+                <div class="form-group">
+                    <label for="{{ field.id_for_label }}" class="form-label">
+                        {{ field.label }}{% if field.field.required %} <span style="color: var(--danger);">*</span>{% endif %}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                    <div class="form-text">{{ field.help_text }}</div>
+                    {% endif %}
+                </div>
+                {% endwith %}
+            </div>
+        </div>
+
+        <!-- Readonly Key Field -->
+        {% if not add %}
+        <div class="form-section">
+            <div class="section-header">
+                <div class="section-icon" style="background: var(--gray-500);">
+                    <i class="fas fa-key"></i>
+                </div>
+                <div>
+                    <div class="section-title">{% trans 'System Information' %}</div>
+                    <div class="section-subtitle">{% trans 'Read-only system fields and metadata' %}</div>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                <div class="form-group">
+                    <label class="form-label">{% trans 'Setting Key' %}</label>
+                    <input type="text" class="form-control readonly-field" value="{{ original.key }}" readonly>
+                    <div class="form-text">{% trans 'Unique identifier for this execution setting (read-only)' %}</div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Parameter Preview -->
+        {% if not add %}
+        <div class="param-preview">
+            <div style="font-weight: 600; color: var(--light); font-size: var(--text-sm); margin-bottom: var(--space-md);">
+                {% trans "Execution Settings Summary" %}
+            </div>
+            <div class="preview-grid">
+                <div class="preview-item">
+                    <div class="preview-value">{{ original.decision_min_score|default:"0.00" }}</div>
+                    <div class="preview-label">{% trans "Min Score" %}</div>
+                </div>
+                <div class="preview-item">
+                    <div class="preview-value">{{ original.decision_flip_score|default:"0.00" }}</div>
+                    <div class="preview-label">{% trans "Flip Score" %}</div>
+                </div>
+                <div class="preview-item">
+                    <div class="preview-value">
+                        {% if original.decision_allow_hedging %}
+                            {% trans "Yes" %}
+                        {% else %}
+                            {% trans "No" %}
+                        {% endif %}
+                    </div>
+                    <div class="preview-label">{% trans "Hedging" %}</div>
+                </div>
+                <div class="preview-item">
+                    <div class="preview-value">{{ original.order_ack_timeout_seconds|default:"0" }}s</div>
+                    <div class="preview-label">{% trans "Timeout" %}</div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Compact Form Actions -->
+        <div class="form-actions">
+            <button type="submit" name="_save" class="btn btn-primary btn-sm">
+                <i class="fas fa-save"></i> {% trans 'Save' %}
+            </button>
+            <button type="submit" name="_addanother" class="btn btn-outline btn-sm">
+                <i class="fas fa-plus"></i> {% trans 'Save & Add Another' %}
+            </button>
+            <button type="submit" name="_continue" class="btn btn-outline btn-sm">
+                <i class="fas fa-edit"></i> {% trans 'Save & Continue' %}
+            </button>
+
+            {% if not add %}
+            <button type="button" class="btn btn-warning btn-sm" id="resetDefaultBtn">
+                <i class="fas fa-undo"></i>
+                {% trans "Reset to Defaults" %}
+            </button>
+            {% endif %}
+        </div>
+    </form>
+</div>
+{% endblock %}

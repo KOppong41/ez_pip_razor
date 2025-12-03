@@ -1,0 +1,273 @@
+{% extends 'admin/trading_base.html' %}
+{% load static dashboard_stats %}
+
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}Trading Dashboard{% endblock %}
+{% block page_subtitle %}Real-time performance metrics and analytics{% endblock %}
+
+{% get_dashboard_metrics as metrics %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .bot-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-sm);
+    }
+
+    .bot-list-item {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-sm) var(--space-md);
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .bot-avatar {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 30% 30%, #ffffff, #4f46e5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .bot-avatar--running::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        border: 2px solid rgba(96, 165, 250, 0.6);
+        box-shadow: 0 0 12px rgba(56, 189, 248, 0.7);
+        animation: bot-pulse 1.6s ease-out infinite;
+    }
+
+    .bot-eye {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #0f172a;
+        box-shadow: 0 0 4px rgba(15, 23, 42, 0.8);
+        z-index: 1;
+        animation: bot-eye-blink 3s ease-in-out infinite;
+    }
+
+    .bot-list-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .bot-name {
+        font-size: var(--text-sm);
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    .bot-details {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    @keyframes bot-pulse {
+        0% {
+            opacity: 1;
+            transform: scale(1);
+        }
+        70% {
+            opacity: 0;
+            transform: scale(1.35);
+        }
+        100% {
+            opacity: 0;
+            transform: scale(1.35);
+        }
+    }
+
+    @keyframes bot-eye-blink {
+        0%, 10%, 90%, 100% {
+            transform: scaleY(1);
+        }
+        5%, 95% {
+            transform: scaleY(0.2);
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="overview-grid">
+    <div class="overview-card">
+        <div class="overview-title">Total Profit</div>
+        <div class="overview-value">${{ metrics.total_profit|floatformat:2 }}</div>
+        <div class="overview-change positive">{{ metrics.decisions_today }} trades today</div>
+    </div>
+    <div class="overview-card">
+        <div class="overview-title">Active Bots</div>
+        <div class="overview-value">{{ metrics.active_bots }}</div>
+        <div class="overview-change positive">Live</div>
+    </div>
+    <div class="overview-card">
+        <div class="overview-title">Open Positions</div>
+        <div class="overview-value">{{ metrics.open_positions }}</div>
+        <div class="overview-change negative">ongoing</div>
+    </div>
+    <div class="overview-card">
+        <div class="overview-title">Success Rate</div>
+        <div class="overview-value">{{ metrics.success_rate|floatformat:1 }}%</div>
+        <div class="overview-change positive">{{ metrics.wins }}W / {{ metrics.losses }}L</div>
+    </div>
+</div>
+
+<div class="dashboard-grid">
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Active Bots</div>
+                <div class="card-subtitle">Bots currently allowed to trade</div>
+            </div>
+            <a href="{% url 'admin:bots_bot_changelist' %}" class="card-more">View All</a>
+        </div>
+        <div class="card-content">
+            {% if metrics.active_bots_list %}
+            <ul class="bot-list">
+                {% for bot in metrics.active_bots_list %}
+                <li class="bot-list-item">
+                    <div class="bot-avatar bot-avatar--running">
+                        <span class="bot-eye"></span>
+                    </div>
+                    <div class="bot-list-meta">
+                        <div class="bot-name">{{ bot.name }}</div>
+                        <div class="bot-details">
+                            {% if bot.asset %}{{ bot.asset.symbol }}{% else %}-{% endif %}
+                            ·
+                            {% if bot.broker_account %}{{ bot.broker_account.name }}{% else %}No account{% endif %}
+                        </div>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="card-text text-muted">
+                No bots are active right now. Activate a bot from the Bots page to see it here.
+            </p>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Bot Performance</div>
+                <div class="card-subtitle">Active trading bots</div>
+            </div>
+            <a href="#" class="card-more">View All</a>
+        </div>
+        <!-- Content here -->
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Assets</div>
+                <div class="card-subtitle">{{ metrics.active_assets }} active / {{ metrics.total_assets }} total</div>
+            </div>
+            <a href="{% url 'admin:bots_asset_changelist' %}" class="card-more">Manage Assets</a>
+        </div>
+        <div class="card-content">
+            <p class="card-text">
+                {{ metrics.asset_preview }}{% if metrics.total_assets > 3 %} and more...{% endif %}
+            </p>
+            <p class="card-text text-muted">
+                {{ metrics.broker_accounts }} active broker accounts connected.
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Execution Settings</div>
+                <div class="card-subtitle">{{ metrics.execution_settings }} configured blocks</div>
+            </div>
+            <a href="{% url 'admin:execution_executionsetting_changelist' %}" class="card-more">View Settings</a>
+        </div>
+        <div class="card-content">
+            <p class="card-text">
+                Execution settings guardrails (kill switches, cooling, streak protection) are centralized here.
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Brokers</div>
+                <div class="card-subtitle">{{ metrics.broker_accounts }} active accounts</div>
+            </div>
+            <a href="{% url 'admin:brokers_brokeraccount_changelist' %}" class="card-more">Manage Brokers</a>
+        </div>
+        <div class="card-content">
+            <p class="card-text">
+                {{ metrics.broker_accounts }} active broker trysts covering {{ metrics.active_assets }} assets.
+            </p>
+            <p class="card-text text-muted">Click through to inspect credentials, verification status, and health checks.</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Broker Types</div>
+                <div class="card-subtitle">{{ metrics.broker_types }} registered brokers</div>
+            </div>
+            <a href="{% url 'admin:brokers_broker_changelist' %}" class="card-more">View Brokers</a>
+        </div>
+        <div class="card-content">
+            <p class="card-text">
+                Create or edit broker templates (Exness, FBS, Binance, paper, etc.) from this list.
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Trading Profiles</div>
+                <div class="card-subtitle">Standardized behavior templates</div>
+            </div>
+            <a href="{% url 'admin:execution_tradingprofile_changelist' %}" class="card-more">Manage Profiles</a>
+        </div>
+        <div class="card-content">
+            <p class="card-text">
+                Select a profile to apply a safe, balanced, day-trader, scalper, or long-term template to any bot.
+                Advanced edits show inline warnings before committing high-risk changes.
+            </p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">Subscriptions</div>
+                <div class="card-subtitle">Plans and user limits</div>
+            </div>
+            <a href="{% url 'admin:subscription_subscriptionplan_changelist' %}" class="card-more">Manage Plans</a>
+        </div>
+        <div class="card-content">
+            <p class="card-text">
+                Configure how many bots and broker accounts each plan can run, and how long subscriptions stay active.
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}

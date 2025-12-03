@@ -1,0 +1,556 @@
+{% extends "admin/trading_base.html" %}
+{% load static admin_metrics i18n position_tags trade_log_tags %}
+
+{% block extra_css %}
+<style>
+    /* Metrics */
+    .metrics-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--space-md);
+        margin-bottom: var(--space-lg);
+    }
+
+    .metric-card {
+        background: var(--bg-card);
+        backdrop-filter: var(--backdrop-blur);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+        text-align: center;
+        transition: all 0.3s ease;
+    }
+
+    .metric-card:hover {
+        border-color: var(--border-medium);
+        transform: translateY(-2px);
+    }
+
+    .metric-label {
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--gray-400);
+        margin-bottom: var(--space-xs);
+        font-weight: 600;
+    }
+
+    .metric-value {
+        font-size: var(--text-2xl);
+        font-weight: 700;
+        margin-bottom: var(--space-xs);
+        background: linear-gradient(90deg, #fff 0%, #a5b4fc 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+
+    .metric-change {
+        font-size: var(--text-xs);
+        font-weight: 500;
+    }
+
+    .metric-change.positive {
+        color: var(--success);
+    }
+
+    .metric-change.negative {
+        color: var(--danger);
+    }
+
+    .metric-change.neutral {
+        color: var(--info);
+    }
+
+    /* PnL chips */
+    .pnl-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-xs);
+        padding: var(--space-xs) var(--space-sm);
+        border-radius: 999px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+    }
+
+    .pnl-positive {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .pnl-negative {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .pnl-flat {
+        background: rgba(148, 163, 184, 0.15);
+        color: var(--gray-200);
+    }
+
+    /* Status badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-xs);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 999px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-win {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .status-loss {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .status-breakeven {
+        background: rgba(148, 163, 184, 0.2);
+        color: var(--gray-200);
+    }
+
+    .status-error {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .status-new {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+</style>
+{% endblock %}
+
+{% block page_title %}Trade Logs & Outcomes{% endblock %}
+
+{% block page_subtitle %}Append-only feed of realized outcomes. Each log ties back to an order, account and bot for quick forensic review.{% endblock %}
+
+{% block content %}
+
+<!-- Quick metrics -->
+<div class="metrics-grid">
+    <div class="metric-card">
+        <div class="metric-label">{% trans "Total Logs" %}</div>
+        <div class="metric-value">
+            {% get_trade_logs_count as total_logs %}
+            {{ total_logs }}
+        </div>
+        <div class="metric-change neutral">
+            {% trans "All time" %}
+        </div>
+    </div>
+    
+    <div class="metric-card">
+        <div class="metric-label">{% trans "PnL Snapshot" %}</div>
+        <div class="metric-value">
+            {% get_trade_logs_metrics as metrics %}
+            {{ metrics.total_pnl|default:0|format_currency }}
+        </div>
+        <div class="metric-change {% if metrics.total_pnl and metrics.total_pnl > 0 %}positive{% else %}negative{% endif %}">
+            {% trans "Lifetime P&L" %}
+        </div>
+    </div>
+    
+    <div class="metric-card">
+        <div class="metric-label">{% trans "Win Rate" %}</div>
+        <div class="metric-value">
+            {% get_trade_logs_metrics as metrics %}
+            {{ metrics.win_rate|format_percentage }}
+        </div>
+        <div class="metric-change {% if metrics.win_rate and metrics.win_rate > 50 %}positive{% else %}negative{% endif %}">
+            {{ metrics.win_count|default:0 }}W / {{ metrics.loss_count|default:0 }}L
+        </div>
+    </div>
+</div>
+
+<!-- Filters Bar -->
+<div class="action-bar">
+    <div class="search-input-wrapper">
+        <i class="fas fa-search search-icon"></i>
+        <input type="text" 
+               class="search-input" 
+               placeholder="{% trans 'Search by symbol, order ID, account or bot…' %}"
+               id="search-input">
+    </div>
+    <div class="action-buttons">
+        <select class="filter-select" id="status-filter">
+            <option value="">{% trans "All Status" %}</option>
+            <option value="new">{% trans "New" %}</option>
+            <option value="win">{% trans "Win" %}</option>
+            <option value="loss">{% trans "Loss" %}</option>
+            <option value="breakeven">{% trans "Breakeven" %}</option>
+            <option value="error">{% trans "Error" %}</option>
+        </select>
+        <select class="filter-select" id="side-filter">
+            <option value="">{% trans "All Sides" %}</option>
+            <option value="buy">{% trans "Buy" %}</option>
+            <option value="sell">{% trans "Sell" %}</option>
+        </select>
+        <div class="date-filter-group">
+            <input type="datetime-local" id="logs-from-date" class="date-input"
+                   aria-label="{% trans 'From date' %}" title="{% trans 'Filter start date' %}"
+                   step="1">
+            <input type="datetime-local" id="logs-to-date" class="date-input"
+                   aria-label="{% trans 'To date' %}" title="{% trans 'Filter end date' %}"
+                   step="1">
+            <select class="filter-select" id="logs-date-sort" aria-label="{% trans 'Sort by date' %}">
+                <option value="desc">{% trans "Newest first" %}</option>
+                <option value="asc">{% trans "Oldest first" %}</option>
+            </select>
+        </div>
+        <button class="btn btn-outline" type="button" id="refresh-btn">
+            <i class="fas fa-sync-alt"></i>
+            <span>{% trans "Refresh" %}</span>
+        </button>
+    </div>
+</div>
+
+<!-- Trade Logs Table -->
+<div class="card">
+    <div class="card-header">
+        <div>
+            <h3 class="card-title">{% trans "Recent Trade Logs" %}</h3>
+            <p class="card-subtitle">
+                {% trans "Every line is one outcome. Cross-link back to the parent order and account to see full context." %}
+            </p>
+        </div>
+        <div class="page-actions">
+            <a href="{% url 'admin:execution_signal_changelist' %}" class="btn btn-outline">
+                <i class="fas fa-wave-square"></i>
+                <span>{% trans "Signals" %}</span>
+            </a>
+            <a href="{% url 'admin:execution_decision_changelist' %}" class="btn btn-outline">
+                <i class="fas fa-brain"></i>
+                <span>{% trans "Decisions" %}</span>
+            </a>
+            <a href="{% url 'admin:execution_tradelog_changelist' %}" class="btn btn-outline">
+                <i class="fas fa-table"></i>
+                <span>{% trans "Open in Admin" %}</span>
+            </a>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table class="modern-table">
+            <thead>
+                <tr data-timestamp="{{ log.created_at|date:'c' }}">
+                    <th>{% trans "Time" %}</th>
+                    <th>{% trans "Order" %}</th>
+                    <th>{% trans "Bot / Account" %}</th>
+                    <th>{% trans "Symbol / Side" %}</th>
+                    <th>{% trans "Qty / Price" %}</th>
+                    <th>{% trans "PnL" %}</th>
+                    <th>{% trans "Status" %}</th>
+                    <th>{% trans "Actions" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                <tr>
+                    <td>{{ log.created_at|date:"M d, Y H:i" }}</td>
+                    <td>
+                        <div style="font-weight:600;">
+                            {% if log.order.client_order_id %}
+                                {{ log.order.client_order_id }}
+                            {% else %}
+                                #{{ log.order.id }}
+                            {% endif %}
+                        </div>
+                        <div style="font-size:var(--text-xs);color:var(--gray-400);">
+                            {% trans "Order ID" %}: {{ log.order.id }}
+                        </div>
+                    </td>
+                    <td>
+                        <div style="font-size:var(--text-sm);">
+                            {% if log.bot %}
+                                <i class="fas fa-robot" style="margin-right:4px;font-size:10px;"></i>
+                                {{ log.bot.name }}
+                            {% else %}
+                                <span style="color:var(--gray-500);">
+                                    {% trans "No bot linked" %}
+                                </span>
+                            {% endif %}
+                        </div>
+                        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px;">
+                            {% if log.broker_account %}
+                                <span class="pill pill-account">
+                                    <i class="fas fa-building-columns"></i>
+                                    {{ log.broker_account.name }}
+                                    {% if log.broker_account.login %}
+                                        · {{ log.broker_account.login }}
+                                    {% endif %}
+                                </span>
+                            {% else %}
+                                {% trans "Account not recorded" %}
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td>
+                        <div>
+                            <span class="pill pill-symbol">
+                                <i class="fas fa-coins"></i>
+                                {{ log.symbol }}
+                            </span>
+                        </div>
+                        <div style="margin-top:4px;">
+                            {% if log.side == "buy" %}
+                                <span class="pill pill-side-long">
+                                    <i class="fas fa-circle-up"></i>
+                                    {% trans "BUY" %}
+                                </span>
+                            {% else %}
+                                <span class="pill pill-side-short">
+                                    <i class="fas fa-circle-down"></i>
+                                    {% trans "SELL" %}
+                                </span>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td>
+                        <div style="font-size:var(--text-sm);color:var(--gray-200);">
+                            {% trans "Qty" %}: {{ log.qty }}
+                        </div>
+                        <div style="font-size:var(--text-xs);color:var(--gray-400);">
+                            {% trans "Price" %}: {{ log.price|default:"-"|format_currency }}
+                        </div>
+                    </td>
+                    <td>
+                        {% if log.pnl %}
+                            {% if log.pnl > 0 %}
+                                <span class="pnl-chip pnl-positive">
+                                    <i class="fas fa-arrow-trend-up"></i>
+                                    {{ log.pnl|format_currency }}
+                                </span>
+                            {% elif log.pnl < 0 %}
+                                <span class="pnl-chip pnl-negative">
+                                    <i class="fas fa-arrow-trend-down"></i>
+                                    {{ log.pnl|format_currency }}
+                                </span>
+                            {% else %}
+                                <span class="pnl-chip pnl-flat">
+                                    <i class="fas fa-arrows-left-right"></i>
+                                    {{ log.pnl|format_currency }}
+                                </span>
+                            {% endif %}
+                        {% else %}
+                            <span class="pnl-chip pnl-flat">
+                                <i class="fas fa-circle-notch"></i>
+                                {% trans "Pending" %}
+                            </span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <span class="status-badge status-{{ log.status|default:'new' }}">
+                            {% if log.status == "win" %}
+                                <i class="fas fa-trophy"></i>
+                                {% trans "Win" %}
+                            {% elif log.status == "loss" %}
+                                <i class="fas fa-face-frown"></i>
+                                {% trans "Loss" %}
+                            {% elif log.status == "breakeven" %}
+                                <i class="fas fa-scale-unbalanced-flip"></i>
+                                {% trans "Breakeven" %}
+                            {% elif log.status == "error" %}
+                                <i class="fas fa-triangle-exclamation"></i>
+                                {% trans "Order Error (no fill)" %}
+                            {% elif log.status == "new" %}
+                                <i class="fas fa-circle-notch"></i>
+                                {% trans "Pending outcome" %}
+                            {% else %}
+                                <i class="fas fa-circle"></i>
+                                {{ log.status }}
+                            {% endif %}
+                        </span>
+                    </td>
+                    <td>
+                        <div class="action-buttons">
+                            <a href="{% url 'admin:execution_tradelog_change' log.pk %}"
+                               class="action-btn inspect"
+                               title="{% trans 'View / Edit trade log' %}">
+                                <i class="fas fa-eye"></i>
+                            </a>
+                            <a href="{% url 'admin:execution_order_change' log.order.pk %}"
+                               class="action-btn order"
+                               title="{% trans 'Open parent order' %}">
+                                <i class="fas fa-diagram-project"></i>
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="8" style="text-align:center;color:var(--gray-400);padding:var(--space-lg);">
+                        <i class="fas fa-inbox" style="font-size:var(--text-2xl);margin-bottom:var(--space-sm);display:block;"></i>
+                        {% trans "No trade logs found." %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="pagination">
+        <div class="pagination-info">
+            {{ logs|length }} {% trans "log(s) on this page" %}
+        </div>
+        <div class="pagination-controls">
+            {% if page_obj.has_previous %}
+                <a href="?page={{ page_obj.previous_page_number }}" class="btn btn-outline btn-sm">
+                    &laquo; {% trans "Previous" %}
+                </a>
+            {% endif %}
+            <span style="font-size:var(--text-xs);color:var(--gray-400);margin:0 var(--space-xs);">
+                {% blocktrans %}Page {{ page_obj.number }} of {{ paginator.num_pages }}{% endblocktrans %}
+            </span>
+            {% if page_obj.has_next %}
+                <a href="?page={{ page_obj.next_page_number }}" class="btn btn-outline btn-sm">
+                    {% trans "Next" %} &raquo;
+                </a>
+            {% endif %}
+            <a href="{% url 'admin:execution_tradelog_changelist' %}" class="btn btn-outline btn-sm">
+                <i class="fas fa-table"></i>
+                <span>{% trans "Open full admin view" %}</span>
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize the page
+    initTradeLogsPage();
+    
+    // Animation for page load
+    const cards = document.querySelectorAll('.card, .metric-card');
+    cards.forEach((card, index) => {
+        card.style.opacity = '0';
+        card.style.transform = 'translateY(20px)';
+        setTimeout(() => {
+            card.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+            card.style.opacity = '1';
+            card.style.transform = 'translateY(0)';
+        }, index * 100);
+    });
+});
+
+function initTradeLogsPage() {
+    const refreshBtn = document.getElementById('refresh-btn');
+    const searchInput = document.getElementById('search-input');
+    const statusFilter = document.getElementById('status-filter');
+    const sideFilter = document.getElementById('side-filter');
+    const fromDateInput = document.getElementById('logs-from-date');
+    const toDateInput = document.getElementById('logs-to-date');
+    const dateSortSelect = document.getElementById('logs-date-sort');
+    const tableBody = document.querySelector('.modern-table tbody');
+
+    const getRows = () => Array.from(document.querySelectorAll('.modern-table tbody tr[data-timestamp]'));
+
+    const parseRowDate = (row) => {
+        const timestamp = row.dataset.timestamp;
+        return timestamp ? new Date(timestamp) : null;
+    };
+
+    const sortRows = () => {
+        if (!tableBody || !dateSortSelect) {
+            return;
+        }
+
+        const order = dateSortSelect.value || 'desc';
+        const sortedRows = getRows().sort((a, b) => {
+            const dateA = parseRowDate(a) || new Date(0);
+            const dateB = parseRowDate(b) || new Date(0);
+            return order === 'asc' ? dateA - dateB : dateB - dateA;
+        });
+
+        sortedRows.forEach(row => tableBody.appendChild(row));
+    };
+
+    const filterTable = () => {
+        const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+        const statusValue = statusFilter ? statusFilter.value : '';
+        const sideValue = sideFilter ? sideFilter.value : '';
+        const fromDate = fromDateInput && fromDateInput.value ? new Date(fromDateInput.value) : null;
+        const toDate = toDateInput && toDateInput.value ? new Date(toDateInput.value) : null;
+
+        getRows().forEach(row => {
+            const statusBadge = row.querySelector('.status-badge');
+            const sidePill = row.querySelector('.pill-side-long, .pill-side-short');
+            const rowDate = parseRowDate(row);
+
+            let visible = true;
+
+            if (searchTerm) {
+                const rowText = row.textContent.toLowerCase();
+                visible = visible && rowText.includes(searchTerm);
+            }
+
+            if (statusValue && statusBadge) {
+                const rowStatus = statusBadge.className.includes(`status-${statusValue}`);
+                visible = visible && rowStatus;
+            }
+
+            if (sideValue && sidePill) {
+                const rowSide = sidePill.className.includes(`pill-side-${sideValue}`);
+                visible = visible && rowSide;
+            }
+
+            if (visible && fromDate && rowDate) {
+                visible = rowDate >= fromDate;
+            }
+
+            if (visible && toDate && rowDate) {
+                visible = rowDate <= toDate;
+            }
+
+            row.style.display = visible ? '' : 'none';
+        });
+    };
+
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', function() {
+            this.querySelector('i').classList.add('fa-spin');
+            setTimeout(() => {
+                window.location.reload();
+            }, 500);
+        });
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('input', filterTable);
+    }
+
+    if (statusFilter) {
+        statusFilter.addEventListener('change', filterTable);
+    }
+
+    if (sideFilter) {
+        sideFilter.addEventListener('change', filterTable);
+    }
+
+    if (fromDateInput) {
+        fromDateInput.addEventListener('change', filterTable);
+    }
+
+    if (toDateInput) {
+        toDateInput.addEventListener('change', filterTable);
+    }
+
+    if (dateSortSelect) {
+        dateSortSelect.addEventListener('change', () => {
+            sortRows();
+            filterTable();
+        });
+    }
+
+    sortRows();
+    filterTable();
+}
+</script>
+{% endblock %}

@@ -1,0 +1,694 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n static admin_list admin_urls %}
+
+{% block title %}{% trans "Celery Activities" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Celery Activities" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Monitor Celery task execution, logs, and system activities" %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .celery-shell {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Level Badges */
+    .level-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .level-info {
+        background: var(--info);
+        color: white;
+    }
+
+    .level-warning {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+
+    .level-error {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .level-debug {
+        background: rgba(148, 163, 184, 0.2);
+        color: var(--gray-400);
+    }
+
+    .level-critical {
+        background: var(--danger);
+        color: white;
+    }
+
+    /* Component Tags */
+    .component-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        background: rgba(67, 97, 238, 0.2);
+        color: var(--primary-light);
+    }
+
+    /* Task ID Styling */
+    .task-id {
+        font-family: 'Courier New', monospace;
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        background: rgba(255, 255, 255, 0.05);
+        padding: var(--space-xs) var(--space-sm);
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-light);
+    }
+
+    /* Message Styling */
+    .message-preview {
+        max-width: 400px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--gray-300);
+        font-size: var(--text-sm);
+    }
+
+    .message-full {
+        color: var(--gray-300);
+        font-size: var(--text-sm);
+        line-height: 1.5;
+        word-break: break-word;
+    }
+
+    /* Timestamp Styling */
+    .timestamp {
+        font-size: var(--text-xs);
+        color: var(--gray-500);
+    }
+
+    .timestamp-recent {
+        color: var(--success);
+    }
+
+    /* Quick Actions */
+    .quick-actions {
+        display: flex;
+        gap: var(--space-sm);
+    }
+
+    .action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-sm);
+        font-size: var(--text-xs);
+        text-decoration: none;
+        transition: all 0.3s ease;
+        border: 1px solid var(--border-light);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--gray-300);
+    }
+
+    .action-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--light);
+        text-decoration: none;
+        transform: translateY(-1px);
+    }
+
+    .action-btn.view {
+        background: var(--primary-light);
+        color: white;
+        border-color: var(--primary);
+    }
+
+    .action-btn.prune {
+        background: var(--warning-light);
+        color: var(--warning);
+        border-color: var(--warning);
+    }
+
+    /* Modern Table Overrides */
+    .celery-main .results {
+        width: 100%;
+        overflow-x: auto;
+        margin: var(--space-md) 0;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+        background: var(--bg-card);
+    }
+
+    .celery-main .results table {
+        width: 100%;
+        border-collapse: collapse;
+        background: transparent;
+        min-width: 800px;
+    }
+
+    .celery-main .results thead th {
+        text-align: left !important;
+        padding: var(--space-md);
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--gray-400);
+        border-bottom: 1px solid var(--border-light);
+        background: var(--bg-card);
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .celery-main .results tbody td {
+        text-align: left !important;
+        padding: var(--space-md);
+        font-size: var(--text-sm);
+        border-bottom: 1px solid var(--border-dark);
+        color: var(--gray-300);
+        vertical-align: middle;
+    }
+
+    .celery-main .results tbody tr {
+        transition: all 0.3s ease;
+        background: transparent;
+    }
+
+    .celery-main .results tbody tr:hover {
+        background: var(--bg-card-hover);
+    }
+
+    .celery-main .results tbody tr:nth-child(even) {
+        background: rgba(255, 255, 255, 0.02);
+    }
+
+    .celery-main .results tbody tr:nth-child(even):hover {
+        background: var(--bg-card-hover);
+    }
+
+    .celery-main .results tbody tr:last-child td {
+        border-bottom: none;
+    }
+
+    /* Stats Grid */
+    .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--space-md);
+        margin-bottom: var(--space-lg);
+    }
+
+    .stat-card {
+        background: var(--bg-card);
+        backdrop-filter: var(--backdrop-blur);
+        border-radius: var(--radius-md);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+        text-align: center;
+        transition: all 0.3s ease;
+    }
+
+    .stat-card:hover {
+        border-color: var(--border-medium);
+        transform: translateY(-2px);
+    }
+
+    .stat-value {
+        font-size: var(--text-2xl);
+        font-weight: 700;
+        margin-bottom: var(--space-xs);
+        background: linear-gradient(90deg, #fff 0%, #a5b4fc 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+
+    .stat-label {
+        font-size: var(--text-sm);
+        color: var(--gray-400);
+    }
+
+    /* Empty State */
+    .empty-state {
+        text-align: center;
+        padding: var(--space-2xl);
+        color: var(--gray-400);
+    }
+
+    .empty-state-icon {
+        font-size: var(--text-3xl);
+        margin-bottom: var(--space-md);
+        opacity: 0.5;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .celery-toolbar {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: var(--space-md);
+        }
+
+        .celery-main .results table {
+            min-width: 700px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .celery-main .results table {
+            min-width: 600px;
+            font-size: var(--text-xs);
+        }
+
+        .header-actions {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .header-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .search-input {
+            min-width: 100%;
+        }
+
+        .message-preview {
+            max-width: 200px;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .celery-main .results table {
+            min-width: 500px;
+        }
+
+        .stats-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="celery-shell">
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <a href="{% url 'admin:index' %}" class="btn btn-outline">
+            <i class="fas fa-arrow-left"></i> {% trans "Dashboard" %}
+        </a>
+        
+        <form method="post" action="{% url 'admin:core_celeryactivity_prune_30_days' %}" style="display: inline;">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-warning">
+        <i class="fas fa-trash"></i> {% trans "Prune 30+ Days" %}
+    </button>
+</form>
+
+<form method="post" action="{% url 'admin:core_celeryactivity_prune_7_days' %}" style="display: inline;">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-danger">
+        <i class="fas fa-broom"></i> {% trans "Prune 7+ Days" %}
+    </button>
+</form>
+
+
+    <!-- Statistics Overview -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{ total_activities|default:0 }}</div>
+            <div class="stat-label">{% trans "Total Activities" %}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ info_count|default:0 }}</div>
+            <div class="stat-label">{% trans "Info" %}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ warning_count|default:0 }}</div>
+            <div class="stat-label">{% trans "Warnings" %}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ error_count|default:0 }}</div>
+            <div class="stat-label">{% trans "Errors" %}</div>
+        </div>
+    </div>
+
+    <div class="filters-bar" style="margin-bottom: var(--space-lg);">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" id="searchInput"
+                   placeholder="{% trans 'Search activities by message, task name, or task ID...' %}">
+            <span class="search-key">/</span>
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="levelFilter">
+                <option value="">{% trans "All Levels" %}</option>
+                <option value="INFO">{% trans "Info" %}</option>
+                <option value="WARNING">{% trans "Warning" %}</option>
+                <option value="ERROR">{% trans "Error" %}</option>
+                <option value="DEBUG">{% trans "Debug" %}</option>
+                <option value="CRITICAL">{% trans "Critical" %}</option>
+            </select>
+            <select class="filter-select" id="componentFilter">
+                <option value="">{% trans "All Components" %}</option>
+                {% for component in components %}
+                    <option value="{{ component }}">{{ component }}</option>
+                {% endfor %}
+            </select>
+            <button type="button" class="btn btn-outline" id="clearFiltersBtn">
+                <i class="fas fa-times"></i> {% trans "Clear" %}
+            </button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Celery Activities" %}</h3>
+                <p class="card-subtitle">{% trans "Recent task executions and system activities" %}</p>
+            </div>
+            <div class="action-controls">
+                <button type="button" class="btn btn-outline btn-sm" id="exportBtn">
+                    <i class="fas fa-download"></i> {% trans "Export" %}
+                </button>
+                <button type="button" class="btn btn-outline btn-sm" id="autoRefreshToggle">
+                    <i class="fas fa-sync"></i> {% trans "Auto-refresh" %}
+                </button>
+            </div>
+        </div>
+        <div class="celery-main">
+            <div class="table-container">
+                <table class="modern-table">
+                    <thead>
+                        <tr>
+                            <th>{% trans "Timestamp" %}</th>
+                            <th>{% trans "Level" %}</th>
+                            <th>{% trans "Component" %}</th>
+                            <th>{% trans "Task" %}</th>
+                            <th>{% trans "Task ID" %}</th>
+                            <th>{% trans "Message" %}</th>
+                            <th>{% trans "Actions" %}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for activity in cl.result_list %}
+                            <tr class="activity-row"
+                                data-level="{{ activity.level }}"
+                                data-component="{{ activity.component|default:'' }}"
+                                data-search="{{ activity.message }} {{ activity.task_name }} {{ activity.task_id }}">
+                                <td>
+                                    <div class="timestamp {% if activity.is_recent %}timestamp-recent{% endif %}">
+                                        {{ activity.ts|date:"M j, H:i:s" }}
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="level-badge level-{{ activity.level|lower }}">
+                                        <i class="fas 
+                                            {% if activity.level == 'INFO' %}fa-info-circle
+                                            {% elif activity.level == 'WARNING' %}fa-exclamation-triangle
+                                            {% elif activity.level == 'ERROR' %}fa-times-circle
+                                            {% elif activity.level == 'DEBUG' %}fa-bug
+                                            {% elif activity.level == 'CRITICAL' %}fa-skull
+                                            {% else %}fa-circle{% endif %}">
+                                        </i>
+                                        {{ activity.level }}
+                                    </span>
+                                </td>
+                                <td>
+                                    {% if activity.component %}
+                                        <span class="component-tag">{{ activity.component }}</span>
+                                    {% else %}
+                                        <span style="color: var(--gray-500);">—</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <strong>{{ activity.task_name|default:"—" }}</strong>
+                                </td>
+                                <td>
+                                    {% if activity.task_id %}
+                                        <code class="task-id">{{ activity.task_id|truncatechars:12 }}</code>
+                                    {% else %}
+                                        <span style="color: var(--gray-500);">—</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <div class="message-preview" title="{{ activity.message }}">
+                                        {{ activity.short_message }}
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="quick-actions">
+                                        
+                        <a href="{% url 'admin:core_celeryactivity_change' activity.pk %}"
+                        class="action-btn view"
+                        title="{% trans 'View details' %}">
+                            <i class="fas fa-eye"></i>
+                        </a>
+                        {% if perms.core.delete_celeryactivity %}
+                        <form method="post" action="{% url 'admin:core_celeryactivity_delete' activity.pk %}" 
+                            style="display: inline;" 
+                            onsubmit="return confirm('{% trans 'Delete this activity?' %}')">
+                            {% csrf_token %}
+                            <button type="submit"
+                                    class="action-btn"
+                                    title="{% trans 'Delete' %}">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </form>
+                        {% endif %}
+                                    </div>
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr>
+                                <td colspan="7" class="empty-state">
+                                    <i class="fas fa-tasks empty-state-icon"></i>
+                                    <div>{% trans "No Celery activities found." %}</div>
+                                    <div style="font-size: var(--text-sm); margin-top: var(--space-sm);">
+                                        {% trans "Activities will appear here when Celery tasks are executed." %}
+                                    </div>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Pagination -->
+            {% if cl.result_list %}
+            <div class="pagination">
+                <div class="pagination-info">
+                    {{ cl.result_count }} {% trans "activities" %}
+                    {% if cl.result_count != cl.full_result_count %}
+                    ({% blocktrans with cl.full_result_count as full_result_count %}{{ full_result_count }} total{% endblocktrans %})
+                    {% endif %}
+                </div>
+                <div class="pagination-controls">
+                    {% if cl.page_num > 1 %}
+                    <a href="?p={{ cl.previous_page }}" class="pagination-btn">
+                        <i class="fas fa-chevron-left"></i> {% trans "Previous" %}
+                    </a>
+                    {% endif %}
+                    
+                    <span class="pagination-current">
+                        {% blocktrans with cl.page_num as page_num and cl.page_count as page_count %}
+                            Page {{ page_num }} of {{ page_count }}
+                        {% endblocktrans %}
+                    </span>
+                    
+                    {% if cl.page_num < cl.page_count %}
+                    <a href="?p={{ cl.next_page }}" class="pagination-btn">
+                        {% trans "Next" %} <i class="fas fa-chevron-right"></i>
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const searchInput = document.getElementById('searchInput');
+    const levelFilter = document.getElementById('levelFilter');
+    const componentFilter = document.getElementById('componentFilter');
+    const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const autoRefreshToggle = document.getElementById('autoRefreshToggle');
+    const rows = Array.from(document.querySelectorAll('.activity-row'));
+    
+    let autoRefreshInterval = null;
+    let isAutoRefresh = false;
+
+    const filterActivities = () => {
+        const searchTerm = (searchInput?.value || '').toLowerCase();
+        const levelValue = levelFilter?.value;
+        const componentValue = componentFilter?.value;
+        let visibleCount = 0;
+
+        rows.forEach(row => {
+            const searchData = (row.getAttribute('data-search') || '').toLowerCase();
+            const levelData = row.getAttribute('data-level');
+            const componentData = row.getAttribute('data-component');
+            
+            const matchesSearch = searchData.includes(searchTerm);
+            const matchesLevel = !levelValue || levelData === levelValue;
+            const matchesComponent = !componentValue || componentData === componentValue;
+
+            if (matchesSearch && matchesLevel && matchesComponent) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        // Update pagination info if available
+        const paginationInfo = document.querySelector('.pagination-info');
+        if (paginationInfo && visibleCount !== rows.length) {
+            const originalText = paginationInfo.textContent;
+            paginationInfo.textContent = `${visibleCount} of ${originalText}`;
+        }
+    };
+
+    // Filter event listeners
+    searchInput?.addEventListener('input', filterActivities);
+    levelFilter?.addEventListener('change', filterActivities);
+    componentFilter?.addEventListener('change', filterActivities);
+
+    clearFiltersBtn?.addEventListener('click', function() {
+        if (searchInput) searchInput.value = '';
+        if (levelFilter) levelFilter.value = '';
+        if (componentFilter) componentFilter.value = '';
+        filterActivities();
+    });
+
+    refreshBtn?.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+        setTimeout(() => {
+            window.location.reload();
+        }, 500);
+    });
+
+    exportBtn?.addEventListener('click', function() {
+        // Simple CSV export implementation
+        const headers = ['Timestamp', 'Level', 'Component', 'Task', 'Task ID', 'Message'];
+        const csvContent = [
+            headers.join(','),
+            ...rows.filter(row => row.style.display !== 'none')
+                  .map(row => {
+                      const cells = row.querySelectorAll('td');
+                      return [
+                          cells[0]?.textContent?.trim() || '',
+                          cells[1]?.textContent?.trim() || '',
+                          cells[2]?.textContent?.trim() || '',
+                          cells[3]?.textContent?.trim() || '',
+                          cells[4]?.textContent?.trim() || '',
+                          `"${(cells[5]?.getAttribute('title') || cells[5]?.textContent || '').replace(/"/g, '""')}"`
+                      ].join(',');
+                  })
+        ].join('\n');
+
+        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `celery-activities-${new Date().toISOString().split('T')[0]}.csv`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+    });
+
+    autoRefreshToggle?.addEventListener('click', function() {
+        isAutoRefresh = !isAutoRefresh;
+        
+        if (isAutoRefresh) {
+            this.innerHTML = '<i class="fas fa-stop"></i> {% trans "Stop Auto-refresh" %}';
+            this.classList.add('btn-primary');
+            autoRefreshInterval = setInterval(() => {
+                refreshBtn.click();
+            }, 30000); // Refresh every 30 seconds
+        } else {
+            this.innerHTML = '<i class="fas fa-sync"></i> {% trans "Auto-refresh" %}';
+            this.classList.remove('btn-primary');
+            clearInterval(autoRefreshInterval);
+        }
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+            e.preventDefault();
+            searchInput?.focus();
+        }
+        if (e.key === 'F5') {
+            e.preventDefault();
+            refreshBtn?.click();
+        }
+        if (e.ctrlKey && e.key === 'r' && autoRefreshToggle) {
+            e.preventDefault();
+            autoRefreshToggle.click();
+        }
+    });
+
+    // Animate rows on load
+    rows.forEach((row, index) => {
+        row.style.opacity = '0';
+        row.style.transform = 'translateY(6px)';
+        setTimeout(() => {
+            row.style.transition = 'opacity 0.35s ease, transform 0.35s ease';
+            row.style.opacity = '1';
+            row.style.transform = 'translateY(0)';
+        }, index * 30);
+    });
+
+    // Tooltips for level badges
+    const levelBadges = document.querySelectorAll('.level-badge');
+    levelBadges.forEach(badge => {
+        const level = badge.textContent.trim();
+        let tooltip = '';
+
+        switch (level) {
+            case 'INFO':
+                tooltip = 'Informational message';
+                break;
+            case 'WARNING':
+                tooltip = 'Warning - potential issue';
+                break;
+            case 'ERROR':
+                tooltip = 'Error occurred during execution';
+                break;
+            case 'DEBUG':
+                tooltip = 'Debug information';
+                break;
+            case 'CRITICAL':
+                tooltip = 'Critical error - immediate attention required';
+                break;
+        }
+
+        if (tooltip) {
+            badge.title = tooltip;
+            badge.style.cursor = 'help';
+        }
+    });
+
+    filterActivities();
+});
+</script>
+{% endblock %}

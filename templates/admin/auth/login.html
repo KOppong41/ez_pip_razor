@@ -1,0 +1,456 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+    :root {
+        --bg-main: #020617;
+        --bg-card: rgba(15, 23, 42, 0.98);
+        --accent-primary: #4361ee;
+        --accent-secondary: #4cc9f0;
+        --accent-success: #22c55e;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --border-subtle: rgba(148, 163, 184, 0.25);
+        --shadow-soft: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        --radius-lg: 20px;
+        --radius-xl: 24px;
+    }
+
+    /* Hide default admin chrome on login */
+    #header,
+    #nav-sidebar,
+    .breadcrumbs,
+    #toggle-nav-sidebar,
+    #content > h1 {
+        display: none !important;
+    }
+
+    #container {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+    }
+
+    #content {
+        margin: 0;
+        padding: 0;
+    }
+
+    body, html {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%) !important;
+        min-height: 100vh;
+        color: var(--text-main);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    .login-container {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        position: relative;
+        overflow: hidden;
+    }
+
+    /* Background elements */
+    .bg-elements {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    .bg-grid {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-image: 
+            linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+        background-size: 50px 50px;
+    }
+
+    .bg-glow {
+        position: absolute;
+        width: 500px;
+        height: 500px;
+        border-radius: 50%;
+        filter: blur(80px);
+        opacity: 0.15;
+    }
+
+    .glow-1 {
+        background: var(--accent-primary);
+        top: -200px;
+        right: -200px;
+    }
+
+    .glow-2 {
+        background: var(--accent-secondary);
+        bottom: -200px;
+        left: -200px;
+    }
+
+    .login-card {
+        width: 100%;
+        max-width: 440px;
+        border-radius: var(--radius-xl);
+        background: rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(20px);
+        border: 1px solid var(--border-subtle);
+        padding: 40px;
+        position: relative;
+        z-index: 1;
+        box-shadow: var(--shadow-soft);
+    }
+
+    .login-header {
+        text-align: center;
+        margin-bottom: 32px;
+    }
+
+    .logo {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+
+    .logo-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 18px;
+        color: white;
+    }
+
+    .logo-text {
+        font-size: 24px;
+        font-weight: 700;
+        background: linear-gradient(135deg, var(--text-main), #a5b4fc);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+
+    .login-title {
+        font-size: 28px;
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+
+    .login-subtitle {
+        font-size: 16px;
+        color: var(--text-muted);
+        margin-bottom: 24px;
+    }
+
+    .security-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+        background: rgba(34, 197, 94, 0.1);
+        border: 1px solid rgba(34, 197, 94, 0.3);
+        border-radius: 20px;
+        font-size: 12px;
+        color: var(--accent-success);
+        margin-bottom: 24px;
+    }
+
+    .badge-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent-success);
+        animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+
+    .form-group {
+        margin-bottom: 20px;
+    }
+
+    .form-label {
+        display: block;
+        font-size: 14px;
+        font-weight: 500;
+        margin-bottom: 8px;
+        color: var(--text-main);
+    }
+
+    .input-group {
+        position: relative;
+    }
+
+    .form-input {
+        width: 100%;
+        padding: 14px 16px;
+        border-radius: 12px;
+        border: 1px solid var(--border-subtle);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text-main);
+        font-size: 15px;
+        transition: all 0.2s ease;
+    }
+
+    .form-input:focus {
+        outline: none;
+        border-color: var(--accent-primary);
+        background: rgba(255, 255, 255, 0.08);
+        box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+    }
+
+    .form-input::placeholder {
+        color: var(--text-muted);
+    }
+
+    .input-icon {
+        position: absolute;
+        right: 16px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--text-muted);
+    }
+
+    .error-message {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        border-radius: 12px;
+        padding: 12px 16px;
+        font-size: 14px;
+        color: #fecaca;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .error-message i {
+        font-size: 16px;
+    }
+
+    .login-button {
+        width: 100%;
+        padding: 14px 24px;
+        border-radius: 12px;
+        border: none;
+        background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+        color: white;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+    }
+
+    .login-button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 8px 25px rgba(67, 97, 238, 0.3);
+    }
+
+    .login-button:active {
+        transform: translateY(0);
+    }
+
+    .login-footer {
+        margin-top: 24px;
+        text-align: center;
+        font-size: 14px;
+        color: var(--text-muted);
+    }
+
+    .footer-links {
+        display: flex;
+        justify-content: center;
+        gap: 16px;
+        margin-top: 8px;
+    }
+
+    .footer-links a {
+        color: var(--text-muted);
+        text-decoration: none;
+        transition: color 0.2s ease;
+    }
+
+    .footer-links a:hover {
+        color: var(--accent-primary);
+    }
+
+    .copyright {
+        margin-top: 16px;
+        font-size: 12px;
+        opacity: 0.7;
+    }
+
+    /* Responsive design */
+    @media (max-width: 480px) {
+        .login-container {
+            padding: 16px;
+        }
+        
+        .login-card {
+            padding: 32px 24px;
+        }
+        
+        .login-title {
+            font-size: 24px;
+        }
+        
+        .login-subtitle {
+            font-size: 14px;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="login-container">
+    <!-- Background Elements -->
+    <div class="bg-elements">
+        <div class="bg-grid"></div>
+        <div class="bg-glow glow-1"></div>
+        <div class="bg-glow glow-2"></div>
+    </div>
+
+    <!-- Login Card -->
+    <div class="login-card">
+        <!-- Header -->
+        <div class="login-header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <i class="fas fa-chart-line"></i>
+                </div>
+                <div class="logo-text">EzTrade</div>
+            </div>
+            <h1 class="login-title">Welcome Back</h1>
+            <p class="login-subtitle">Sign in to your trading dashboard</p>
+            
+            <div class="security-badge">
+                <span class="badge-dot"></span>
+                <span>Secure connection • Risk controls active</span>
+            </div>
+        </div>
+
+        <!-- Error Messages -->
+        {% if form.errors %}
+            <div class="error-message">
+                <i class="fas fa-exclamation-circle"></i>
+                <span>{% blocktrans %}Please check your credentials and try again.{% endblocktrans %}</span>
+            </div>
+        {% endif %}
+
+        {% if form.non_field_errors %}
+            <div class="error-message">
+                <i class="fas fa-exclamation-circle"></i>
+                <span>{{ form.non_field_errors }}</span>
+            </div>
+        {% endif %}
+
+        <!-- Login Form -->
+        <form action="{{ app_path }}" method="post" id="login-form" novalidate>
+            {% csrf_token %}
+            
+            <div class="form-group">
+                <label class="form-label" for="{{ form.username.id_for_label }}">
+                    {{ form.username.label|default:_("Username") }}
+                </label>
+                <div class="input-group">
+                    {{ form.username }}
+                    <i class="fas fa-user input-icon"></i>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label" for="{{ form.password.id_for_label }}">
+                    {{ form.password.label|default:_("Password") }}
+                </label>
+                <div class="input-group">
+                    {{ form.password }}
+                    <i class="fas fa-lock input-icon"></i>
+                </div>
+            </div>
+
+            {% if next %}
+                <input type="hidden" name="next" value="{{ next }}">
+            {% endif %}
+
+            <button type="submit" class="login-button">
+                <i class="fas fa-sign-in-alt"></i>
+                <span>{% trans "Sign In" %}</span>
+            </button>
+        </form>
+
+        <!-- Footer -->
+        <div class="login-footer">
+            <div class="footer-links">
+                <a href="#">Forgot Password?</a>
+                <a href="#">Support</a>
+                <a href="#">Status</a>
+            </div>
+            <div class="copyright">
+                © {{ current_year|default:2025 }} EzTrade. All rights reserved.
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Add focus effects to form inputs
+    document.addEventListener('DOMContentLoaded', function() {
+        const inputs = document.querySelectorAll('.form-input');
+        
+        inputs.forEach(input => {
+            // Add focus class on focus
+            input.addEventListener('focus', function() {
+                this.parentElement.classList.add('focused');
+            });
+            
+            // Remove focus class on blur
+            input.addEventListener('blur', function() {
+                this.parentElement.classList.remove('focused');
+            });
+            
+            // Add filled class when input has value
+            input.addEventListener('input', function() {
+                if (this.value) {
+                    this.parentElement.classList.add('filled');
+                } else {
+                    this.parentElement.classList.remove('filled');
+                }
+            });
+        });
+        
+        // Add subtle animation to card on load
+        const card = document.querySelector('.login-card');
+        card.style.opacity = '0';
+        card.style.transform = 'translateY(20px)';
+        
+        setTimeout(() => {
+            card.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+            card.style.opacity = '1';
+            card.style.transform = 'translateY(0)';
+        }, 100);
+    });
+</script>
+{% endblock %}

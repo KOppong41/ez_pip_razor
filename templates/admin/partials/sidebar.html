@@ -1,0 +1,69 @@
+{% load static %}
+<div class="sidebar">
+    <div class="logo">
+        <h1>EzTrade</h1>
+    </div>
+
+        <div class="nav-section">
+            <div class="nav-title">Dashboard</div>
+            <ul class="nav-links">
+                <li><a href="{% url 'admin:index' %}" class="nav-link {% if request.resolver_match.url_name == 'index' %}active{% endif %}"><i class="fas fa-chart-pie"></i> Dashboard</a></li>
+                <li><a href="{% url 'admin:bots_bot_changelist' %}" class="nav-link {% if 'bots_bot' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-robot"></i> Bots</a></li>
+                <li><a href="{% url 'admin:brokers_brokeraccount_changelist' %}" class="nav-link {% if 'brokeraccount' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-exchange-alt"></i> Broker Accounts</a></li>
+                <li><a href="{% url 'admin:bots_asset_changelist' %}" class="nav-link {% if 'asset' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-coins"></i> Assets</a></li>
+                <li><a href="{% url 'admin:brokers_broker_changelist' %}" class="nav-link {% if 'broker_changelist' in request.resolver_match.url_name or 'broker_change' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-layer-group"></i> Brokers</a></li>
+            </ul>
+        </div>
+
+    <div class="nav-section">
+        <div class="nav-title">Trades</div>
+        <ul class="nav-links">
+            <li><a href="{% url 'admin:execution_signal_changelist' %}" class="nav-link {% if 'signal' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-bullseye"></i> Signals</a></li>
+            <li><a href="{% url 'admin:execution_decision_changelist' %}" class="nav-link {% if 'decision' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-play-circle"></i> Decisions</a></li>
+            <li><a href="{% url 'admin:execution_order_changelist' %}" class="nav-link {% if 'order' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-shopping-cart"></i> Orders</a></li>
+            <li><a href="{% url 'admin:execution_position_changelist' %}" class="nav-link {% if 'position' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-chart-line"></i> Positions</a></li>
+            <li><a href="{% url 'admin:execution_execution_changelist' %}" class="nav-link {% if 'execution_execution_' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-bolt"></i> Executions</a></li>
+            <li><a href="#" class="nav-link"><i class="fas fa-clipboard-list"></i> Audits</a></li>
+        </ul>
+    </div>
+
+    <div class="nav-section">
+        <div class="nav-title">Log</div>
+        <ul class="nav-links">
+            <li><a href="{% url 'admin:core_celeryactivity_changelist' %}" class="nav-link"><i class="fas fa-tasks"></i> Celery</a></li>
+            <li><a href="{% url 'admin:execution_tradelog_changelist' %}" class="nav-link"><i class="fas fa-history"></i> Trade History</a></li>
+            <li><a href="{% url 'admin:execution_tradelog_backtest' %}" class="nav-link"><i class="fas fa-database"></i> Backtest Data</a></li>
+        </ul>
+    </div>
+
+    <div class="nav-section">
+        <div class="nav-title">Admin</div>
+        <ul class="nav-links">
+            <li><a href="{% url 'admin:auth_user_changelist' %}" class="nav-link {% if 'auth_user' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-users"></i> Users</a></li>
+            <li><a href="{% url 'admin:execution_tradingprofile_changelist' %}" class="nav-link {% if 'tradingprofile' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-layer-group"></i> Trading Profiles</a></li>
+            <li><a href="{% url 'admin:execution_executionsetting_changelist' %}" class="nav-link {% if 'executionsetting' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-sliders-h"></i> Execution Settings</a></li>
+            <li><a href="{% url 'admin:subscription_subscriptionplan_changelist' %}" class="nav-link {% if 'subscription_subscriptionplan' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-layer-group"></i> Plans</a></li>
+            <li><a href="{% url 'admin:subscription_usersubscription_changelist' %}" class="nav-link {% if 'subscription_usersubscription' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-id-card-alt"></i> User Subscriptions</a></li>
+            <li><a href="#" class="nav-link"><i class="fas fa-cog"></i> Settings</a></li>
+            <li><a href="#" class="nav-link"><i class="fas fa-shield-alt"></i> Risk</a></li>
+        </ul>
+    </div>
+
+    
+    <div class="sidebar-footer-mobile">
+        <div class="user-info-mobile">
+            <div class="user-avatar-mobile">
+                {{ request.user.get_username|default:"AD"|slice:":2"|upper }}
+            </div>
+            <div class="user-details-mobile">
+                <div class="user-name-mobile">{{ request.user.get_username|default:"Admin" }}</div>
+                <div class="user-role-mobile">
+                    {% if request.user.is_superuser %}Superuser{% else %}Staff{% endif %}
+                </div>
+            </div>
+        </div>
+        <button class="sidebar-close-mobile" id="sidebarCloseMobile">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+</div>

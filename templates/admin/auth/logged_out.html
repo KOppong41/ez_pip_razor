@@ -1,0 +1,146 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block extrastyle %}
+<style>
+:root {
+    --bg: radial-gradient(120% 140% at 10% 10%, #0b1327 0%, #0a0f1f 45%, #060913 90%);
+    --panel: linear-gradient(180deg, #0f1626 0%, #101828 100%);
+    --border: rgba(255, 255, 255, 0.08);
+    --text: #e6ebff;
+    --muted: #9ca3b5;
+    --accent: #58e0c2;
+    --accent-2: #f5a524;
+    --shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Manrope", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.logout-hero {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+.card {
+    width: min(960px, 90vw);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    box-shadow: var(--shadow);
+}
+
+.split {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 20px;
+}
+
+.title {
+    font-size: 28px;
+    font-weight: 800;
+    margin: 0 0 6px 0;
+    letter-spacing: -0.02em;
+}
+
+.subtitle {
+    color: var(--muted);
+    margin: 0 0 14px 0;
+    line-height: 1.5;
+}
+
+.cta-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    text-decoration: none;
+    font-weight: 700;
+    color: #0a0f1f;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.35);
+    border: none;
+}
+
+.ghost {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+}
+
+.metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.metric {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px;
+}
+
+.metric .label {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.metric .value {
+    font-size: 20px;
+    font-weight: 800;
+    margin-top: 4px;
+}
+
+@media (max-width: 900px) {
+    .split { grid-template-columns: 1fr; }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="logout-hero">
+    <div class="card">
+        <div class="split">
+            <div>
+                <div class="title">{% trans "You’re signed out." %}</div>
+                <div class="subtitle">
+                    {% trans "Thanks for spending time in EzTrade. Your session is secure. When you’re ready, log back in to monitor bots, orders, and risk." %}
+                </div>
+                <div class="cta-row">
+                    <a class="btn" href="{% url 'admin:login' %}">Log in again</a>
+                    <a class="btn ghost" href="https://eztrade.example.com/support" target="_blank" rel="noreferrer">Support</a>
+                </div>
+            </div>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="label">{% trans "Bots managed" %}</div>
+                    <div class="value">Secure</div>
+                </div>
+                <div class="metric">
+                    <div class="label">{% trans "Sessions" %}</div>
+                    <div class="value">{% trans "Ended" %}</div>
+                </div>
+                <div class="metric">
+                    <div class="label">{% trans "Status" %}</div>
+                    <div class="value">{% trans "Ready to return" %}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,991 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{% if add %}{% trans 'Add User Subscription' %}{% else %}{{ original.user|default:original }}{% endif %} | EzTrade{% endblock %}
+
+{% block page_title %}
+    {% if add %}
+        <div style="display: flex; align-items: center; gap: var(--space-sm);">
+            <i class="fas fa-user-plus" style="color: var(--primary);"></i>
+            {% trans 'Add User Subscription' %}
+        </div>
+    {% else %}
+        <div style="display: flex; align-items: center; gap: var(--space-sm);">
+            <i class="fas fa-user-tag" style="color: var(--primary);"></i>
+            {{ original.user.username|default:"User Subscription" }}
+        </div>
+    {% endif %}
+{% endblock %}
+
+{% block page_subtitle %}
+    {% if add %}
+        {% trans 'Assign a plan and limits to a user.' %}
+    {% else %}
+        <div style="display: flex; align-items: center; gap: var(--space-sm);">
+            <span style="color: var(--gray-400);">
+                {% trans 'Plan' %}: <strong style="color: var(--light);">{{ original.plan.name|default:"—" }}</strong>
+            </span>
+            {% if original.status %}
+                <span style="margin-left: var(--space-sm); padding: 2px 8px; 
+                    {% if original.status == 'active' %}
+                        background: rgba(76, 201, 240, 0.1); color: var(--success);
+                    {% elif original.status == 'expired' %}
+                        background: rgba(247, 37, 133, 0.1); color: var(--danger);
+                    {% elif original.status == 'pending' %}
+                        background: rgba(248, 150, 30, 0.1); color: var(--warning);
+                    {% else %}
+                        background: rgba(148, 163, 184, 0.1); color: var(--gray-400);
+                    {% endif %}
+                    border-radius: 12px; font-size: var(--text-xs);">
+                    <i class="fas 
+                        {% if original.status == 'active' %}fa-check-circle
+                        {% elif original.status == 'expired' %}fa-times-circle
+                        {% elif original.status == 'pending' %}fa-clock
+                        {% else %}fa-ban{% endif %}">
+                    </i>
+                    {{ original.get_status_display }}
+                </span>
+            {% endif %}
+        </div>
+    {% endif %}
+{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .modern-form-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Progress Steps */
+    .progress-steps {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: var(--space-lg);
+        position: relative;
+        background: var(--bg-card);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+    }
+
+    .progress-step {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        position: relative;
+        z-index: 2;
+        flex: 1;
+    }
+
+    .step-circle {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.05);
+        border: 2px solid var(--border-light);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--gray-400);
+        font-size: var(--text-sm);
+        font-weight: 600;
+        margin-bottom: var(--space-xs);
+        transition: all 0.3s ease;
+    }
+
+    .step-circle.active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: white;
+        box-shadow: 0 4px 12px rgba(67, 97, 238, 0.3);
+    }
+
+    .step-label {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        text-align: center;
+        font-weight: 500;
+    }
+
+    .step-label.active {
+        color: var(--light);
+    }
+
+    .progress-line {
+        position: absolute;
+        top: 20px;
+        left: 40px;
+        right: 40px;
+        height: 2px;
+        background: var(--border-light);
+        z-index: 1;
+    }
+
+    .progress-line-filled {
+        position: absolute;
+        top: 20px;
+        left: 40px;
+        height: 2px;
+        background: var(--primary);
+        z-index: 1;
+        transition: width 0.3s ease;
+    }
+
+    /* User Info Sidebar */
+    .user-info-sidebar {
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.01) 100%);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+        margin-bottom: var(--space-lg);
+    }
+
+    .user-profile {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        margin-bottom: var(--space-lg);
+    }
+
+    .user-avatar-large {
+        width: 64px;
+        height: 64px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-xl);
+        font-weight: 600;
+        flex-shrink: 0;
+    }
+
+    .user-details {
+        flex: 1;
+    }
+
+    .user-name {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--light);
+        margin-bottom: var(--space-xs);
+    }
+
+    .user-email {
+        font-size: var(--text-sm);
+        color: var(--gray-400);
+    }
+
+    .user-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: var(--space-md);
+        margin-top: var(--space-lg);
+    }
+
+    .user-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        padding: var(--space-md);
+        background: rgba(255, 255, 255, 0.02);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+    }
+
+    .user-stat-label {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+        margin-bottom: var(--space-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .user-stat-value {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    .user-stat-value.active {
+        color: var(--success);
+    }
+
+    /* Modern Card Layout */
+    .form-card {
+        background: var(--bg-card);
+        backdrop-filter: var(--backdrop-blur);
+        border-radius: var(--radius-lg);
+        border: 1px solid var(--border-light);
+        overflow: hidden;
+        margin-bottom: var(--space-lg);
+        transition: all 0.3s ease;
+        box-shadow: var(--shadow-lg);
+    }
+
+    .form-card:hover {
+        border-color: var(--border-medium);
+        box-shadow: var(--shadow-xl);
+    }
+
+    .card-header {
+        padding: var(--space-lg);
+        background: linear-gradient(135deg, rgba(67, 97, 238, 0.1) 0%, rgba(58, 12, 163, 0.05) 100%);
+        border-bottom: 1px solid var(--border-light);
+    }
+
+    .card-header-title {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        margin-bottom: var(--space-xs);
+    }
+
+    .card-header-icon {
+        width: 48px;
+        height: 48px;
+        border-radius: var(--radius-md);
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-lg);
+    }
+
+    .card-title {
+        font-size: var(--text-lg);
+        font-weight: 600;
+        color: var(--light);
+        margin: 0;
+    }
+
+    .card-subtitle {
+        font-size: var(--text-sm);
+        color: var(--gray-400);
+        margin: 0;
+        line-height: 1.4;
+    }
+
+    /* Form Content */
+    .card-content {
+        padding: var(--space-lg);
+    }
+
+    /* Modern Form Grid */
+    .modern-form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: var(--space-lg);
+    }
+
+    /* Form Group with floating label */
+    .form-group-modern {
+        position: relative;
+        margin-bottom: var(--space-lg);
+    }
+
+    .floating-label {
+        position: absolute;
+        top: -8px;
+        left: 12px;
+        background: var(--bg-primary);
+        padding: 0 8px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        color: var(--gray-400);
+        z-index: 1;
+    }
+
+    .floating-label.required::after {
+        content: " *";
+        color: var(--danger);
+    }
+
+    .form-field-modern {
+        width: 100%;
+        padding: var(--space-md);
+        background: rgba(255, 255, 255, 0.05);
+        border: 2px solid var(--border-light);
+        border-radius: var(--radius-md);
+        color: var(--light);
+        font-size: var(--text-sm);
+        min-height: 48px;
+        transition: all 0.3s ease;
+    }
+
+    .form-field-modern:focus {
+        outline: none;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1);
+        background: rgba(255, 255, 255, 0.08);
+    }
+
+    select.form-field-modern {
+        appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14 2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 16px center;
+        padding-right: 48px;
+    }
+
+    /* Field Status Indicators */
+    .field-status {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        margin-top: var(--space-xs);
+        font-size: var(--text-xs);
+    }
+
+    .field-status.valid {
+        color: var(--success);
+    }
+
+    .field-status.invalid {
+        color: var(--danger);
+    }
+
+    /* Plan Details Preview */
+    .plan-details {
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+        margin-top: var(--space-lg);
+    }
+
+    .plan-header {
+        display: flex;
+        align-items: center;
+        gap: var(--space-md);
+        margin-bottom: var(--space-lg);
+    }
+
+    .plan-icon-large {
+        width: 56px;
+        height: 56px;
+        border-radius: var(--radius-md);
+        background: linear-gradient(135deg, #4cc9f0 0%, #4361ee 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-xl);
+        flex-shrink: 0;
+    }
+
+    .plan-name {
+        font-size: var(--text-xl);
+        font-weight: 700;
+        color: var(--light);
+        margin-bottom: var(--space-xs);
+    }
+
+    .plan-price {
+        font-size: var(--text-lg);
+        color: var(--success);
+        font-weight: 600;
+    }
+
+    .plan-features {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--space-md);
+    }
+
+    .feature-item {
+        display: flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-sm);
+        background: rgba(255, 255, 255, 0.02);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-light);
+    }
+
+    .feature-icon {
+        color: var(--success);
+        font-size: var(--text-sm);
+    }
+
+    .feature-text {
+        font-size: var(--text-sm);
+        color: var(--gray-300);
+    }
+
+    /* Date Picker Enhancement */
+    input[type="date"].form-field-modern::-webkit-calendar-picker-indicator {
+        filter: invert(1);
+        cursor: pointer;
+        padding: 4px;
+        border-radius: var(--radius-sm);
+    }
+
+    /* Action Buttons Modern */
+    .action-buttons-modern {
+        display: flex;
+        gap: var(--space-md);
+        justify-content: flex-end;
+        padding: var(--space-lg);
+        background: rgba(255, 255, 255, 0.02);
+        border-top: 1px solid var(--border-light);
+        flex-wrap: wrap;
+    }
+
+    .btn-modern {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-md) var(--space-lg);
+        border-radius: var(--radius-md);
+        font-weight: 500;
+        font-size: var(--text-sm);
+        text-decoration: none;
+        transition: all 0.3s ease;
+        cursor: pointer;
+        border: none;
+        background: var(--primary);
+        color: white;
+        box-shadow: var(--shadow-md);
+    }
+
+    .btn-modern:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-lg);
+    }
+
+    .btn-modern.secondary {
+        background: transparent;
+        color: var(--gray-300);
+        border: 1px solid var(--border-light);
+    }
+
+    .btn-modern.secondary:hover {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: var(--border-medium);
+        color: var(--light);
+    }
+
+    .btn-modern.danger {
+        background: transparent;
+        color: var(--danger);
+        border: 1px solid var(--danger);
+    }
+
+    .btn-modern.danger:hover {
+        background: rgba(247, 37, 133, 0.1);
+        border-color: var(--danger);
+        color: var(--danger);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+        .progress-steps {
+            flex-wrap: wrap;
+            gap: var(--space-md);
+        }
+
+        .progress-step {
+            flex: none;
+            min-width: 80px;
+        }
+
+        .user-profile {
+            flex-direction: column;
+            text-align: center;
+        }
+
+        .modern-form-grid {
+            grid-template-columns: 1fr;
+            gap: var(--space-md);
+        }
+
+        .action-buttons-modern {
+            flex-direction: column;
+        }
+
+        .btn-modern {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .card-header-title {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: var(--space-sm);
+        }
+
+        .plan-features {
+            grid-template-columns: 1fr;
+        }
+
+        .user-stats {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+
+    @media (max-width: 480px) {
+        .user-stats {
+            grid-template-columns: 1fr;
+        }
+
+        .plan-header {
+            flex-direction: column;
+            text-align: center;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="modern-form-container">
+    <!-- User Info Sidebar -->
+    {% if not add and original.user %}
+    <div class="user-info-sidebar">
+        <div class="user-profile">
+            <div class="user-avatar-large">
+                {{ original.user.username|slice:":2"|upper }}
+            </div>
+            <div class="user-details">
+                <div class="user-name">{{ original.user.get_full_name|default:original.user.username }}</div>
+                <div class="user-email">{{ original.user.email }}</div>
+            </div>
+        </div>
+
+        <div class="user-stats">
+            <div class="user-stat">
+                <div class="user-stat-label">{% trans "Current Plan" %}</div>
+                <div class="user-stat-value active">{{ original.plan.name|default:"None" }}</div>
+            </div>
+            
+            <div class="user-stat">
+                <div class="user-stat-label">{% trans "Status" %}</div>
+                <div class="user-stat-value {% if original.status == 'active' %}active{% endif %}">
+                    {{ original.get_status_display|default:"—" }}
+                </div>
+            </div>
+            
+            <div class="user-stat">
+                <div class="user-stat-label">{% trans "Expires" %}</div>
+                <div class="user-stat-value">
+                    {{ original.expires_at|date:"M d"|default:"—" }}
+                </div>
+            </div>
+            
+            <div class="user-stat">
+                <div class="user-stat-label">{% trans "Since" %}</div>
+                <div class="user-stat-value">
+                    {{ original.created_at|date:"M d"|default:"—" }}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Progress Steps -->
+    <div class="progress-steps">
+        <div class="progress-line"></div>
+        <div class="progress-line-filled" id="progressFilled"></div>
+        
+        <div class="progress-step">
+            <div class="step-circle active">1</div>
+            <div class="step-label active">{% trans 'User & Plan' %}</div>
+        </div>
+        <div class="progress-step">
+            <div class="step-circle">2</div>
+            <div class="step-label">{% trans 'Dates & Status' %}</div>
+        </div>
+        <div class="progress-step">
+            <div class="step-circle">3</div>
+            <div class="step-label">{% trans 'Review' %}</div>
+        </div>
+    </div>
+
+    <form {% if has_file_field %}enctype="multipart/form-data" {% endif %}{% if form_url %}action="{{ form_url }}" {% endif %}method="post" id="{{ opts.model_name }}_form" novalidate>
+        {% csrf_token %}
+        <input type="hidden" name="is_popup" value="{{ is_popup }}">
+        {% if to_field %}<input type="hidden" name="{{ to_field }}" value="{{ to_field_value }}">{% endif %}
+
+        {% if adminform.form.non_field_errors %}
+        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: var(--radius-md); padding: var(--space-sm); margin-bottom: var(--space-md); color: var(--danger); font-size: var(--text-sm);">
+            <strong>{% trans 'Form errors:' %}</strong>
+            <ul style="margin: var(--space-xs) 0 0 var(--space-md);">
+            {% for error in adminform.form.non_field_errors %}
+                <li>{{ error }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- User & Plan Selection Card -->
+        <div class="form-card">
+            <div class="card-header">
+                <div class="card-header-title">
+                    <div class="card-header-icon">
+                        <i class="fas fa-user-tag"></i>
+                    </div>
+                    <div>
+                        <h3 class="card-title">{% trans 'User & Plan Selection' %}</h3>
+                        <p class="card-subtitle">{% trans 'Select user and assign a subscription plan' %}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-content">
+                <div class="modern-form-grid">
+                    <div class="form-group-modern">
+                        <label class="floating-label {% if adminform.form.user.field.required %}required{% endif %}">
+                            {% trans 'User' %}
+                        </label>
+                        {{ adminform.form.user }}
+                        {% if adminform.form.user.help_text %}
+                            <div class="field-status valid">
+                                <i class="fas fa-info-circle"></i>
+                                {{ adminform.form.user.help_text }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group-modern">
+                        <label class="floating-label {% if adminform.form.plan.field.required %}required{% endif %}">
+                            {% trans 'Plan' %}
+                        </label>
+                        {{ adminform.form.plan }}
+                        {% if adminform.form.plan.help_text %}
+                            <div class="field-status valid">
+                                <i class="fas fa-info-circle"></i>
+                                {{ adminform.form.plan.help_text }}
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dates & Status Card -->
+        <div class="form-card">
+            <div class="card-header">
+                <div class="card-header-title">
+                    <div class="card-header-icon">
+                        <i class="fas fa-calendar-alt"></i>
+                    </div>
+                    <div>
+                        <h3 class="card-title">{% trans 'Dates & Status' %}</h3>
+                        <p class="card-subtitle">{% trans 'Set subscription dates and current status' %}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-content">
+                <div class="modern-form-grid">
+                    <div class="form-group-modern">
+                        <label class="floating-label {% if adminform.form.starts_at.field.required %}required{% endif %}">
+                            {% trans 'Starts At' %}
+                        </label>
+                        {{ adminform.form.starts_at }}
+                        {% if adminform.form.starts_at.help_text %}
+                            <div class="field-status valid">
+                                <i class="fas fa-info-circle"></i>
+                                {{ adminform.form.starts_at.help_text }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group-modern">
+                        <label class="floating-label {% if adminform.form.expires_at.field.required %}required{% endif %}">
+                            {% trans 'Expires At' %}
+                        </label>
+                        {{ adminform.form.expires_at }}
+                        {% if adminform.form.expires_at.help_text %}
+                            <div class="field-status valid">
+                                <i class="fas fa-info-circle"></i>
+                                {{ adminform.form.expires_at.help_text }}
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <div class="form-group-modern">
+                        <label class="floating-label {% if adminform.form.status.field.required %}required{% endif %}">
+                            {% trans 'Status' %}
+                        </label>
+                        {{ adminform.form.status }}
+                        {% if adminform.form.status.help_text %}
+                            <div class="field-status valid">
+                                <i class="fas fa-info-circle"></i>
+                                {{ adminform.form.status.help_text }}
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                {% for field in adminform.form %}
+                    {% if field.name not in 'user,plan,starts_at,expires_at,status' and field.name != 'id' %}
+                    <div class="form-group-modern">
+                        <label class="floating-label {% if field.field.required %}required{% endif %}">
+                            {{ field.label }}
+                        </label>
+                        {{ field }}
+                        {% if field.help_text %}
+                            <div class="field-status valid">
+                                <i class="fas fa-info-circle"></i>
+                                {{ field.help_text }}
+                            </div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Plan Details Preview -->
+        {% if not add and original.plan %}
+        <div class="plan-details">
+            <div class="plan-header">
+                <div class="plan-icon-large">
+                    <i class="fas fa-crown"></i>
+                </div>
+                <div>
+                    <div class="plan-name">{{ original.plan.name }}</div>
+                    <div class="plan-price">${{ original.plan.price }} / {{ original.plan.get_duration_display|lower }}</div>
+                </div>
+            </div>
+
+            <div class="plan-features">
+                <div class="feature-item">
+                    <i class="fas fa-robot feature-icon"></i>
+                    <div class="feature-text">
+                        {% trans 'Max Bots:' %} {{ original.plan.max_bots|default:"∞" }}
+                    </div>
+                </div>
+                
+                <div class="feature-item">
+                    <i class="fas fa-shopping-cart feature-icon"></i>
+                    <div class="feature-text">
+                        {% trans 'Daily Orders:' %} {{ original.plan.max_orders_per_day|default:"∞" }}
+                    </div>
+                </div>
+                
+                <div class="feature-item">
+                    <i class="fas fa-cogs feature-icon"></i>
+                    <div class="feature-text">
+                        {% trans 'Strategies:' %} {{ original.plan.max_strategies|default:"∞" }}
+                    </div>
+                </div>
+                
+                <div class="feature-item">
+                    <i class="fas fa-plug feature-icon"></i>
+                    <div class="feature-text">
+                        {% trans 'API Access:' %} {{ original.plan.has_api_access|yesno:"Yes,No" }}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Action Buttons -->
+        <div class="action-buttons-modern">
+            <div style="display: flex; gap: var(--space-sm);">
+                <a href="{% url 'admin:subscription_usersubscription_changelist' %}" class="btn-modern secondary">
+                    <i class="fas fa-arrow-left"></i>
+                    {% trans 'Back to Subscriptions' %}
+                </a>
+                
+                {% if not add %}
+                <a href="{% url 'admin:subscription_usersubscription_delete' original.pk %}" class="btn-modern danger">
+                    <i class="fas fa-trash"></i>
+                    {% trans 'Delete Subscription' %}
+                </a>
+                {% endif %}
+            </div>
+            
+            <div style="display: flex; gap: var(--space-sm);">
+                <button type="submit" name="_addanother" class="btn-modern secondary">
+                    <i class="fas fa-plus"></i>
+                    {% trans 'Save & Add Another' %}
+                </button>
+                
+                <button type="submit" name="_continue" class="btn-modern secondary">
+                    <i class="fas fa-edit"></i>
+                    {% trans 'Save & Continue' %}
+                </button>
+                
+                <button type="submit" name="_save" class="btn-modern">
+                    <i class="fas fa-save"></i>
+                    {% trans 'Save Subscription' %}
+                </button>
+            </div>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Style form elements
+    const styleFormElements = () => {
+        const inputs = document.querySelectorAll('input, select, textarea');
+        inputs.forEach(input => {
+            if (!input.classList.contains('form-field-modern')) {
+                input.classList.add('form-field-modern');
+            }
+        });
+    };
+    styleFormElements();
+
+    // Update progress bar based on form completion
+    function updateProgress() {
+        const form = document.getElementById('{{ opts.model_name }}_form');
+        const inputs = form.querySelectorAll('input, select, textarea');
+        let filledCount = 0;
+        
+        inputs.forEach(input => {
+            if (input.value && input.value.trim() !== '') {
+                filledCount++;
+            }
+        });
+        
+        const totalInputs = inputs.length;
+        const progressPercentage = (filledCount / totalInputs) * 100;
+        
+        // Update progress line
+        const progressFilled = document.getElementById('progressFilled');
+        if (progressFilled) {
+            const totalWidth = document.querySelector('.progress-line').offsetWidth;
+            progressFilled.style.width = (progressPercentage / 100 * totalWidth) + 'px';
+        }
+        
+        // Update step circles
+        const steps = document.querySelectorAll('.step-circle');
+        steps.forEach((step, index) => {
+            if (index < Math.floor(progressPercentage / 33)) {
+                step.classList.add('active');
+                step.previousElementSibling.classList.add('active');
+            }
+        });
+    }
+    
+    // Update progress on input
+    const formInputs = document.querySelectorAll('.form-field-modern');
+    formInputs.forEach(input => {
+        input.addEventListener('input', updateProgress);
+        input.addEventListener('change', updateProgress);
+    });
+    
+    // Initial update
+    updateProgress();
+
+    // Plan change handler
+    const planSelect = document.querySelector('#id_plan');
+    if (planSelect) {
+        planSelect.addEventListener('change', function() {
+            const planId = this.value;
+            if (planId) {
+                // In a real application, you would fetch plan details via AJAX
+                // For now, we'll just show a loading indicator
+                const loadingIndicator = document.createElement('div');
+                loadingIndicator.className = 'field-status';
+                loadingIndicator.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Loading plan details..." %}';
+                
+                const existingPlanDetails = document.querySelector('.plan-details');
+                if (existingPlanDetails) existingPlanDetails.remove();
+                
+                // Simulate API call
+                setTimeout(() => {
+                    loadingIndicator.remove();
+                    // You would update the plan details section here
+                }, 500);
+            }
+        });
+    }
+
+    // Auto-set expiry date based on plan duration
+    const startsAtField = document.querySelector('#id_starts_at');
+    const expiresAtField = document.querySelector('#id_expires_at');
+    
+    if (startsAtField && expiresAtField) {
+        startsAtField.addEventListener('change', function() {
+            if (this.value && !expiresAtField.value) {
+                // Set default expiry (30 days from start)
+                const startDate = new Date(this.value);
+                const expiryDate = new Date(startDate);
+                expiryDate.setDate(expiryDate.getDate() + 30);
+                
+                const formattedDate = expiryDate.toISOString().split('T')[0];
+                expiresAtField.value = formattedDate;
+            }
+        });
+    }
+
+    // Form validation
+    const form = document.getElementById('{{ opts.model_name }}_form');
+    if (form) {
+        form.addEventListener('submit', function(e) {
+            const submitButtons = this.querySelectorAll('button[type="submit"]');
+            submitButtons.forEach(btn => {
+                const originalHTML = btn.innerHTML;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> ' + btn.textContent;
+                btn.disabled = true;
+                btn.dataset.original = originalHTML;
+            });
+        });
+    }
+
+    // Auto-save indicator
+    let changeTimeout;
+    formInputs.forEach(input => {
+        input.addEventListener('input', function() {
+            clearTimeout(changeTimeout);
+            
+            const existing = document.querySelector('.auto-save-indicator');
+            if (existing) existing.remove();
+            
+            const indicator = document.createElement('div');
+            indicator.className = 'auto-save-indicator';
+            indicator.style.cssText = `
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+                color: white;
+                padding: var(--space-sm) var(--space-md);
+                border-radius: var(--radius-md);
+                font-size: var(--text-xs);
+                z-index: 1000;
+                display: flex;
+                align-items: center;
+                gap: var(--space-sm);
+                box-shadow: var(--shadow-lg);
+            `;
+            indicator.innerHTML = '<i class="fas fa-save"></i> {% trans "Changes detected • Press Ctrl+S to save" %}';
+            document.body.appendChild(indicator);
+            
+            changeTimeout = setTimeout(() => {
+                indicator.remove();
+            }, 3000);
+        });
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            const saveBtn = document.querySelector('button[name="_save"]');
+            if (saveBtn) saveBtn.click();
+        }
+        
+        if (e.key === 'Escape') {
+            const backBtn = document.querySelector('a[href*="changelist"]');
+            if (backBtn) window.location = backBtn.href;
+        }
+    });
+});
+</script>
+{% endblock %}

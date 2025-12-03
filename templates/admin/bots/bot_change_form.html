@@ -1,0 +1,367 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{% if add %}{% trans 'Add Bot' %}{% else %}{% trans 'Edit Bot' %}{% endif %} | EzTrade{% endblock %}
+
+{% block page_title %}
+    {% if add %}{% trans 'Add Trading Bot' %}{% else %}{{ original.name|default:original }}{% endif %}
+{% endblock %}
+
+{% block page_subtitle %}
+    {% if add %}{% trans 'Create a new trading bot configuration' %}{% else %}{% trans 'Edit bot settings and configuration' %}{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .form-container { 
+        background: var(--bg-card); 
+        backdrop-filter: var(--backdrop-blur); 
+        border-radius: var(--radius-lg); 
+        padding: var(--space-lg); 
+        border: 1px solid var(--border-light); 
+        box-shadow: var(--shadow-xl); 
+        margin-bottom: var(--space-lg); 
+    }
+
+    .module { 
+        background: rgba(255, 255, 255, 0.03); 
+        border: 1px solid var(--border-light); 
+        border-radius: var(--radius-md); 
+        margin-bottom: var(--space-lg); 
+        overflow: hidden; 
+        animation: slideUp 0.5s ease forwards; 
+        opacity: 0; 
+        transform: translateY(20px); 
+    }
+    
+    .module h2 { 
+        background: rgba(255, 255, 255, 0.05); 
+        padding: var(--space-md) var(--space-lg); 
+        margin: 0; 
+        font-size: var(--text-base); 
+        font-weight: 600; 
+        border-bottom: 1px solid var(--border-light); 
+        color: var(--light);
+    }
+    
+    .module .form-row { 
+        padding: var(--space-md) var(--space-lg); 
+        border-bottom: 1px solid var(--border-dark); 
+        display: flex; 
+        flex-wrap: wrap; 
+        align-items: flex-start; 
+        gap: var(--space-md);
+    }
+    
+    .module .form-row:last-child { 
+        border-bottom: none; 
+    }
+
+    label { 
+        color: var(--gray-300); 
+        font-weight: 500; 
+        font-size: var(--text-sm); 
+        margin-bottom: var(--space-sm); 
+        display: block; 
+        width: 100%; 
+    }
+
+    input[type="text"], input[type="number"], input[type="email"], input[type="password"], select, textarea {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-sm);
+        padding: var(--space-md);
+        color: var(--light);
+        font-size: var(--text-sm);
+        width: 100%;
+        transition: all 0.2s ease;
+    }
+
+    input:focus, select:focus, textarea:focus { 
+        outline: none; 
+        border-color: var(--primary); 
+        background: rgba(255, 255, 255, 0.08); 
+        box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.1); 
+    }
+    
+    input[type="checkbox"] { 
+        width: 18px; 
+        height: 18px; 
+        margin-right: var(--space-sm); 
+        accent-color: var(--primary); 
+    }
+
+    .submit-row { 
+        display: flex; 
+        justify-content: space-between; 
+        align-items: center; 
+        padding: var(--space-lg) 0; 
+        border-top: 1px solid var(--border-light); 
+        margin-top: var(--space-lg); 
+        flex-wrap: wrap;
+        gap: var(--space-md);
+    }
+    
+    .submit-row input.default { 
+        background: linear-gradient(135deg, var(--primary), var(--primary-light)); 
+        border: none; 
+        color: white; 
+        padding: var(--space-md) var(--space-lg); 
+        border-radius: var(--radius-md); 
+        font-weight: 500; 
+        cursor: pointer; 
+        transition: all 0.2s ease; 
+        font-size: var(--text-sm);
+    }
+    
+    .submit-row input.default:hover { 
+        transform: translateY(-2px); 
+        box-shadow: 0 6px 16px rgba(67,97,238,0.4); 
+    }
+    
+    .deletelink { 
+        background: var(--danger); 
+        color: white; 
+        padding: var(--space-md) var(--space-lg); 
+        border-radius: var(--radius-md); 
+        text-decoration: none; 
+        font-weight: 500; 
+        transition: all 0.2s ease; 
+        font-size: var(--text-sm);
+        display: inline-block;
+    }
+    
+    .deletelink:hover { 
+        background: #e11d74; 
+        transform: translateY(-2px); 
+        box-shadow: 0 6px 16px rgba(247, 37, 133, 0.4); 
+        color: white; 
+        text-decoration: none; 
+    }
+    
+    .help { 
+        color: var(--gray-400); 
+        font-size: var(--text-xs); 
+        margin-top: var(--space-xs); 
+        display: block; 
+        line-height: 1.4;
+    }
+    
+    .errornote { 
+        background: rgba(247, 37, 133, 0.1); 
+        border: 1px solid rgba(247, 37, 133, 0.3); 
+        color: var(--danger); 
+        padding: var(--space-md); 
+        border-radius: var(--radius-md); 
+        margin-bottom: var(--space-lg); 
+        font-size: var(--text-sm); 
+    }
+    
+    .errorlist { 
+        color: var(--danger); 
+        font-size: var(--text-xs); 
+        margin-top: var(--space-xs); 
+        list-style: none; 
+        padding: 0; 
+    }
+
+    .form-actions {
+        display: flex;
+        gap: var(--space-md);
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    @keyframes slideUp {
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Field type indicators */
+    .field-decimal input {
+        border-left: 3px solid var(--success);
+    }
+    
+    .field-integer input {
+        border-left: 3px solid var(--warning);
+    }
+
+    /* Visually indicate read-only schedule fields */
+    .schedule-readonly {
+        opacity: 0.6;
+        pointer-events: none;
+    }
+
+    @media (max-width: 768px) {
+        .module .form-row { 
+            flex-direction: column; 
+            gap: var(--space-sm);
+        }
+        
+        .submit-row { 
+            flex-direction: column; 
+            gap: var(--space-md); 
+            align-items: stretch; 
+        }
+        
+        .submit-row input.default, 
+        .deletelink { 
+            width: 100%; 
+            text-align: center; 
+        }
+        
+        .form-actions {
+            flex-direction: column;
+            width: 100%;
+        }
+        
+        .form-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="form-container">
+    {% if errors %}
+        <p class="errornote">
+            {% if errors|length == 1 %}{% trans "Please correct the error below." %}{% else %}{% trans "Please correct the errors below." %}{% endif %}
+        </p>
+        {{ adminform.form.non_field_errors }}
+    {% endif %}
+
+    <form {% if has_file_field %}enctype="multipart/form-data" {% endif %}{% if form_url %}action="{{ form_url }}" {% endif %}method="post" id="{{ opts.model_name }}_form" novalidate>
+        {% csrf_token %}
+        {% block form_top %}{% endblock %}
+        <input type="hidden" name="is_popup" value="{{ is_popup }}">
+        {% if to_field %}<input type="hidden" name="{{ to_field }}" value="{{ to_field_value }}">{% endif %}
+        
+        {% if adminform.form.hidden_fields %}
+            {% for hidden in adminform.form.hidden_fields %}
+                {{ hidden }}
+            {% endfor %}
+        {% endif %}
+
+        {% if save_on_top %}{% block submit_buttons_top %}{% submit_row %}{% endblock %}{% endif %}
+
+        {% for fieldset in adminform %}
+            {% include "admin/includes/fieldset.html" %}
+        {% endfor %}
+
+        {% block after_field_sets %}{% endblock %}
+
+        {% for inline_admin_formset in inline_admin_formsets %}
+            {% include inline_admin_formset.opts.template %}
+        {% endfor %}
+
+        {% block after_related_objects %}{% endblock %}
+
+        {% block submit_buttons_bottom %}{% submit_row %}{% endblock %}
+
+        {% block admin_change_form_document_ready %}
+            <script id="django-admin-form-add-constants"
+                    src="{% static 'admin/js/change_form.js' %}"
+                    {% if adminform and add %}data-model-name="{{ opts.model_name }}"{% endif %}
+                    async></script>
+        {% endblock %}
+
+        {% prepopulated_fields_js %}
+    </form>
+</div>
+
+<div class="form-actions">
+    {% if not add and original %}
+    <a href="{% url 'admin:bots_bot_details' original.id %}" class="btn btn-outline">
+        <i class="fas fa-eye"></i> {% trans 'View Details' %}
+    </a>
+    {% endif %}
+    <a href="{% url 'admin:bots_bot_changelist' %}" class="btn btn-outline">
+        <i class="fas fa-list"></i> {% trans 'All Bots' %}
+    </a>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Animate form modules with proper timing
+    const modules = document.querySelectorAll('.module');
+    modules.forEach((module, index) => {
+        module.style.animationDelay = `${index * 100}ms`;
+    });
+
+    // Enhanced field type handling using CSS classes
+    const decimalFields = document.querySelectorAll('.field-decimal input[type="text"]');
+    const integerFields = document.querySelectorAll('.field-integer input[type="text"]');
+    
+    decimalFields.forEach(field => {
+        field.type = 'number';
+        field.step = 'any';
+        field.inputMode = 'decimal';
+    });
+    
+    integerFields.forEach(field => {
+        field.type = 'number';
+        field.step = '1';
+        field.inputMode = 'numeric';
+    });
+
+    // Add real-time validation feedback
+    const inputs = document.querySelectorAll('input, select, textarea');
+    inputs.forEach(input => {
+        input.addEventListener('blur', function() {
+            if (this.value.trim() !== '') {
+                this.classList.add('touched');
+            }
+        });
+        
+        // Add was-validated class to form on submit
+        const form = document.getElementById('{{ opts.model_name }}_form');
+        if (form) {
+            form.addEventListener('submit', function() {
+                this.classList.add('was-validated');
+            });
+        }
+    });
+
+    // Trading schedule toggle: enable/disable day/time fields
+    const scheduleToggle = document.getElementById('id_trading_schedule_enabled');
+    const dayInputs = document.querySelectorAll('input[name="allowed_trading_days"]');
+    const startInput = document.getElementById('id_trading_window_start');
+    const endInput = document.getElementById('id_trading_window_end');
+
+    function setScheduleReadonly(disabled) {
+        dayInputs.forEach(function (el) {
+            if (disabled) {
+                el.setAttribute('disabled', 'disabled');
+                el.closest('label')?.classList.add('schedule-readonly');
+            } else {
+                el.removeAttribute('disabled');
+                el.closest('label')?.classList.remove('schedule-readonly');
+            }
+        });
+        [startInput, endInput].forEach(function (el) {
+            if (!el) return;
+            if (disabled) {
+                el.setAttribute('disabled', 'disabled');
+                el.classList.add('schedule-readonly');
+            } else {
+                el.removeAttribute('disabled');
+                el.classList.remove('schedule-readonly');
+            }
+        });
+    }
+
+    if (scheduleToggle) {
+        // Initialise based on current state (in case HTML didn't already do it)
+        setScheduleReadonly(!scheduleToggle.checked);
+        scheduleToggle.addEventListener('change', function () {
+            setScheduleReadonly(!this.checked);
+        });
+    }
+});
+</script>
+{% endblock %}

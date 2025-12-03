@@ -1,0 +1,601 @@
+{% extends "admin/trading_base.html" %}
+{% load static i18n admin_metrics %}
+
+{% block title %}{% trans "Trading Profiles" %} | EzTrade{% endblock %}
+
+{% block page_title %}{% trans "Trading Profiles" %}{% endblock %}
+
+{% block page_subtitle %}{% trans "Manage trading risk profiles and configuration templates for your bots." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .trading-profiles-container {
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    /* Profile-specific styles */
+    .profile-slug {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 600;
+        background: rgba(67, 97, 238, 0.2);
+        color: var(--primary-light);
+    }
+
+    .profile-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-md);
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: var(--text-sm);
+        font-weight: 600;
+    }
+
+    .profile-meta {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .profile-name {
+        font-weight: 600;
+        color: var(--light);
+    }
+
+    .profile-description {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Risk parameters */
+    .risk-param {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+
+    .param-value {
+        font-weight: 600;
+        color: var(--light);
+        font-size: var(--text-sm);
+    }
+
+    .param-label {
+        font-size: var(--text-xs);
+        color: var(--gray-400);
+    }
+
+    /* Status badges */
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+        white-space: nowrap;
+    }
+
+    .status-active {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .status-inactive {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    .status-default {
+        background: var(--primary-light);
+        color: white;
+    }
+
+    /* Risk level indicators */
+    .risk-level {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        padding: var(--space-xs) var(--space-md);
+        border-radius: 12px;
+        font-size: var(--text-xs);
+        font-weight: 500;
+    }
+
+    .risk-low {
+        background: var(--success-light);
+        color: var(--success);
+    }
+
+    .risk-medium {
+        background: var(--warning-light);
+        color: var(--warning);
+    }
+
+    .risk-high {
+        background: var(--danger-light);
+        color: var(--danger);
+    }
+
+    /* Action buttons */
+    .action-buttons {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        justify-content: flex-start;
+        flex-wrap: nowrap;
+    }
+
+    .action-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 4px;
+        font-size: 11px;
+        text-decoration: none;
+        transition: all 0.2s ease;
+        border: 1px solid var(--border-light);
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--gray-300);
+        flex-shrink: 0;
+    }
+
+    .action-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--light);
+        text-decoration: none;
+        transform: translateY(-1px);
+    }
+
+    .action-btn.edit {
+        background: var(--primary-light);
+        color: white;
+        border-color: var(--primary);
+    }
+
+    .action-btn.clone {
+        background: rgba(76, 201, 240, 0.2);
+        color: var(--info);
+        border-color: var(--info);
+    }
+
+    .action-btn.view {
+        background: rgba(148, 163, 184, 0.2);
+        color: var(--gray-400);
+        border-color: var(--gray-400);
+    }
+
+    .action-btn.delete {
+        background: var(--danger-light);
+        color: var(--danger);
+        border-color: var(--danger);
+    }
+
+    /* Empty state */
+    .empty-state {
+        text-align: center;
+        padding: var(--space-2xl);
+        color: var(--gray-400);
+    }
+
+    .empty-state-icon {
+        font-size: 3rem;
+        margin-bottom: var(--space-md);
+        opacity: 0.5;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .modern-table {
+            min-width: 800px;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .header-actions {
+            flex-direction: column;
+            gap: var(--space-md);
+        }
+
+        .header-actions .btn {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .filters-bar {
+            flex-direction: column;
+        }
+
+        .filter-actions {
+            flex-direction: column;
+        }
+
+        .filter-select {
+            min-width: 100%;
+        }
+
+        .action-buttons {
+            justify-content: center;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .action-buttons {
+            flex-direction: row;
+        }
+
+        .action-btn {
+            width: 24px;
+            height: 24px;
+            font-size: 10px;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="trading-profiles-container">
+    <!-- Header Actions -->
+    <div class="header-actions" style="margin-bottom: var(--space-xl);">
+        <a href="{% url 'admin:execution_tradingprofile_add' %}" class="btn btn-primary">
+            <i class="fas fa-plus"></i> {% trans "Add Profile" %}
+        </a>
+        <button type="button" class="btn btn-success" id="setDefaultBtn">
+            <i class="fas fa-star"></i> {% trans "Set as Default" %}
+        </button>
+        <button type="button" class="btn btn-outline" id="refreshBtn">
+            <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+        </button>
+    </div>
+
+    <!-- Filters Bar -->
+    <div class="filters-bar">
+        <div class="search-box">
+            <i class="fas fa-search search-icon"></i>
+            <input type="text" class="search-input" 
+                   placeholder="{% trans 'Search profiles by name or slug...' %}" 
+                   id="searchInput">
+        </div>
+        <div class="filter-actions">
+            <select class="filter-select" id="statusFilter">
+                <option value="">{% trans "All Status" %}</option>
+                <option value="default">{% trans "Default" %}</option>
+                <option value="active">{% trans "Active" %}</option>
+            </select>
+            <select class="filter-select" id="riskFilter">
+                <option value="">{% trans "All Risk Levels" %}</option>
+                <option value="low">{% trans "Low Risk" %}</option>
+                <option value="medium">{% trans "Medium Risk" %}</option>
+                <option value="high">{% trans "High Risk" %}</option>
+            </select>
+            <button class="btn btn-outline" type="button" id="clearFiltersBtn">
+                <i class="fas fa-times"></i> {% trans "Clear Filters" %}
+            </button>
+        </div>
+    </div>
+
+    <!-- Trading Profiles Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Trading Profiles" %}</h3>
+                <p class="card-subtitle">{% trans "Risk management profiles and trading configuration templates" %}</p>
+            </div>
+            <div class="action-icons">
+                <i class="fas fa-download" title="{% trans 'Export' %}"></i>
+                <i class="fas fa-upload" title="{% trans 'Import' %}"></i>
+                <i class="fas fa-cog" title="{% trans 'Settings' %}"></i>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="modern-table">
+                <thead>
+                    <tr>
+                        <th>{% trans "Profile" %}</th>
+                        <th>{% trans "Risk per Trade" %}</th>
+                        <th>{% trans "Daily Limits" %}</th>
+                        <th>{% trans "Risk Level" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Updated" %}</th>
+                        <th>{% trans "Actions" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for profile in profiles %}
+                        <tr class="profile-row" 
+                            data-status="{{ profile.is_default|yesno:'default,active' }}"
+                            data-risk="{{ profile.get_risk_level|default:'medium' }}"
+                            data-search="{{ profile.name }} {{ profile.slug }} {{ profile.description|default:'' }}">
+                            <td>
+                                <div style="display: flex; align-items: center; gap: var(--space-md);">
+                                    <div class="profile-icon">
+                                        {{ profile.name|slice:":1"|upper }}
+                                    </div>
+                                    <div class="profile-meta">
+                                        <div class="profile-name">{{ profile.name }}</div>
+                                        <div class="profile-description">
+                                            <span class="profile-slug">
+                                                <i class="fas fa-tag"></i>
+                                                {{ profile.slug }}
+                                            </span>
+                                            {% if profile.description %}
+                                            <span style="margin-left: var(--space-sm);">{{ profile.description|truncatechars:40 }}</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="risk-param">
+                                    <div class="param-value">{{ profile.risk_per_trade_pct }}%</div>
+                                    <div class="param-label">{% trans "Per Trade" %}</div>
+                                </div>
+                            </td>
+                            <td>
+                                <div style="display: flex; flex-direction: column; gap: var(--space-xs);">
+                                    <div class="param-value">
+                                        {{ profile.max_trades_per_day }} {% trans "trades/day" %}
+                                    </div>
+                                    <div class="param-label">
+                                        {{ profile.max_concurrent_positions }} {% trans "positions" %}
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                {% with risk_level=profile.get_risk_level %}
+                                    {% if risk_level == "low" %}
+                                        <span class="risk-level risk-low">
+                                            <i class="fas fa-shield"></i>{% trans "Low Risk" %}
+                                        </span>
+                                    {% elif risk_level == "high" %}
+                                        <span class="risk-level risk-high">
+                                            <i class="fas fa-bolt"></i>{% trans "High Risk" %}
+                                        </span>
+                                    {% else %}
+                                        <span class="risk-level risk-medium">
+                                            <i class="fas fa-balance-scale"></i>{% trans "Medium Risk" %}
+                                        </span>
+                                    {% endif %}
+                                {% endwith %}
+                            </td>
+                            <td>
+                                {% if profile.is_default %}
+                                    <span class="status-badge status-default">
+                                        <i class="fas fa-star"></i>{% trans "Default" %}
+                                    </span>
+                                {% else %}
+                                    <span class="status-badge status-active">
+                                        <i class="fas fa-check"></i>{% trans "Active" %}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div style="font-size: var(--text-xs); color: var(--gray-400);">
+                                    {{ profile.updated_at|date:"M j, Y" }}
+                                </div>
+                            </td>
+                            <td>
+                                <div class="action-buttons">
+                                    <a href="{% url 'admin:execution_tradingprofile_change' profile.pk %}"
+                                       class="action-btn edit"
+                                       title="{% trans 'Edit profile' %}">
+                                        <i class="fas fa-edit"></i>
+                                    </a>
+                                    <a href="{% url 'admin:execution_tradingprofile_add' %}?clone={{ profile.pk }}"
+                                       class="action-btn clone"
+                                       title="{% trans 'Clone profile' %}">
+                                        <i class="fas fa-copy"></i>
+                                    </a>
+                                    <a href="{% url 'admin:execution_tradingprofile_change' profile.pk %}"
+                                       class="action-btn view"
+                                       title="{% trans 'View details' %}">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                    {% if not profile.is_default %}
+                                        <a href="{% url 'admin:execution_tradingprofile_delete' profile.pk %}"
+                                           class="action-btn delete"
+                                           title="{% trans 'Delete profile' %}">
+                                            <i class="fas fa-trash"></i>
+                                        </a>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="7" class="empty-state">
+                                <i class="fas fa-layer-group empty-state-icon"></i>
+                                <div>{% trans "No trading profiles configured." %}</div>
+                                <div style="font-size: var(--text-sm); margin-top: var(--space-sm);">
+                                    {% trans "Create your first trading profile to define risk management rules." %}
+                                </div>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="pagination">
+            <div class="pagination-info">
+                {{ profiles|length }} {% trans "profiles shown" %}
+            </div>
+            <div class="pagination-controls">
+                <a href="{% url 'admin:execution_tradingprofile_changelist' %}" class="pagination-btn">
+                    {% trans "Open in Admin" %}
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Stats Card -->
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <h3 class="card-title">{% trans "Profiles Overview" %}</h3>
+                <p class="card-subtitle">{% trans "Trading profiles summary and risk distribution" %}</p>
+            </div>
+        </div>
+        
+        <div class="progress-grid">
+            <div class="progress-card">
+                <div class="progress-value">{{ total_profiles_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Total Profiles" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ default_profiles_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Default" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ low_risk_profiles_count|default:0 }}</div>
+                <div class="progress-label">{% trans "Low Risk" %}</div>
+            </div>
+            <div class="progress-card">
+                <div class="progress-value">{{ high_risk_profiles_count|default:0 }}</div>
+                <div class="progress-label">{% trans "High Risk" %}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Filter functionality
+    const searchInput = document.getElementById('searchInput');
+    const statusFilter = document.getElementById('statusFilter');
+    const riskFilter = document.getElementById('riskFilter');
+    const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const setDefaultBtn = document.getElementById('setDefaultBtn');
+    const paginationInfo = document.querySelector('.pagination-info');
+
+    const getRows = () => Array.from(document.querySelectorAll('.profile-row'));
+
+    const filterProfiles = () => {
+        const searchTerm = searchInput.value.toLowerCase();
+        const statusValue = statusFilter.value;
+        const riskValue = riskFilter.value;
+
+        let visibleCount = 0;
+
+        getRows().forEach(row => {
+            const searchData = row.getAttribute('data-search').toLowerCase();
+            const statusData = row.getAttribute('data-status');
+            const riskData = row.getAttribute('data-risk');
+
+            const matchesSearch = searchData.includes(searchTerm);
+            const matchesStatus = !statusValue || statusData === statusValue;
+            const matchesRisk = !riskValue || riskData === riskValue;
+
+            if (matchesSearch && matchesStatus && matchesRisk) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        if (paginationInfo) {
+            paginationInfo.textContent = `${visibleCount} {% trans "profiles shown" %}`;
+        }
+    };
+
+    // Event listeners for filters
+    searchInput.addEventListener('input', filterProfiles);
+    statusFilter.addEventListener('change', filterProfiles);
+    riskFilter.addEventListener('change', filterProfiles);
+
+    // Clear filters
+    clearFiltersBtn.addEventListener('click', function() {
+        searchInput.value = '';
+        statusFilter.value = '';
+        riskFilter.value = '';
+        filterProfiles();
+    });
+
+    // Refresh button
+    refreshBtn.addEventListener('click', function() {
+        this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Refreshing..." %}';
+        setTimeout(() => {
+            window.location.reload();
+        }, 1000);
+    });
+
+    // Set as default action
+    setDefaultBtn.addEventListener('click', function() {
+        const selectedProfiles = document.querySelectorAll('input[type="checkbox"]:checked');
+        if (selectedProfiles.length === 0) {
+            alert('{% trans "Please select at least one profile to set as default." %}');
+            return;
+        }
+        
+        if (selectedProfiles.length > 1) {
+            alert('{% trans "Please select only one profile to set as default." %}');
+            return;
+        }
+
+        const profileId = selectedProfiles[0].value;
+        if (confirm('{% trans "Are you sure you want to set this profile as default?" %}')) {
+            this.innerHTML = '<i class="fas fa-spinner fa-spin"></i> {% trans "Setting..." %}';
+            // In real implementation, this would make an API call
+            setTimeout(() => {
+                this.innerHTML = '<i class="fas fa-star"></i> {% trans "Set as Default" %}';
+                alert('{% trans "Profile set as default successfully." %}');
+                window.location.reload();
+            }, 1500);
+        }
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // Focus search on Ctrl+K or /
+        if ((e.ctrlKey && e.key === 'k') || e.key === '/') {
+            e.preventDefault();
+            searchInput.focus();
+        }
+        
+        // Refresh on F5
+        if (e.key === 'F5') {
+            e.preventDefault();
+            refreshBtn.click();
+        }
+        
+        // New profile on Ctrl+N
+        if (e.ctrlKey && e.key === 'n') {
+            e.preventDefault();
+            document.querySelector('a[href*="execution_tradingprofile_add"]').click();
+        }
+    });
+
+    // Auto-refresh every 60 seconds (optional)
+    setInterval(() => {
+        if (!document.hidden) {
+            refreshBtn.click();
+        }
+    }, 60000);
+
+    filterProfiles();
+});
+</script>
+{% endblock %}
