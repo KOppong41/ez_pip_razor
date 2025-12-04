@@ -348,13 +348,57 @@ def default_scalper_profile_config() -> dict:
             },
             "xauusd_aggressive": {
                 "name": "XAUUSD Scalper – Aggressive",
-                "symbol": "XAUUSD",
-                "execution_timeframes": ["M1"],
+                    "symbol": "XAUUSD",
+                    "execution_timeframes": ["M1"],
                 "description": "Adds momentum ignition for higher trade frequency.",
                 "enabled_strategies": ["trend_pullback", "breakout_retest", "momentum_ignition"],
                 "internal_triggers": ["price_action_pinbar"],
                 "disabled_strategies": ["range_reversion"],
+                "countertrend": True,
             },
+        },
+        "default_risk_preset": "xauusd_standard",
+        "risk_presets": {
+            "xauusd_standard": {
+                "name": "Standard",
+                "tp_pips": 120,
+                "sl_pips": 70,
+                "kill_switch_pct": 5.0,
+            },
+            "xauusd_aggressive": {
+                "name": "Aggressive",
+                "tp_pips": 150,
+                "sl_pips": 80,
+                "kill_switch_pct": 7.0,
+                "risk_pct": 0.7,
+            },
+        },
+        "default_psychology_profile": "standard",
+        "psychology_profiles": {
+            "standard": {
+                # Disable loss-streak autopause by default; can be enabled per-bot/profile if desired.
+                "autopause": False,
+                "max_loss_streak": 0,
+                "cooldown_min": 0,
+                "soft_dd_pct": 3.0,
+                "soft_multiplier": 0.5,
+                "hard_dd_pct": 5.0,
+                "hard_multiplier": 0.25,
+            },
+            "aggressive": {
+                # Even in aggressive mode, leave autopause off by default to avoid surprise pauses.
+                "autopause": False,
+                "max_loss_streak": 0,
+                "cooldown_min": 0,
+                "soft_dd_pct": 4.0,
+                "soft_multiplier": 0.6,
+                "hard_dd_pct": 7.0,
+                "hard_multiplier": 0.35,
+            },
+        },
+        "flip": {
+            "min_score": 0.85,
+            "cooldown_minutes": 5,
         },
         "score_profiles": {
             "aggressive": {
@@ -382,7 +426,8 @@ def default_scalper_profile_config() -> dict:
                 "be_buffer_r": 0.2,
                 "trail_trigger_r": 1.5,
                 "trail_mode": "swing",
-                "max_spread_points": 35,
+                # Tighter spread/slippage guardrails for XAU scalping.
+                "max_spread_points": 30,
                 "max_slippage_points": 10,
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
@@ -697,14 +742,27 @@ class ExecutionSetting(models.Model):
     max_order_lot = models.DecimalField(
         max_digits=8,
         decimal_places=4,
-        default=Decimal("0.05"),
+        default=Decimal("0.20"),
         help_text="Maximum lot size per order; set 0 to disable.",
     )
     max_order_notional = models.DecimalField(
         max_digits=20,
         decimal_places=2,
-        default=Decimal("5000"),
+        default=Decimal("50000"),
         help_text="Maximum notional (account currency) per order; set 0 to disable.",
+    )
+    # Global scalper guardrails
+    max_spread_points = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("30"),
+        help_text="Maximum allowed spread (in points) for scalper trades. 0 = disabled.",
+    )
+    max_slippage_points = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("8"),
+        help_text="Maximum allowed slippage (in points) for scalper trades. 0 = disabled.",
     )
     bot_min_default_qty = models.DecimalField(
         max_digits=20,
@@ -772,6 +830,10 @@ class ExecutionSetting(models.Model):
         """
         return {
             "key": "default",
+            # Scalper symbol guardrails (global defaults; can be tightened via admin)
+            "max_spread_points": getattr(settings, "SCALPER_MAX_SPREAD_POINTS", 30),
+            "max_slippage_points": getattr(settings, "SCALPER_MAX_SLIPPAGE_POINTS", 8),
+
             "decision_min_score": getattr(settings, "DECISION_MIN_SCORE", 0.5),
             "decision_flip_score": getattr(settings, "DECISION_FLIP_SCORE", 0.8),
             "decision_allow_hedging": getattr(settings, "DECISION_ALLOW_HEDGING", False),
@@ -787,8 +849,8 @@ class ExecutionSetting(models.Model):
             "trailing_distance": getattr(settings, "TRAILING_DISTANCE", Decimal("0.0003")),
             "paper_start_balance": getattr(settings, "PAPER_START_BALANCE", Decimal("100000")),
             "mt5_default_contract_size": getattr(settings, "MT5_DEFAULT_CONTRACT_SIZE", 100000),
-            "max_order_lot": getattr(settings, "MAX_ORDER_LOT", Decimal("0.05")),
-            "max_order_notional": getattr(settings, "MAX_ORDER_NOTIONAL", Decimal("5000")),
+            "max_order_lot": getattr(settings, "MAX_ORDER_LOT", Decimal("0.20")),
+            "max_order_notional": getattr(settings, "MAX_ORDER_NOTIONAL", Decimal("50000")),
             "bot_min_default_qty": getattr(settings, "BOT_MIN_DEFAULT_QTY", Decimal("0.01")),
             "max_loss_streak_before_pause": getattr(settings, "MAX_LOSS_STREAK_BEFORE_PAUSE", 0),
             "loss_streak_cooldown_min": getattr(settings, "LOSS_STREAK_COOLDOWN_MIN", 0),

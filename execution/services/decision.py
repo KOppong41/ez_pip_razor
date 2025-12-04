@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, datetime
 from decimal import Decimal
 
 from django.db import transaction
@@ -7,12 +7,44 @@ from execution.models import Signal, Decision, Position, Order
 from .strategy import naive_strategy, StrategyDecision
 from .risk import RiskConfig, check_risk, ScalperRiskContext
 from core.metrics import decisions_total
+from core.utils import audit_log
 from django.utils import timezone
 from bots.models import Bot  # for per-bot configs on the Bot model
 from execution.services.prices import get_price
 from execution.services.runtime_config import RuntimeConfig, get_runtime_config
 from execution.services.scalper_config import ScalperConfig, build_scalper_config
 from execution.services.strategies.scalper import plan_scalper_trade
+
+
+def _record_scalper_flip(bot: Bot | None, symbol: str | None):
+    if not bot or not symbol:
+        return
+    params = bot.scalper_params or {}
+    history = params.get("flip_history") or {}
+    history[symbol.upper()] = {"last_at": timezone.now().isoformat()}
+    params["flip_history"] = history
+    bot.scalper_params = params
+    Bot.objects.filter(pk=bot.pk).update(scalper_params=params)
+
+
+def _log_scalper_trace(signal: Signal | None, stage: str, action: str, reason: str, extra: dict | None = None):
+    if not signal:
+        return
+    payload = signal.payload or {}
+    trace = payload.get("decision_trace") or []
+    entry = {
+        "stage": stage,
+        "action": action,
+        "reason": reason,
+        "at": timezone.now().isoformat(),
+    }
+    if extra:
+        entry["meta"] = extra
+    trace.append(entry)
+    payload["decision_trace"] = trace[-30:]
+    signal.payload = payload
+    signal.save(update_fields=["payload"])
+    audit_log("scalper.decision_trace", "Signal", signal.id, entry)
 
 
 def count_open_positions(symbol: str) -> int:
@@ -50,6 +82,8 @@ def detect_position_conflict(
     new_direction: str,
     score: float,
     runtime_cfg: RuntimeConfig | None = None,
+    scalper_cfg: ScalperConfig | None = None,
+    scalper_ctx: ScalperRiskContext | None = None,
 ) -> StrategyDecision | None:
     """
     If a position already exists on this bot's broker account for the symbol,
@@ -77,10 +111,16 @@ def detect_position_conflict(
         return None
 
     allow_hedge = cfg.decision_allow_hedging
-    allow_scalp = bool(getattr(bot, "allow_opposite_scalp", False))
     flip_threshold = float(cfg.decision_flip_score)
+    allow_scalp = bool(getattr(bot, "allow_opposite_scalp", False)) if bot else False
+    allow_scale_in = False
+    if scalper_ctx:
+        allow_scale_in = bool(scalper_ctx.scale_in_allowed or scalper_ctx.allow_scale_in_default)
 
     if existing_dir == new_direction:
+        if allow_scale_in:
+            # scalper risk context already enforces per-symbol caps, so allow stacking.
+            return None
         return StrategyDecision(
             action="ignore",
             reason="existing_position_same_direction",
@@ -91,7 +131,20 @@ def detect_position_conflict(
         return None  # allow side-by-side if explicitly enabled
 
     # Flip on high conviction
-    if score >= flip_threshold:
+    min_flip_score = flip_threshold
+    flip_cooldown = 0
+    last_flip_at = None
+    if scalper_cfg and scalper_cfg.flip_settings:
+        min_flip_score = max(min_flip_score, float(scalper_cfg.flip_settings.min_score))
+        flip_cooldown = scalper_cfg.flip_settings.cooldown_minutes
+    if scalper_ctx:
+        last_flip_at = scalper_ctx.last_flip_at or last_flip_at
+        if scalper_ctx.flip_cooldown_minutes:
+            flip_cooldown = max(flip_cooldown, scalper_ctx.flip_cooldown_minutes)
+    cooldown_ok = True
+    if last_flip_at and flip_cooldown:
+        cooldown_ok = (timezone.now() - last_flip_at).total_seconds() >= flip_cooldown * 60
+    if score >= min_flip_score and cooldown_ok:
         return StrategyDecision(
             action="flip",
             reason="flip_triggered",
@@ -204,7 +257,11 @@ def _resolve_scalper_profile_min_score(bot: Bot | None, scalper_cfg: ScalperConf
     return float(threshold)
 
 
-def _build_scalp_params(signal: Signal, runtime_cfg: RuntimeConfig | None = None) -> dict:
+def _build_scalp_params(
+    signal: Signal,
+    runtime_cfg: RuntimeConfig | None = None,
+    scalper_cfg: ScalperConfig | None = None,
+) -> dict:
     """
     Prepare tight SL/TP + size multiplier for an opposite-direction scalp.
     Uses small configurable offsets around the current price.
@@ -221,6 +278,23 @@ def _build_scalp_params(signal: Signal, runtime_cfg: RuntimeConfig | None = None
     except Exception:
         price = None
 
+    # Respect instrument-specific minimum stop distance.
+    point = Decimal("0.0001")
+    sl_distance = sl_offset
+    if scalper_cfg:
+        symbol_cfg = scalper_cfg.resolve_symbol(signal.symbol)
+        if symbol_cfg:
+            point = Decimal("0.10") if symbol_cfg.key.startswith("XAU") else Decimal("0.0001")
+            min_points = symbol_cfg.sl_points_min
+            if min_points and min_points > 0:
+                min_distance = point * min_points
+                if sl_distance < min_distance:
+                    sl_distance = min_distance
+
+    tp_distance = tp_offset
+    if tp_distance < sl_distance:
+        tp_distance = sl_distance
+
     params = {
         "symbol": signal.symbol,
         "timeframe": signal.timeframe,
@@ -232,11 +306,11 @@ def _build_scalp_params(signal: Signal, runtime_cfg: RuntimeConfig | None = None
     if price is not None:
         px = Decimal(str(price))
         if signal.direction == "buy":
-            params["sl"] = str(px - sl_offset)
-            params["tp"] = str(px + tp_offset)
+            params["sl"] = str(px - sl_distance)
+            params["tp"] = str(px + tp_distance)
         else:
-            params["sl"] = str(px + sl_offset)
-            params["tp"] = str(px - tp_offset)
+            params["sl"] = str(px + sl_distance)
+            params["tp"] = str(px - tp_distance)
 
     return params
 
@@ -303,6 +377,18 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
         scale_in_allowed = True
     countertrend = bool(payload.get("countertrend") or payload.get("is_countertrend"))
 
+    last_flip_at = None
+    flip_history = (bot.scalper_params or {}).get("flip_history") if bot else None
+    if flip_history:
+        entry = flip_history.get(signal.symbol.upper())
+        if entry and entry.get("last_at"):
+            try:
+                last_flip_at = datetime.fromisoformat(entry["last_at"])
+                if timezone.is_naive(last_flip_at):
+                    last_flip_at = timezone.make_aware(last_flip_at, timezone=timezone.utc)
+            except Exception:
+                last_flip_at = None
+
     return ScalperRiskContext(
         config=scalper_cfg,
         symbol=signal.symbol,
@@ -316,8 +402,11 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
         slippage_points=slippage_points,
         floating_symbol_risk_pct=floating_risk_pct,
         scale_in_allowed=scale_in_allowed,
+        allow_scale_in_default=bool(scalper_cfg.risk and scalper_cfg.risk.max_trades_per_symbol > 1),
         countertrend=countertrend,
         payload_snapshot=payload,
+        last_flip_at=last_flip_at,
+        flip_cooldown_minutes=int(scalper_cfg.flip_settings.cooldown_minutes) if scalper_cfg.flip_settings else 0,
     )
 
 
@@ -330,9 +419,12 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     scalper_cfg = build_scalper_config(bot) if is_scalper_bot else None
 
     # 1) Strategy propose
-    if scalper_cfg:
+    # NOTE: If signal is ALREADY from scalper_engine, skip re-planning (avoid double-filtering)
+    if scalper_cfg and signal.source != "scalper_engine":
         proposed = plan_scalper_trade(signal, bot, scalper_cfg)
-    elif signal.source == "engine_v1":
+        if proposed.action != "open":
+            _log_scalper_trace(signal, "strategy", proposed.action, proposed.reason)
+    elif signal.source == "engine_v1" or signal.source == "scalper_engine":
         payload = signal.payload or {}
         params = {
             "symbol": signal.symbol,
@@ -395,6 +487,8 @@ def make_decision_from_signal(signal: Signal) -> Decision:
                 params=proposed.params,
                 score=proposed.score,
             )
+            if is_scalper_bot:
+                _log_scalper_trace(signal, "risk", proposed.action, risk_reason, {"open_symbol": open_symbol, "open_total": open_total})
 
     # 2b) Per-bot minimum score filter (default 0.5 globally)
     if proposed.action == "open":
@@ -412,6 +506,8 @@ def make_decision_from_signal(signal: Signal) -> Decision:
                 params=proposed.params,
                 score=proposed.score,
             )
+            if is_scalper_bot:
+                _log_scalper_trace(signal, "score", proposed.action, "score_below_min", {"score": proposed.score, "min_score": min_score})
 
     # 2c) Position conflict guardrail (no stacking/hedging unless enabled; optional flip)
     flip_info = None
@@ -422,6 +518,8 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             new_direction=signal.direction,
             score=proposed.score,
             runtime_cfg=runtime_cfg,
+            scalper_cfg=scalper_cfg if is_scalper_bot else None,
+            scalper_ctx=scalper_ctx,
         )
         if callable(conflict):
             conflict = conflict(proposed.score)
@@ -432,16 +530,18 @@ def make_decision_from_signal(signal: Signal) -> Decision:
                     "direction": signal.direction,
                     "score": proposed.score,
                 }
+                _log_scalper_trace(signal, "conflict", "flip", conflict.reason)
             elif conflict.action == "open" and conflict.reason == "opposite_scalp":
                 # Apply scalp overrides: tighter SL/TP + smaller size while keeping primary position alive.
                 params = proposed.params.copy() if proposed.params else {}
-                params.update(_build_scalp_params(signal, runtime_cfg=runtime_cfg))
+                params.update(_build_scalp_params(signal, runtime_cfg=runtime_cfg, scalper_cfg=scalper_cfg))
                 proposed = StrategyDecision(
                     action="open",
                     reason="opposite_scalp",
                     params=params,
                     score=proposed.score,
                 )
+                _log_scalper_trace(signal, "conflict", "opposite_scalp", conflict.reason)
             else:
                 proposed = StrategyDecision(
                     action=conflict.action,
@@ -449,13 +549,17 @@ def make_decision_from_signal(signal: Signal) -> Decision:
                     params=proposed.params,
                     score=conflict.score if conflict.score is not None else proposed.score,
                 )
+                _log_scalper_trace(signal, "conflict", proposed.action, conflict.reason)
 
     # 3) Per-bot trade interval + daily max trades (filled-based)
     if proposed.action == "open" and bot:
         now = timezone.now()
 
         # Daily limit based on *filled* orders
+        tmp = proposed
         proposed = apply_daily_limit(proposed, bot=bot, symbol=signal.symbol)
+        if proposed.action != "open" and tmp.action == "open":
+            _log_scalper_trace(signal, "daily_limit", proposed.action, proposed.reason)
 
         # min interval between trades (still based on last 'open' decision)
         if proposed.action == "open" and bot.trade_interval_minutes:
@@ -469,6 +573,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
                         params=proposed.params,
                         score=proposed.score,
                     )
+                    _log_scalper_trace(signal, "interval", proposed.action, "min_trade_interval_not_elapsed", {"minutes": bot.trade_interval_minutes})
 
     # 4) Persist decision
     decision = Decision.objects.create(
@@ -481,10 +586,13 @@ def make_decision_from_signal(signal: Signal) -> Decision:
         params=proposed.params or {},
     )
     decisions_total.labels(action=decision.action).inc()
+    if is_scalper_bot:
+        _log_scalper_trace(signal, "final", decision.action, decision.reason, {"score": decision.score})
 
     # Optional flip handling: create a paired close decision for the existing position.
     if flip_info:
         from execution.services.positions import prepare_flip_decisions
         prepare_flip_decisions(decision, flip_info)
+        _record_scalper_flip(bot, flip_info.get("symbol"))
 
     return decision

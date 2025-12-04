@@ -12,7 +12,10 @@ from execution.services.marketdata import Candle
 class TrendPullbackConfig:
     ema_period: int = 20
     min_trend_slope: Decimal = Decimal("0.0001")
-    pullback_tolerance: Decimal = Decimal("0.001")  # 0.1% distance to EMA
+    # Allow the entry candle to be within ~0.3% of the EMA (was 0.1%).
+    # Gold routinely swings more than 4-5 points per minute, so the tighter
+    # tolerance choked the strategy and only produced a handful of signals.
+    pullback_tolerance: Decimal = Decimal("0.003")
     rr: Decimal = Decimal("2")
 
 

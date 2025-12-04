@@ -81,22 +81,37 @@ def record_fill(
             tl = TradeLog.objects.filter(order=order).latest("created_at")
         except TradeLog.DoesNotExist:
             tl = None
-        if tl:
-            tl.pnl = realized_pnl
-            # Classify outcome for easier analytics
-            if realized_pnl > 0:
-                tl.status = "win"
-            elif realized_pnl < 0:
-                tl.status = "loss"
-            else:
-                tl.status = "breakeven"
-            tl.save(update_fields=["pnl", "status"])
 
-            # Update bot-level psychology state (loss streak / pause) based on this realized result.
-            try:
-                update_bot_after_realized_pnl(order, realized_pnl)
-            except Exception:
-                # Fail-soft: PnL recording should never block portfolio updates.
-                pass
+        # Ensure a TradeLog exists so we can attach PnL; create one if missing.
+        if tl is None:
+            tl = TradeLog.objects.create(
+                order=order,
+                bot=order.bot,
+                owner=getattr(order, "owner", None),
+                broker_account=order.broker_account,
+                symbol=order.symbol,
+                side=order.side,
+                qty=order.qty,
+                price=order.price,
+                status="filled",
+                pnl=None,
+            )
+
+        tl.pnl = realized_pnl
+        # Classify outcome for easier analytics
+        if realized_pnl > 0:
+            tl.status = "win"
+        elif realized_pnl < 0:
+            tl.status = "loss"
+        else:
+            tl.status = "breakeven"
+        tl.save(update_fields=["pnl", "status"])
+
+        # Update bot-level psychology state (loss streak / pause) based on this realized result.
+        try:
+            update_bot_after_realized_pnl(order, realized_pnl)
+        except Exception:
+            # Fail-soft: PnL recording should never block portfolio updates.
+            pass
 
     return exe

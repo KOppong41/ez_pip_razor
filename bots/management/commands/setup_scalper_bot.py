@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from bots.models import Bot, Asset, STRATEGY_CHOICES
 from brokers.models import BrokerAccount
+from execution.models import default_scalper_profile_config
 
 User = get_user_model()
 
@@ -36,10 +37,22 @@ class Command(BaseCommand):
             help="Enable auto_trade for live order dispatch",
         )
         parser.add_argument(
-            "--strategies",
+            "--profile",
             type=str,
-            default="price_action_pinbar,trend_pullback,doji_breakout,range_reversion",
-            help="Comma-separated list of enabled strategies",
+            default=None,
+            help="Strategy profile key (default: xauusd_standard)",
+        )
+        parser.add_argument(
+            "--risk-profile",
+            type=str,
+            default=None,
+            help="Risk preset key (default derived from profile config)",
+        )
+        parser.add_argument(
+            "--psychology-profile",
+            type=str,
+            default=None,
+            help="Psychology profile key (default derived from profile config)",
         )
 
     def handle(self, *args, **options):
@@ -47,7 +60,34 @@ class Command(BaseCommand):
         user_id = options["user_id"]
         account_id = options["account_id"]
         auto_trade = options["auto_trade"]
-        strategies_str = options["strategies"]
+        cfg = default_scalper_profile_config()
+        profile_key = options["profile"]
+        default_profile = cfg.get("default_strategy_profile", "xauusd_standard")
+        strategy_profiles = cfg.get("strategy_profiles", {})
+        if not profile_key:
+            profile_key = default_profile
+        profile_cfg = strategy_profiles.get(profile_key)
+        if not profile_cfg:
+            raise CommandError(f"Unknown strategy profile '{profile_key}'. Available: {', '.join(strategy_profiles.keys())}")
+        strategies = profile_cfg.get("enabled_strategies", [])
+        if not strategies:
+            raise CommandError(f"Strategy profile '{profile_key}' does not define enabled_strategies.")
+
+        risk_profiles = cfg.get("risk_presets", {})
+        risk_profile_key = options["risk_profile"] or cfg.get("default_risk_preset")
+        risk_profile = risk_profiles.get(risk_profile_key)
+        if not risk_profile:
+            raise CommandError(
+                f"Unknown risk profile '{risk_profile_key}'. Available: {', '.join(risk_profiles.keys())}"
+            )
+
+        psychology_profiles = cfg.get("psychology_profiles", {})
+        psychology_profile_key = options["psychology_profile"] or cfg.get("default_psychology_profile")
+        psychology_profile = psychology_profiles.get(psychology_profile_key)
+        if not psychology_profile:
+            raise CommandError(
+                f"Unknown psychology profile '{psychology_profile_key}'. Available: {', '.join(psychology_profiles.keys())}"
+            )
 
         # Get or create user
         if user_id:
@@ -84,35 +124,54 @@ class Command(BaseCommand):
                 )
             self.stdout.write(self.style.WARNING(f"Using broker account: {broker_account.mt5_login}"))
 
-        # Validate and parse strategies
-        strategies = [s.strip() for s in strategies_str.split(",")]
+        # Validate strategies
         invalid = [s for s in strategies if s not in STRATEGY_CHOICES]
         if invalid:
-            raise CommandError(f"Invalid strategies: {', '.join(invalid)}")
+            raise CommandError(f"Invalid strategies in profile '{profile_key}': {', '.join(invalid)}")
 
         # Create or update bot
         bot_name = f"{symbol} Scalper M1"
+        default_qty = Decimal("0.01") if "XAU" in symbol else Decimal("0.10")
+        bot_defaults = {
+            "name": bot_name,
+            "status": "active",
+            "broker_account": broker_account,
+            "default_timeframe": "1m",
+            "default_qty": default_qty,
+            "default_tp_pips": Decimal(str(risk_profile.get("tp_pips", 120))),
+            "default_sl_pips": Decimal(str(risk_profile.get("sl_pips", 70))),
+            "auto_trade": auto_trade,
+            "enabled_strategies": strategies,
+            "decision_min_score": Decimal("0.3"),
+            "risk_max_concurrent_positions": 2,
+            "risk_max_positions_per_symbol": 1,
+            "kill_switch_enabled": True,
+            "kill_switch_max_unrealized_pct": Decimal(str(risk_profile.get("kill_switch_pct", 5.0))),
+            # Default to NO autopause unless the psychology profile explicitly enables it.
+            "loss_streak_autopause_enabled": bool(psychology_profile.get("autopause", False)),
+            "max_loss_streak_before_pause": int(psychology_profile.get("max_loss_streak", 0)),
+            "loss_streak_cooldown_min": int(psychology_profile.get("cooldown_min", 0)),
+            "soft_drawdown_limit_pct": Decimal(str(psychology_profile.get("soft_dd_pct", 3.0))),
+            "hard_drawdown_limit_pct": Decimal(str(psychology_profile.get("hard_dd_pct", 5.0))),
+            "soft_size_multiplier": Decimal(str(psychology_profile.get("soft_multiplier", 0.5))),
+            "hard_size_multiplier": Decimal(str(psychology_profile.get("hard_multiplier", 0.25))),
+        }
+
         bot, created = Bot.objects.update_or_create(
             owner=user,
             asset=asset,
             engine_mode="scalper",
-            defaults={
-                "name": bot_name,
-                "status": "active",
-                "broker_account": broker_account,
-                "default_timeframe": "1m",
-                "default_qty": Decimal("0.01") if "XAU" in symbol else Decimal("0.10"),
-                "default_tp_pips": Decimal("5"),
-                "default_sl_pips": Decimal("3"),
-                "auto_trade": auto_trade,
-                "enabled_strategies": strategies,
-                "decision_min_score": Decimal("0.3"),
-                "risk_max_concurrent_positions": 2,
-                "risk_max_positions_per_symbol": 1,
-                "kill_switch_enabled": True,
-                "kill_switch_max_unrealized_pct": Decimal("0.02"),
-            },
+            defaults=bot_defaults,
         )
+
+        scalper_params = bot.scalper_params or {}
+        scalper_params["strategy_profile"] = profile_key
+        scalper_params["risk_profile"] = risk_profile_key
+        scalper_params["psychology_profile"] = psychology_profile_key
+        scalper_params.setdefault("score_profile", "default")
+        bot.scalper_params = scalper_params
+        bot.enabled_strategies = strategies
+        bot.save(update_fields=["scalper_params", "enabled_strategies"])
 
         if created:
             self.stdout.write(self.style.SUCCESS(f"✓ Created scalper bot: {bot.name} (ID {bot.id})"))
@@ -124,6 +183,9 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"  Account: {broker_account.mt5_login}"))
         self.stdout.write(self.style.SUCCESS(f"  Auto-trade: {auto_trade}"))
         self.stdout.write(self.style.SUCCESS(f"  Strategies: {', '.join(strategies)}"))
+        self.stdout.write(self.style.SUCCESS(f"  Strategy profile: {profile_key}"))
+        self.stdout.write(self.style.SUCCESS(f"  Risk profile: {risk_profile_key}"))
+        self.stdout.write(self.style.SUCCESS(f"  Psychology profile: {psychology_profile_key}"))
         self.stdout.write(self.style.SUCCESS(f"  Engine mode: scalper (M1 high-frequency)"))
         self.stdout.write(self.style.SUCCESS(f""))
         self.stdout.write(

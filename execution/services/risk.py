@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Tuple
 
@@ -33,7 +34,10 @@ class ScalperRiskContext:
     slippage_points: Decimal | None = None
     floating_symbol_risk_pct: Decimal | None = None
     scale_in_allowed: bool = False
+    allow_scale_in_default: bool = False
     countertrend: bool = False
+    last_flip_at: datetime | None = None
+    flip_cooldown_minutes: int = 0
     payload_snapshot: dict = field(default_factory=dict)
 
 
@@ -81,7 +85,11 @@ def _check_scalper_limits(
     if open_positions_count_symbol >= risk.max_trades_per_symbol:
         return False, "scalper:max_symbol_trades"
 
-    scale_in_ok = ctx.scale_in_allowed or open_positions_count_symbol == 0
+    scale_in_ok = (
+        ctx.scale_in_allowed
+        or ctx.allow_scale_in_default
+        or open_positions_count_symbol == 0
+    )
     if open_positions_count_symbol > 0 and not scale_in_ok:
         return False, "scalper:scale_in_blocked"
 

@@ -11,8 +11,10 @@ from execution.services.marketdata import Candle
 @dataclass
 class MomentumIgnitionConfig:
     impulse_lookback: int = 5
-    min_impulse_pct: Decimal = Decimal("0.002")  # 0.2%
-    pullback_ratio: Decimal = Decimal("0.4")     # pullback must be <= 40% of impulse
+    # Gold ticks quickly; a 0.1% burst is still meaningful on M1 charts.
+    min_impulse_pct: Decimal = Decimal("0.001")  # 0.1%
+    # Allow shallower pullbacks plus a buffer so continuations trigger more often.
+    pullback_ratio: Decimal = Decimal("0.65")     # pullback must be <= 65% of impulse
     rr: Decimal = Decimal("2.2")
 
 

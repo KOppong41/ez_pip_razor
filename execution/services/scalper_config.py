@@ -131,6 +131,33 @@ class StrategyProfile:
 
 
 @dataclass(frozen=True)
+class RiskPreset:
+    key: str
+    name: str
+    tp_pips: Decimal
+    sl_pips: Decimal
+    kill_switch_pct: Decimal
+
+
+@dataclass(frozen=True)
+class PsychologyProfile:
+    key: str
+    autopause: bool
+    max_loss_streak: int
+    cooldown_min: int
+    soft_dd_pct: Decimal
+    hard_dd_pct: Decimal
+    soft_multiplier: Decimal
+    hard_multiplier: Decimal
+
+
+@dataclass(frozen=True)
+class FlipSettings:
+    min_score: Decimal
+    cooldown_minutes: int
+
+
+@dataclass(frozen=True)
 class ScalperConfig:
     profile_slug: str
     symbols: Dict[str, SymbolConfig] = field(default_factory=dict)
@@ -146,6 +173,11 @@ class ScalperConfig:
     default_score_profile: str = "default"
     strategy_profiles: Dict[str, StrategyProfile] = field(default_factory=dict)
     default_strategy_profile: str = "default"
+    risk_presets: Dict[str, RiskPreset] = field(default_factory=dict)
+    default_risk_preset: str = "default"
+    psychology_profiles: Dict[str, PsychologyProfile] = field(default_factory=dict)
+    default_psychology_profile: str = "default"
+    flip_settings: FlipSettings | None = None
     score_profiles: Dict[str, Decimal] = field(default_factory=dict)
     default_score_profile: str = "default"
 
@@ -255,6 +287,48 @@ def _build_strategy_profiles(raw_profiles: dict | None) -> Dict[str, StrategyPro
     return profiles
 
 
+def _build_risk_presets(raw_presets: dict | None) -> Dict[str, RiskPreset]:
+    presets: Dict[str, RiskPreset] = {}
+    for key, data in (raw_presets or {}).items():
+        data = data or {}
+        preset = RiskPreset(
+            key=key,
+            name=data.get("name", key.replace("_", " ").title()),
+            tp_pips=Decimal(str(data.get("tp_pips", 100))),
+            sl_pips=Decimal(str(data.get("sl_pips", 50))),
+            kill_switch_pct=Decimal(str(data.get("kill_switch_pct", 5.0))),
+        )
+        presets[key] = preset
+    return presets
+
+
+def _build_psychology_profiles(raw_profiles: dict | None) -> Dict[str, PsychologyProfile]:
+    profiles: Dict[str, PsychologyProfile] = {}
+    for key, data in (raw_profiles or {}).items():
+        data = data or {}
+        profile = PsychologyProfile(
+            key=key,
+            autopause=bool(data.get("autopause", True)),
+            max_loss_streak=int(data.get("max_loss_streak", 3)),
+            cooldown_min=int(data.get("cooldown_min", 60)),
+            soft_dd_pct=Decimal(str(data.get("soft_dd_pct", 3.0))),
+            hard_dd_pct=Decimal(str(data.get("hard_dd_pct", 5.0))),
+            soft_multiplier=Decimal(str(data.get("soft_multiplier", 0.5))),
+            hard_multiplier=Decimal(str(data.get("hard_multiplier", 0.25))),
+        )
+        profiles[key] = profile
+    return profiles
+
+
+def _build_flip_settings(raw: dict | None) -> FlipSettings | None:
+    if not raw:
+        return None
+    return FlipSettings(
+        min_score=Decimal(str(raw.get("min_score", 0.85))),
+        cooldown_minutes=int(raw.get("cooldown_minutes", 5)),
+    )
+
+
 def _build_score_profiles(raw_profiles: dict | None) -> Dict[str, Decimal]:
     profiles: Dict[str, Decimal] = {}
     for key, value in (raw_profiles or {}).items():
@@ -329,6 +403,19 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
     default_score_profile = base.get("default_score_profile") or (
         next(iter(score_profiles.keys()), "default")
     )
+    strategy_profiles = _build_strategy_profiles(base.get("strategy_profiles"))
+    default_strategy_profile = base.get("default_strategy_profile") or (
+        next(iter(strategy_profiles.keys()), "default")
+    )
+    risk_presets = _build_risk_presets(base.get("risk_presets"))
+    default_risk_preset = base.get("default_risk_preset") or (
+        next(iter(risk_presets.keys()), "default")
+    )
+    psychology_profiles = _build_psychology_profiles(base.get("psychology_profiles"))
+    default_psychology_profile = base.get("default_psychology_profile") or (
+        next(iter(psychology_profiles.keys()), "default")
+    )
+    flip_settings = _build_flip_settings(base.get("flip"))
 
     return ScalperConfig(
         profile_slug=slug,
@@ -343,4 +430,11 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
         time_in_trade_limit_min=int(base.get("time_in_trade_limit_min", 30)),
         score_profiles=score_profiles,
         default_score_profile=default_score_profile,
+        strategy_profiles=strategy_profiles,
+        default_strategy_profile=default_strategy_profile,
+        risk_presets=risk_presets,
+        default_risk_preset=default_risk_preset,
+        psychology_profiles=psychology_profiles,
+        default_psychology_profile=default_psychology_profile,
+        flip_settings=flip_settings,
     )

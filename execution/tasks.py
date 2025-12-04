@@ -33,6 +33,7 @@ from execution.services.monitor import (
 )
 from execution.services.prices import get_price
 from execution.services.psychology import bot_is_available_for_trading
+from execution.services.scalper_config import build_scalper_config
 from execution.services.runtime_config import get_runtime_config
 from execution.services.strategies.breakout_retest import (
     BreakoutRetestConfig,
@@ -752,7 +753,11 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             skipped_not_accepted += 1
             continue
         
-        trade_scalper_strategies_for_bot.delay(bot.id, timeframe=tf, n_bars=n_bars)
+        # Run inline to guarantee scalper cycles execute even if a nested Celery worker is unavailable.
+        trade_scalper_strategies_for_bot.apply(
+            args=(bot.id,),
+            kwargs={"timeframe": tf, "n_bars": n_bars},
+        )
         dispatched += 1
     
     logger.info(
@@ -795,12 +800,30 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     """
     from bots.models import Bot
     bot = Bot.objects.select_related("broker_account", "asset").get(id=bot_id)
+    scalper_cfg = build_scalper_config(bot)
+    scalper_params = bot.scalper_params or {}
+    strategy_profile_key = (
+        scalper_params.get("strategy_profile") or scalper_cfg.default_strategy_profile
+    )
+    strategy_profile = scalper_cfg.strategy_profiles.get(strategy_profile_key)
+
     broker_account = bot.broker_account
     symbol = bot.asset.symbol
-    enabled_strats = bot.enabled_strategies or []
-    
+    enabled_strats = list(bot.enabled_strategies or [])
+    if strategy_profile and strategy_profile.enabled_strategies:
+        enabled_strats = list(strategy_profile.enabled_strategies)
+    disabled_profile_strats = set(
+        strategy_profile.disabled_strategies if strategy_profile else []
+    )
     if not enabled_strats:
         return {"status": "ok", "reason": "no_enabled_strategies"}
+    enabled_strats = [
+        s
+        for s in enabled_strats
+        if s in SCALPER_STRATEGY_REGISTRY and s not in disabled_profile_strats
+    ]
+    if not enabled_strats:
+        return {"status": "ok", "reason": "no_active_strategies"}
     
     # Get M1 candles
     try:
@@ -1000,6 +1023,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             "symbol": symbol,
             "timeframe": timeframe,
             "strategies_enabled": enabled_strats,
+             "strategy_profile": strategy_profile_key,
             "signals": len(signals_created),
             "decisions": len(decisions_made),
             "orders": len(orders_placed),

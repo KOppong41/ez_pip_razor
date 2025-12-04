@@ -65,6 +65,65 @@ def calculate_position_size(qty_base: Decimal, atr: Decimal, symbol: str) -> Dec
     return adjusted
 
 
+def _get_minimum_stop_distance(symbol: str) -> Decimal:
+    """
+    Get the minimum distance between SL and TP for this symbol.
+    Prevents 'Invalid stops' errors from MT5 broker.
+    For high-precision instruments like GOLD (XAUUSDm), minimum is higher.
+    """
+    symbol_upper = symbol.upper()
+    
+    # Gold is high precision and needs larger minimum
+    if "XAU" in symbol_upper or "GOLD" in symbol_upper:
+        return Decimal("0.01")  # 10 pips minimum for GOLD
+    
+    # Forex pairs: standard 5 pip minimum
+    if any(pair in symbol_upper for pair in ["EUR", "GBP", "USD", "JPY", "CHF"]):
+        return Decimal("0.0005")  # 5 pips for most forex
+    
+    # Crypto and others: 0.0001 (1 pip)
+    return Decimal("0.0001")
+
+
+def _enforce_minimum_stop_distance(symbol: str, side: str, entry_px: Decimal | None, 
+                                    sl: Decimal | None, tp: Decimal | None) -> Tuple[Decimal | None, Decimal | None]:
+    """
+    Validate and adjust SL/TP to ensure they meet minimum distance requirements.
+    Returns (adjusted_sl, adjusted_tp).
+    
+    If SL and TP are too close, widens them by applying minimum distance rules.
+    """
+    if not (sl and tp) or not entry_px:
+        return sl, tp
+    
+    min_distance = _get_minimum_stop_distance(symbol)
+    actual_distance = abs(sl - tp)
+    
+    if actual_distance < min_distance:
+        logger.warning(
+            f"SL/TP too close for {symbol}: distance={actual_distance} < min={min_distance}. "
+            f"Adjusting: entry={entry_px}, sl={sl}, tp={tp}"
+        )
+        
+        # Rebuild SL/TP to enforce minimum distance
+        if side == "buy":
+            # For buy: SL should be below entry, TP should be above
+            adjusted_sl = entry_px - min_distance * Decimal("1.5")  # 1.5x minimum for buffer
+            adjusted_tp = entry_px + min_distance * Decimal("1.5")
+        else:
+            # For sell: SL should be above entry, TP should be below
+            adjusted_sl = entry_px + min_distance * Decimal("1.5")
+            adjusted_tp = entry_px - min_distance * Decimal("1.5")
+        
+        logger.info(
+            f"Enforced minimum distance for {symbol} {side}: "
+            f"adjusted_sl={adjusted_sl}, adjusted_tp={adjusted_tp}"
+        )
+        return adjusted_sl, adjusted_tp
+    
+    return sl, tp
+
+
 def create_close_order_for_position(position, broker_account: BrokerAccount) -> Tuple[Order, bool]:
     """
     Idempotently create a close order sized to flatten the given position.
@@ -219,6 +278,20 @@ def create_order_from_decision(
         dirty_fields.append("tp")
         logger.warning(f"Order {order.id} missing TP; applied fallback at {order.tp}")
 
+    # ⚠️ CRITICAL: Validate SL/TP distance to prevent "Invalid stops" broker rejections
+    if order.sl and order.tp and px:
+        adjusted_sl, adjusted_tp = _enforce_minimum_stop_distance(
+            symbol=symbol,
+            side=side,
+            entry_px=px,
+            sl=order.sl,
+            tp=order.tp
+        )
+        if adjusted_sl != order.sl or adjusted_tp != order.tp:
+            order.sl = adjusted_sl
+            order.tp = adjusted_tp
+            dirty_fields = list(set(dirty_fields + ["sl", "tp"]))  # add if not already present
+
     if dirty_fields:
         order.save(update_fields=dirty_fields)
     
@@ -289,18 +362,20 @@ def update_order_status(
         try:
             from execution.models import TradeLog
 
-            TradeLog.objects.create(
-                order=order,
-                bot=order.bot,
-                owner=order.owner,
-                broker_account=order.broker_account,
-                symbol=order.symbol,
-                side=order.side,
-                qty=order.qty,
-                price=order.price,
-                status=new_status,
-                pnl=None,
-            )
+            already_logged = TradeLog.objects.filter(order=order, status=new_status).exists()
+            if not already_logged:
+                TradeLog.objects.create(
+                    order=order,
+                    bot=order.bot,
+                    owner=order.owner,
+                    broker_account=order.broker_account,
+                    symbol=order.symbol,
+                    side=order.side,
+                    qty=order.qty,
+                    price=order.price,
+                    status=new_status,
+                    pnl=None,
+                )
         except Exception:
             pass
 

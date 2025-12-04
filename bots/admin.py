@@ -1,6 +1,7 @@
 from copy import copy
 
 from datetime import time, timedelta
+from decimal import Decimal
 
 from django import forms
 from django.conf import settings
@@ -17,6 +18,7 @@ from django.utils.safestring import mark_safe
 from .models import Asset, Bot, STRATEGY_CHOICES, STANDARD_TIMEFRAMES, DEFAULT_TRADING_DAYS, CATEGORY_CHOICES, STRATEGY_GUIDES
 from brokers.models import Broker
 from execution.services.psychology import get_size_multiplier
+from execution.models import default_scalper_profile_config
 from execution.models import Position, TradeLog
 from django.db.models import Sum
 from django.utils import timezone
@@ -197,6 +199,18 @@ class BotForm(forms.ModelForm):
         widget=forms.CheckboxSelectMultiple,
         help_text="Weekdays when the bot may open new trades.",
     )
+    scalper_risk_profile = forms.ChoiceField(
+        required=False,
+        choices=(),
+        label="Scalper risk mode",
+        help_text="Predefined TP/SL + kill-switch presets for the scalper engine.",
+    )
+    scalper_psychology_profile = forms.ChoiceField(
+        required=False,
+        choices=(),
+        label="Scalper psychology mode",
+        help_text="Loss-streak / drawdown behaviour profile for the scalper.",
+    )
 
     class Meta:
         model = Bot
@@ -227,6 +241,9 @@ class BotForm(forms.ModelForm):
         else:
             # When disabled, keep whatever is stored (often empty) without forcing defaults.
             self.fields["allowed_trading_days"].initial = days_initial
+
+        # Configure scalper profile selectors + hide raw TP/SL settings when needed.
+        self._init_scalper_profile_fields()
 
         schedule_fields = ("allowed_trading_days", "trading_window_start", "trading_window_end")
         if not enabled:
@@ -297,6 +314,61 @@ class BotForm(forms.ModelForm):
             raise forms.ValidationError({"asset": "Asset is required for bots."})
         return cleaned
 
+    # --- internal helpers -------------------------------------------------
+
+    def _is_scalper_mode(self):
+        if self.data:
+            mode = self.data.get("engine_mode")
+        elif self.instance and getattr(self.instance, "engine_mode", None):
+            mode = self.instance.engine_mode
+        else:
+            mode = None
+        return (mode or "").lower() == "scalper"
+
+    def _init_scalper_profile_fields(self):
+        cfg = default_scalper_profile_config()
+        risk_profiles = cfg.get("risk_presets", {})
+        psych_profiles = cfg.get("psychology_profiles", {})
+        risk_choices = [(k, v.get("name", k.replace("_", " ").title())) for k, v in risk_profiles.items()]
+        psych_choices = [(k, v.get("name", k.replace("_", " ").title())) for k, v in psych_profiles.items()]
+        if self._is_scalper_mode():
+            scalper_params = (self.instance.scalper_params or {}) if self.instance else {}
+            self.fields["scalper_risk_profile"].choices = risk_choices
+            self.fields["scalper_risk_profile"].required = True
+            self.fields["scalper_risk_profile"].initial = (
+                scalper_params.get("risk_profile") or cfg.get("default_risk_preset")
+            )
+            self.fields["scalper_psychology_profile"].choices = psych_choices
+            self.fields["scalper_psychology_profile"].required = True
+            self.fields["scalper_psychology_profile"].initial = (
+                scalper_params.get("psychology_profile") or cfg.get("default_psychology_profile")
+            )
+            # Hide raw pip / psychology override fields for scalper bots
+            for name in (
+                "default_tp_pips",
+                "default_sl_pips",
+                "kill_switch_max_unrealized_pct",
+                "loss_streak_autopause_enabled",
+                "max_loss_streak_before_pause",
+                "loss_streak_cooldown_min",
+                "soft_drawdown_limit_pct",
+                "soft_size_multiplier",
+                "hard_drawdown_limit_pct",
+                "hard_size_multiplier",
+            ):
+                self.fields.pop(name, None)
+        else:
+            self.fields["scalper_risk_profile"].choices = risk_choices
+            self.fields["scalper_risk_profile"].required = False
+            self.fields["scalper_risk_profile"].initial = (
+                cfg.get("default_risk_preset")
+            )
+            self.fields["scalper_psychology_profile"].choices = psych_choices
+            self.fields["scalper_psychology_profile"].required = False
+            self.fields["scalper_psychology_profile"].initial = (
+                cfg.get("default_psychology_profile")
+            )
+
 
 # --- Bot list actions ---
 
@@ -352,7 +424,7 @@ class BotAdmin(admin.ModelAdmin):
     inlines = []
     actions = [start_bots, pause_bots, stop_bots]
 
-    fieldsets = (
+    base_fieldsets = (
         ("Identity", {
             "fields": ("name", "owner", "status", "auto_trade", "engine_mode", "enabled_strategies"),
         }),
@@ -368,6 +440,10 @@ class BotAdmin(admin.ModelAdmin):
                 "trade_interval_minutes",
                 "allow_opposite_scalp",
             ),
+        }),
+        ("Scalper Profiles", {
+            "fields": ("scalper_risk_profile", "scalper_psychology_profile"),
+            "description": "Select predefined risk & psychology modes (used when engine mode = scalper).",
         }),
         ("Psychology & behavior", {
             "fields": (
@@ -412,6 +488,7 @@ class BotAdmin(admin.ModelAdmin):
             "classes": ("collapse",),
         }),
     )
+    fieldsets = base_fieldsets
 
     readonly_fields = ("created_at", "owner", "bot_id")
 
@@ -588,6 +665,29 @@ class BotAdmin(admin.ModelAdmin):
 
         return RequestAwareForm
 
+    def _should_show_scalper_fields(self, request, obj=None):
+        if obj and obj.engine_mode == "scalper":
+            return True
+        mode = None
+        if request.method == "POST":
+            mode = request.POST.get("engine_mode")
+        else:
+            mode = request.GET.get("engine_mode")
+        return (mode or "").lower() == "scalper"
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = list(super().get_fieldsets(request, obj))
+        show_scalper = self._should_show_scalper_fields(request, obj)
+        if show_scalper:
+            # Remove raw pip/psychology sections for scalper bots
+            fieldsets = [fs for fs in fieldsets if fs[0] not in ("Pip Targets", "Psychology & behavior", "Kill Switch")]
+        else:
+            # Hide scalper profile selector and pip targets for non-scalper bots if user not admin
+            fieldsets = [fs for fs in fieldsets if fs[0] != "Scalper Profiles"]
+            if not request.user.is_superuser:
+                fieldsets = [fs for fs in fieldsets if fs[0] != "Pip Targets"]
+        return fieldsets
+
     def has_add_permission(self, request):
         is_admin = request.user.is_superuser or request.user.groups.filter(name="Admin").exists()
         return is_admin
@@ -598,4 +698,34 @@ class BotAdmin(admin.ModelAdmin):
             raise PermissionDenied("Only Admins may create or modify bots.")
         if not obj.owner:
             obj.owner = request.user
+        if obj.engine_mode == "scalper":
+            self._apply_scalper_presets(obj, form.cleaned_data)
         super().save_model(request, obj, form, change)
+
+    def _apply_scalper_presets(self, bot, cleaned_data):
+        cfg = default_scalper_profile_config()
+        scalper_params = bot.scalper_params or {}
+        risk_key = cleaned_data.get("scalper_risk_profile") or scalper_params.get("risk_profile") or cfg.get("default_risk_preset")
+        psych_key = cleaned_data.get("scalper_psychology_profile") or scalper_params.get("psychology_profile") or cfg.get("default_psychology_profile")
+        risk_profile = (cfg.get("risk_presets") or {}).get(risk_key, {})
+        psych_profile = (cfg.get("psychology_profiles") or {}).get(psych_key, {})
+
+        bot.default_tp_pips = Decimal(str(risk_profile.get("tp_pips", bot.default_tp_pips or 120)))
+        bot.default_sl_pips = Decimal(str(risk_profile.get("sl_pips", bot.default_sl_pips or 70)))
+        bot.kill_switch_enabled = True
+        bot.kill_switch_max_unrealized_pct = Decimal(
+            str(risk_profile.get("kill_switch_pct", bot.kill_switch_max_unrealized_pct or 5.0))
+        )
+
+        bot.loss_streak_autopause_enabled = bool(psych_profile.get("autopause", True))
+        bot.max_loss_streak_before_pause = int(psych_profile.get("max_loss_streak", 3))
+        bot.loss_streak_cooldown_min = int(psych_profile.get("cooldown_min", 60))
+        bot.soft_drawdown_limit_pct = Decimal(str(psych_profile.get("soft_dd_pct", 3.0)))
+        bot.hard_drawdown_limit_pct = Decimal(str(psych_profile.get("hard_dd_pct", 5.0)))
+        bot.soft_size_multiplier = Decimal(str(psych_profile.get("soft_multiplier", 0.5)))
+        bot.hard_size_multiplier = Decimal(str(psych_profile.get("hard_multiplier", 0.25)))
+
+        scalper_params = bot.scalper_params or {}
+        scalper_params["risk_profile"] = risk_key
+        scalper_params["psychology_profile"] = psych_key
+        bot.scalper_params = scalper_params

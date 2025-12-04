@@ -208,12 +208,10 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     direction = (signal.direction or "").lower()
     countertrend = False
     if bias and bias in ("buy", "sell") and bias != direction:
-        if symbol_cfg.allow_countertrend:
-            countertrend = True
-        elif not config.countertrend.enabled:
-            return StrategyDecision(action="ignore", reason="scalper:htf_conflict")
-        else:
-            countertrend = True
+        allow_countertrend = symbol_cfg.allow_countertrend or config.countertrend.enabled
+        if not allow_countertrend:
+            return StrategyDecision(action="ignore", reason="scalper:trend_only")
+        countertrend = True
 
     entry = _resolve_entry_price(signal.symbol, payload)
     if entry is None:
