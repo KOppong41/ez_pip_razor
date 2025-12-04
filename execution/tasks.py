@@ -63,6 +63,27 @@ def _get_htf(timeframe: str) -> str | None:
 
 logger = logging.getLogger(__name__)
 
+def _compute_bias_from_htf(candles) -> str | None:
+    """
+    Simple 15m bias: EMA(20) slope and price relative to EMA.
+    Returns 'buy', 'sell', or None.
+    """
+    if not candles or len(candles) < 21:
+        return None
+    closes = [c["close"] for c in candles]
+    k = Decimal("2") / Decimal("21")
+    ema = closes[0]
+    for c in closes[1:]:
+        ema = c * k + ema * (Decimal("1") - k)
+    prev_close = closes[-2]
+    last_close = closes[-1]
+    slope = last_close - prev_close
+    if slope > 0 and last_close > ema:
+        return "buy"
+    if slope < 0 and last_close < ema:
+        return "sell"
+    return None
+
 
 @dataclass(frozen=True)
 class ScalperStrategyEntry:
@@ -825,14 +846,28 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     if not enabled_strats:
         return {"status": "ok", "reason": "no_active_strategies"}
     
-    # Get M1 candles
-    try:
-        entry_candles = get_candles_for_account(
-            broker_account=broker_account,
-            symbol=symbol,
-            timeframe=timeframe,
-            n_bars=n_bars,
-        )
+        # Get M1 candles
+        try:
+            # Skip if market is closed for this symbol
+            try:
+                from execution.connectors.mt5 import is_mt5_available, mt5
+                if is_mt5_available():
+                    info = mt5.symbol_info(symbol)
+                    if info is None or not info.visible:
+                        logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_or_symbol_not_visible", bot.id, symbol)
+                        return {"status": "ok", "reason": "market_closed"}
+                    if info.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED or info.session_deals == 0:
+                        logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed", bot.id, symbol)
+                        return {"status": "ok", "reason": "market_closed"}
+            except Exception:
+                pass
+
+            entry_candles = get_candles_for_account(
+                broker_account=broker_account,
+                symbol=symbol,
+                timeframe=timeframe,
+                n_bars=n_bars,
+            )
     except Exception as e:
         task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
         logger.exception(
@@ -856,6 +891,49 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     signals_created = []
     decisions_made = []
     orders_placed = []
+
+    # Optional HTF bias (15m) to filter countertrend M1 entries
+    htf_bias = None
+    try:
+        htf_candles = get_candles_for_account(
+            broker_account=broker_account,
+            symbol=symbol,
+            timeframe="15m",
+            n_bars=100,
+        )
+        htf_bias = _compute_bias_from_htf(htf_candles)
+    except Exception:
+        htf_bias = None
+
+    # Fallback: reuse last known bias if it is recent
+    if htf_bias is None:
+        try:
+            last = (bot.scalper_params or {}).get("last_htf_bias", {})
+            if last:
+                from datetime import datetime
+                ts = last.get("at")
+                val = last.get("value")
+                if ts and val:
+                    parsed = datetime.fromisoformat(ts)
+                    age_min = (timezone.now() - timezone.make_aware(parsed, timezone=timezone.utc) if timezone.is_naive(parsed) else timezone.now() - parsed).total_seconds() / 60
+                    if age_min <= 90:
+                        htf_bias = val
+        except Exception:
+            htf_bias = None
+
+    # If we cannot establish HTF bias, skip this cycle to avoid trading blind.
+    if htf_bias is None:
+        logger.debug("[ScalperTrade] bot=%s symbol=%s skipped: htf_bias_missing", bot.id, symbol)
+        return {"status": "ok", "reason": "htf_bias_missing"}
+
+    # Cache latest bias for reuse
+    try:
+        params = bot.scalper_params or {}
+        params["last_htf_bias"] = {"value": htf_bias, "at": timezone.now().isoformat()}
+        bot.scalper_params = params
+        bot.save(update_fields=["scalper_params"])
+    except Exception:
+        pass
     
     # Run each enabled strategy
     for strategy_name in enabled_strats:
@@ -930,6 +1008,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                         "reason": engine_decision.reason,
                         "score": float(engine_decision.score or 0.0),
                         "generated_at": timezone.now().isoformat(),
+                        **({"bias_m15": htf_bias} if htf_bias else {}),
                     },
                 }
             )

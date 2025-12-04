@@ -68,6 +68,7 @@ class CountertrendRule:
     enabled: bool = False
     risk_multiplier: Decimal = Decimal("0.5")
     max_positions: int = 1
+    min_score: Decimal = Decimal("1.5")
 
 
 @dataclass(frozen=True)
@@ -368,6 +369,7 @@ def _build_countertrend(raw: dict | None) -> CountertrendRule:
         enabled=bool(raw.get("enabled", False)),
         risk_multiplier=Decimal(str(raw.get("risk_multiplier", 0.5))),
         max_positions=int(raw.get("max_positions", 1)),
+        min_score=Decimal(str(raw.get("min_score", 1.5))),
     )
 
 

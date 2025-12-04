@@ -469,6 +469,7 @@ def default_scalper_profile_config() -> dict:
             "enabled": False,
             "risk_multiplier": 0.5,
             "max_positions": 1,
+            "min_score": 1.5,
             "notes": "Countertrend scalps only from HTF zones with half risk.",
         },
     }

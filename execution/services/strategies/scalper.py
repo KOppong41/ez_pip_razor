@@ -208,8 +208,15 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     direction = (signal.direction or "").lower()
     countertrend = False
     if bias and bias in ("buy", "sell") and bias != direction:
-        allow_countertrend = symbol_cfg.allow_countertrend or config.countertrend.enabled
-        if not allow_countertrend:
+        allow_countertrend = symbol_cfg.allow_countertrend or (config.countertrend and config.countertrend.enabled)
+        # Require a strong score for countertrend; otherwise block.
+        score_raw = payload.get("score")
+        try:
+            score_raw = Decimal(str(score_raw)) if score_raw is not None else None
+        except Exception:
+            score_raw = None
+        min_ctr_score = config.countertrend.min_score if config.countertrend else Decimal("999")
+        if not allow_countertrend or score_raw is None or score_raw < min_ctr_score:
             return StrategyDecision(action="ignore", reason="scalper:trend_only")
         countertrend = True
 
