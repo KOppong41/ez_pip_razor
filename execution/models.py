@@ -284,6 +284,149 @@ DEFAULT_TRADING_PROFILE_SLUGS = [
 ]
 
 
+def _merge_scalper_dict(base: dict, extra: dict) -> dict:
+    """
+    Recursive dict merge that preserves nested defaults when overriding profile config.
+    """
+    merged = base.copy()
+    for key, value in (extra or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_scalper_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def default_scalper_profile_config() -> dict:
+    """
+    Reference scalper configuration derived from the product brief.
+    Stored in JSON to make admin edits easier while surfacing sane defaults in code/tests.
+    """
+    return {
+        "risk": {
+            "default_risk_pct": 0.5,
+            "conservative_risk_pct": 0.25,
+            "hard_cap_pct": 1.0,
+            "soft_dd_pct": 3.0,
+            "hard_dd_pct": 5.0,
+            "soft_multiplier": 0.5,
+            "hard_multiplier": 0.0,
+            "max_concurrent_trades": 5,
+            "max_trades_per_symbol": 3,
+            "max_scale_ins_per_symbol": 2,
+            "max_symbol_risk_pct": 1.5,
+            "kill_switch_exit_minutes": 10,
+        },
+        "sessions": [],
+        "rollover_blackout": [],
+        "news_blackouts": [
+            {
+                "label": "nfp",
+                "lead_minutes": 30,
+                "trail_minutes": 30,
+                "enabled": True,
+                "keywords": ["NFP", "Non-Farm Payrolls", "FOMC", "CPI", "Rate Decision"],
+            }
+        ],
+        "reentry": {
+            "min_minutes_after_loss": 5,
+            "min_minutes_between_wins": 1,
+            "max_trades_per_move": 3,
+            "require_pullback_points": 20,
+        },
+        "time_in_trade_limit_min": 30,
+        "default_strategy_profile": "xauusd_standard",
+        "strategy_profiles": {
+            "xauusd_standard": {
+                "name": "XAUUSD Scalper",
+                "symbol": "XAUUSD",
+                "execution_timeframes": ["M1"],
+                "description": "Trend pullback and breakout retest with pin-bar confirmations.",
+                "enabled_strategies": ["trend_pullback", "breakout_retest"],
+                "internal_triggers": ["price_action_pinbar"],
+                "disabled_strategies": ["range_reversion", "momentum_ignition"],
+            },
+            "xauusd_aggressive": {
+                "name": "XAUUSD Scalper – Aggressive",
+                "symbol": "XAUUSD",
+                "execution_timeframes": ["M1"],
+                "description": "Adds momentum ignition for higher trade frequency.",
+                "enabled_strategies": ["trend_pullback", "breakout_retest", "momentum_ignition"],
+                "internal_triggers": ["price_action_pinbar"],
+                "disabled_strategies": ["range_reversion"],
+            },
+        },
+        "score_profiles": {
+            "aggressive": {
+                "threshold": 0.5,
+                "label": "Aggressive (more trades)",
+            },
+            "default": {
+                "threshold": 0.6,
+                "label": "Balanced",
+            },
+            "conservative": {
+                "threshold": 0.7,
+                "label": "Conservative (selective)",
+            },
+        },
+        "default_score_profile": "default",
+        "symbols": {
+            "XAUUSD": {
+                "aliases": ["XAUUSDm", "GOLDm"],
+                "execution_timeframes": ["M1"],
+                "context_timeframes": ["M15", "H1"],
+                "sl_points": {"min": 50, "max": 150},
+                "tp_r_multiple": 1.2,
+                "be_trigger_r": 1.0,
+                "be_buffer_r": 0.2,
+                "trail_trigger_r": 1.5,
+                "trail_mode": "swing",
+                "max_spread_points": 35,
+                "max_slippage_points": 10,
+                "allow_countertrend": False,
+                "risk_pct": 0.5,
+            },
+            "EURUSD": {
+                "aliases": ["EURUSDm"],
+                "execution_timeframes": ["M1", "M5"],
+                "context_timeframes": ["M15", "H1"],
+                "sl_points": {"min": 5, "max": 8},
+                "tp_r_multiple": 1.2,
+                "be_trigger_r": 1.0,
+                "be_buffer_r": 0.2,
+                "trail_trigger_r": 1.5,
+                "trail_mode": "ema",
+                "max_spread_points": 15,
+                "max_slippage_points": 5,
+                "allow_countertrend": False,
+                "risk_pct": 0.5,
+            },
+            "GBPUSD": {
+                "aliases": ["GBPUSDm"],
+                "execution_timeframes": ["M1", "M5"],
+                "context_timeframes": ["M15", "H1"],
+                "sl_points": {"min": 6, "max": 10},
+                "tp_r_multiple": 1.2,
+                "be_trigger_r": 1.0,
+                "be_buffer_r": 0.2,
+                "trail_trigger_r": 1.5,
+                "trail_mode": "ema",
+                "max_spread_points": 18,
+                "max_slippage_points": 6,
+                "allow_countertrend": False,
+                "risk_pct": 0.5,
+            },
+        },
+        "countertrend": {
+            "enabled": False,
+            "risk_multiplier": 0.5,
+            "max_positions": 1,
+            "notes": "Countertrend scalps only from HTF zones with half risk.",
+        },
+    }
+
+
 def default_trading_profile_data():
     return [
         {
@@ -419,6 +562,41 @@ class TradingProfile(models.Model):
             return db_choices
         defaults = default_trading_profile_data()
         return [(entry["slug"], entry["name"]) for entry in defaults]
+
+
+class ScalperProfile(models.Model):
+    """
+    Configuration bundle for the high-frequency scalper.
+    Stored separately from TradingProfile so bots can mix/match classic + scalper behavior.
+    """
+
+    slug = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default="")
+    config = models.JSONField(default=dict, blank=True)
+    is_default = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["slug"]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.slug})"
+
+    def get_config(self) -> dict:
+        base = default_scalper_profile_config()
+        return _merge_scalper_dict(base, self.config or {})
+
+    @classmethod
+    def get_or_create_default(cls, slug: str = "core_scalper"):
+        defaults = {
+            "name": "Core Scalper",
+            "description": "XAUUSD-led scalper tuned for 07:00–16:00 UTC with strict risk envelope.",
+            "config": default_scalper_profile_config(),
+            "is_default": True,
+        }
+        obj, _ = cls.objects.get_or_create(slug=slug, defaults=defaults)
+        return obj
 
 
 class ExecutionSetting(models.Model):

@@ -1,10 +1,14 @@
-from decimal import Decimal
 from dataclasses import dataclass
-from execution.models import Position, Decision
-from execution.services.orchestrator import (
-    create_close_order_for_position,
-)
+from datetime import timedelta
+from decimal import Decimal
+from typing import Optional
+
+from django.utils import timezone
+
+from bots.models import Bot
+from execution.models import Decision, Position
 from execution.services.brokers import dispatch_place_order
+from execution.services.orchestrator import create_close_order_for_position
 from execution.services.prices import get_price
 
 @dataclass
@@ -116,6 +120,134 @@ def apply_trailing(pos: Position, mkt: Decimal, cfg: TrailingConfig, atr: Decima
                 pos.sl = new_sl
                 moved = True
     return moved
+
+def _find_scalper_bot(pos: Position) -> Optional[Bot]:
+    return (
+        Bot.objects.filter(broker_account=pos.broker_account, engine_mode="scalper")
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def _latest_scalper_meta(bot: Bot, symbol: str) -> Optional[dict]:
+    if not bot:
+        return None
+    decision = (
+        Decision.objects.filter(bot=bot, signal__symbol=symbol, action="open")
+        .exclude(params__scalper__isnull=True)
+        .order_by("-decided_at")
+        .first()
+    )
+    if not decision:
+        return None
+    params = decision.params or {}
+    scalper = params.get("scalper")
+    if not scalper:
+        return None
+    try:
+        entry = Decimal(str(params.get("entry")))
+        sl = Decimal(str(params.get("sl")))
+    except Exception:
+        return None
+    meta = {
+        "entry": entry,
+        "sl": sl,
+        "tp": Decimal(str(params.get("tp"))) if params.get("tp") else None,
+        "direction": params.get("direction") or decision.signal.direction,
+        "risk_pct": Decimal(str(params.get("risk_pct", "0"))),
+        "scalper": scalper,
+        "decided_at": decision.decided_at,
+    }
+    return meta
+
+
+def _maybe_move_to_be(pos: Position, meta: dict, reward: Decimal, risk: Decimal) -> bool:
+    scalper = meta.get("scalper") or {}
+    trigger = Decimal(str(scalper.get("be_trigger_r", "1.0")))
+    buffer_r = Decimal(str(scalper.get("be_buffer_r", "0.2")))
+    if trigger <= 0 or reward < risk * trigger:
+        return False
+    buffer = risk * buffer_r
+    direction = (meta.get("direction") or ("buy" if pos.qty > 0 else "sell")).lower()
+    moved = False
+    if direction == "buy":
+        new_sl = meta["entry"] + buffer
+        if pos.sl is None or new_sl > pos.sl:
+            pos.sl = new_sl
+            moved = True
+    else:
+        new_sl = meta["entry"] - buffer
+        if pos.sl is None or new_sl < pos.sl:
+            pos.sl = new_sl
+            moved = True
+    return moved
+
+
+def _maybe_trail_scalper(pos: Position, meta: dict, mkt: Decimal, reward: Decimal, risk: Decimal) -> bool:
+    scalper = meta.get("scalper") or {}
+    trigger = Decimal(str(scalper.get("trail_trigger_r", "1.5")))
+    if trigger <= 0 or reward < risk * trigger:
+        return False
+    mode = (scalper.get("trail_mode") or "swing").lower()
+    step = Decimal("0.50") if mode == "swing" else Decimal("0.35")
+    distance = risk * step
+    direction = (meta.get("direction") or ("buy" if pos.qty > 0 else "sell")).lower()
+    moved = False
+    if direction == "buy":
+        new_sl = mkt - distance
+        if pos.sl is None or new_sl > pos.sl:
+            pos.sl = new_sl
+            moved = True
+    else:
+        new_sl = mkt + distance
+        if pos.sl is None or new_sl < pos.sl:
+            pos.sl = new_sl
+            moved = True
+    return moved
+
+
+def _should_flatten_stale(meta: dict, reward: Decimal, risk: Decimal) -> bool:
+    scalper = meta.get("scalper") or {}
+    limit_min = int(scalper.get("time_in_trade_limit_min") or 0)
+    if limit_min <= 0:
+        return False
+    age = timezone.now() - meta["decided_at"]
+    if age < timedelta(minutes=limit_min):
+        return False
+    # Only flatten if reward is near breakeven (+/-0.3R)
+    if risk <= 0:
+        return True
+    reward_r = reward / risk
+    return abs(reward_r) <= Decimal("0.3")
+
+
+def manage_scalper_position(pos: Position, mkt: Decimal) -> bool:
+    if mkt is None:
+        return False
+    bot = _find_scalper_bot(pos)
+    if not bot:
+        return False
+    meta = _latest_scalper_meta(bot, pos.symbol)
+    if not meta:
+        return False
+    entry = meta["entry"]
+    sl = meta["sl"]
+    direction = (meta.get("direction") or ("buy" if pos.qty > 0 else "sell")).lower()
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return False
+    reward = (mkt - entry) if direction == "buy" else (entry - mkt)
+    moved = False
+    if reward > 0:
+        moved |= _maybe_move_to_be(pos, meta, reward, risk)
+        moved |= _maybe_trail_scalper(pos, meta, mkt, reward, risk)
+    if _should_flatten_stale(meta, reward, risk):
+        close_position_now(pos)
+        return True
+    if moved:
+        pos.save(update_fields=["sl"])
+    return moved
+
 
 def create_close_order(pos: Position) -> Decision:
     """

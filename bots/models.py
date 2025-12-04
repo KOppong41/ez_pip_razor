@@ -33,7 +33,7 @@ TRADING_PROFILE_CHOICES = [
 ENGINE_MODES = [
     ("external", "External signals (TradingView/Telegram)"),
     ("harami", "Internal engine (candlestick/SMC)"),
-    
+    ("scalper", "Internal scalper (M1-M5 high frequency)"),
 ]
 
 # Strategy registry (update as you add engines/strategies)
@@ -355,6 +355,23 @@ class Bot(models.Model):
             "How this bot receives trade ideas: "
             "'external' = signals from TradingView/Telegram/webhooks, "
             "'harami' = internal candlestick/SMC engine."
+        ),
+    )
+
+    scalper_profile = models.ForeignKey(
+        "execution.ScalperProfile",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="bots",
+        help_text="Optional scalper configuration profile. Required when engine_mode='scalper'.",
+    )
+    scalper_params = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Per-bot overrides for the scalper profile (symbols, sessions, risk). "
+            "Keys mirror ScalperProfile.config – leave empty to inherit profile defaults."
         ),
     )
 

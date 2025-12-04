@@ -11,7 +11,7 @@ Django==5.2.5
 django-cors-headers==4.7.0
 djangorestframework==3.16.1
 djangorestframework_simplejwt==5.5.1
-environ==1.0
+django-environ==0.12.0
 kombu==5.5.4
 packaging==25.0
 cryptography==43.0.3
@@ -26,3 +26,4 @@ sqlparse==0.5.3
 tzdata==2025.2
 vine==5.1.0
 wcwidth==0.2.13
+requests==2.32.3

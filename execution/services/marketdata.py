@@ -5,11 +5,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Literal, TypedDict
 
-import MetaTrader5 as mt5
 import logging
 
 from brokers.models import BrokerAccount
-from execution.connectors.mt5 import MT5Connector, ConnectorError
+from execution.connectors.mt5 import MT5Connector, ConnectorError, is_mt5_available, mt5
 from core.metrics import mt5_errors_total
 
 
@@ -25,16 +24,16 @@ class Candle(TypedDict):
     tick_volume: int
 
 
-TIMEFRAME_MAP = {
-    "1m": mt5.TIMEFRAME_M1,
-    "5m": mt5.TIMEFRAME_M5,
-    "15m": mt5.TIMEFRAME_M15,
-    "30m": mt5.TIMEFRAME_M30,
-    "1h": mt5.TIMEFRAME_H1,
-    "4h": mt5.TIMEFRAME_H4,
-    "1d": mt5.TIMEFRAME_D1,
-    "1w": mt5.TIMEFRAME_W1,
-    "1mo": mt5.TIMEFRAME_MN1,
+TIMEFRAME_ATTRS = {
+    "1m": "TIMEFRAME_M1",
+    "5m": "TIMEFRAME_M5",
+    "15m": "TIMEFRAME_M15",
+    "30m": "TIMEFRAME_M30",
+    "1h": "TIMEFRAME_H1",
+    "4h": "TIMEFRAME_H4",
+    "1d": "TIMEFRAME_D1",
+    "1w": "TIMEFRAME_W1",
+    "1mo": "TIMEFRAME_MN1",
 }
 
 
@@ -97,9 +96,14 @@ def get_candles_for_account(
         {"time": datetime, "open": Decimal, "high": Decimal,
          "low": Decimal, "close": Decimal, "tick_volume": int}
     """
-    tf_const = TIMEFRAME_MAP.get(timeframe)
-    if tf_const is None:
+    attr = TIMEFRAME_ATTRS.get(timeframe)
+    if attr is None:
         raise ValueError(f"Unsupported timeframe '{timeframe}'")
+
+    if not is_mt5_available():
+        return []
+
+    tf_const = getattr(mt5, attr)
 
     try:
         _login_mt5_for_account(broker_account)

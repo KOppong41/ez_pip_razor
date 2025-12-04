@@ -1,14 +1,18 @@
-from django.db import transaction
+from datetime import timedelta
 from decimal import Decimal
+
+from django.db import transaction
 
 from execution.models import Signal, Decision, Position, Order
 from .strategy import naive_strategy, StrategyDecision
-from .risk import RiskConfig, check_risk
+from .risk import RiskConfig, check_risk, ScalperRiskContext
 from core.metrics import decisions_total
 from django.utils import timezone
 from bots.models import Bot  # for per-bot configs on the Bot model
 from execution.services.prices import get_price
 from execution.services.runtime_config import RuntimeConfig, get_runtime_config
+from execution.services.scalper_config import ScalperConfig, build_scalper_config
+from execution.services.strategies.scalper import plan_scalper_trade
 
 
 def count_open_positions(symbol: str) -> int:
@@ -181,6 +185,25 @@ def get_min_score_for_bot(bot: Bot, symbol: str) -> float | None:
         return None
 
 
+def _resolve_scalper_profile_min_score(bot: Bot | None, scalper_cfg: ScalperConfig | None) -> float | None:
+    if not bot or not scalper_cfg:
+        return None
+    params = getattr(bot, "scalper_params", {}) or {}
+    profile_key = None
+    if isinstance(params, dict):
+        profile_key = params.get("score_profile") or params.get("score_profile_key")
+    if not profile_key:
+        profile_key = scalper_cfg.default_score_profile
+    if not profile_key:
+        return None
+    threshold = scalper_cfg.score_profiles.get(profile_key)
+    if threshold is None:
+        threshold = scalper_cfg.score_profiles.get(str(profile_key).lower())
+    if threshold is None:
+        return None
+    return float(threshold)
+
+
 def _build_scalp_params(signal: Signal, runtime_cfg: RuntimeConfig | None = None) -> dict:
     """
     Prepare tight SL/TP + size multiplier for an opposite-direction scalp.
@@ -218,12 +241,98 @@ def _build_scalp_params(signal: Signal, runtime_cfg: RuntimeConfig | None = None
     return params
 
 
+def _parse_decimal(payload: dict | None, *keys: str) -> Decimal | None:
+    payload = payload or {}
+    for key in keys:
+        if payload.get(key) is None:
+            continue
+        try:
+            return Decimal(str(payload[key]))
+        except Exception:
+            continue
+    return None
+
+
+def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperConfig) -> ScalperRiskContext:
+    payload = signal.payload or {}
+    now = timezone.now()
+
+    trades_symbol = get_today_filled_trades(bot, symbol=signal.symbol)
+    trades_total = get_today_filled_trades(bot, symbol=None)
+
+    reentry_window = max(scalper_cfg.time_in_trade_limit_min, 5)
+    window_since = now - timedelta(minutes=reentry_window)
+    reentry_qs = Decision.objects.filter(
+        bot=bot,
+        signal__symbol=signal.symbol,
+        action="open",
+        decided_at__gte=window_since,
+    )
+    reentry_count = reentry_qs.count()
+
+    last_same = reentry_qs.filter(signal__direction=signal.direction).order_by("-decided_at").first()
+    minutes_since_last_same = None
+    if last_same:
+        minutes_since_last_same = max(
+            0,
+            int((now - last_same.decided_at).total_seconds() // 60),
+        )
+
+    last_loss = (
+        Decision.objects.filter(
+            bot=bot,
+            signal__symbol=signal.symbol,
+            action="close",
+            reason__icontains="loss",
+            decided_at__gte=now - timedelta(hours=8),
+        )
+        .order_by("-decided_at")
+        .first()
+    )
+    minutes_since_last_loss = None
+    if last_loss:
+        minutes_since_last_loss = max(0, int((now - last_loss.decided_at).total_seconds() // 60))
+
+    spread_points = _parse_decimal(payload, "spread_points", "spread")
+    slippage_points = _parse_decimal(payload, "slippage_points", "slippage")
+    floating_risk_pct = _parse_decimal(payload, "floating_symbol_risk_pct", "symbol_risk_pct")
+
+    floating_pnl_points = _parse_decimal(payload, "floating_pnl_points")
+    scale_in_allowed = bool(payload.get("scale_in_allowed", False))
+    if not scale_in_allowed and floating_pnl_points is not None and floating_pnl_points > 0:
+        scale_in_allowed = True
+    countertrend = bool(payload.get("countertrend") or payload.get("is_countertrend"))
+
+    return ScalperRiskContext(
+        config=scalper_cfg,
+        symbol=signal.symbol,
+        direction=signal.direction,
+        trades_today_symbol=trades_symbol,
+        trades_today_total=trades_total,
+        reentry_count=reentry_count,
+        minutes_since_last_same_direction=minutes_since_last_same,
+        minutes_since_last_loss=minutes_since_last_loss,
+        spread_points=spread_points,
+        slippage_points=slippage_points,
+        floating_symbol_risk_pct=floating_risk_pct,
+        scale_in_allowed=scale_in_allowed,
+        countertrend=countertrend,
+        payload_snapshot=payload,
+    )
+
+
 @transaction.atomic
 def make_decision_from_signal(signal: Signal) -> Decision:
     runtime_cfg = get_runtime_config()
 
+    bot = signal.bot
+    is_scalper_bot = bool(bot and getattr(bot, "engine_mode", "") == "scalper")
+    scalper_cfg = build_scalper_config(bot) if is_scalper_bot else None
+
     # 1) Strategy propose
-    if signal.source == "engine_v1":
+    if scalper_cfg:
+        proposed = plan_scalper_trade(signal, bot, scalper_cfg)
+    elif signal.source == "engine_v1":
         payload = signal.payload or {}
         params = {
             "symbol": signal.symbol,
@@ -249,17 +358,25 @@ def make_decision_from_signal(signal: Signal) -> Decision:
         # external / naive strategy
         proposed = naive_strategy(signal)
 
-    bot = signal.bot
-
     # 2) Risk check (positions / allowed_symbols)
+    scalper_ctx = None
     if proposed.action == "open":
         if bot:
-            sym = bot.asset.symbol if bot.asset else None
-            cfg = RiskConfig(
-                max_positions_per_symbol=(bot.risk_max_positions_per_symbol or 1),
-                max_concurrent_positions=(bot.risk_max_concurrent_positions or 5),
-                allowed_symbols=(sym,) if sym else (),
-            )
+            if scalper_cfg and scalper_cfg.risk:
+                allowed = tuple(scalper_cfg.alias_map.keys())
+                cfg = RiskConfig(
+                    max_positions_per_symbol=scalper_cfg.risk.max_trades_per_symbol,
+                    max_concurrent_positions=scalper_cfg.risk.max_concurrent_trades,
+                    allowed_symbols=allowed,
+                )
+                scalper_ctx = _build_scalper_risk_context(bot, signal, scalper_cfg)
+            else:
+                sym = bot.asset.symbol if bot.asset else None
+                cfg = RiskConfig(
+                    max_positions_per_symbol=(bot.risk_max_positions_per_symbol or 1),
+                    max_concurrent_positions=(bot.risk_max_concurrent_positions or 5),
+                    allowed_symbols=(sym,) if sym else (),
+                )
         else:
             cfg = RiskConfig()
 
@@ -269,7 +386,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             else count_open_positions(symbol=signal.symbol)
         )
         open_total = count_total_open_positions_for_bot(bot) if bot else count_total_open_positions()
-        ok, risk_reason = check_risk(signal, open_symbol, open_total, cfg)
+        ok, risk_reason = check_risk(signal, open_symbol, open_total, cfg, scalper_ctx=scalper_ctx)
 
         if not ok:
             proposed = StrategyDecision(
@@ -282,6 +399,8 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     # 2b) Per-bot minimum score filter (default 0.5 globally)
     if proposed.action == "open":
         min_score = get_min_score_for_bot(bot, symbol=signal.symbol) if bot else None
+        if min_score is None and is_scalper_bot:
+            min_score = _resolve_scalper_profile_min_score(bot, scalper_cfg)
         # Use per-bot config if available, otherwise default from runtime settings (admin-tunable, default 0.5)
         if min_score is None:
             min_score = float(runtime_cfg.decision_min_score)

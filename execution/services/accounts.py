@@ -1,9 +1,13 @@
 
 from decimal import Decimal
 from django.conf import settings
-from execution.connectors.mt5 import MT5Connector, ConnectorError
+from execution.connectors.mt5 import (
+    MT5Connector,
+    ConnectorError,
+    is_mt5_available,
+    mt5,
+)
 from execution.models import Execution
-import MetaTrader5 as mt5
 from execution.services.runtime_config import get_runtime_config
 
 def get_account_balances(broker_account, *, force_live: bool = False) -> dict:
@@ -31,6 +35,9 @@ def get_account_balances(broker_account, *, force_live: bool = False) -> dict:
 
     mt5_codes = {"mt5", "exness_mt5", "icmarket_mt5"}
     if getattr(broker_account, "broker", None) not in mt5_codes:
+        return empty
+
+    if not is_mt5_available():
         return empty
 
     # FIRST check if account is active - this prevents any login attempts for inactive accounts

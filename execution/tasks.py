@@ -1,14 +1,25 @@
 import logging
 import os
-from celery import shared_task
-from decimal import Decimal
-from django.utils import timezone
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal
+from typing import Callable
+
+from celery import shared_task
+from django.utils import timezone
+
 from brokers.models import BrokerAccount
+from core.metrics import task_failures_total
+from core.utils import audit_log
 from execution.connectors.base import ConnectorError
-from execution.connectors.mt5 import MT5Connector
-from execution.services.orchestrator import update_order_status
-from execution.services.portfolio import record_fill
+from execution.connectors.mt5 import MT5Connector, is_mt5_available, mt5
+from execution.models import Decision, Order, PnLDaily, Position, Signal
+from execution.services.brokers import dispatch_place_order
+from execution.services.decision import make_decision_from_signal
+from execution.services.engine import run_engine_on_candles
+from execution.services.fanout import fanout_orders
+from execution.services.marketdata import get_candles_for_account
 from execution.services.monitor import (
     EarlyExitConfig,
     KillSwitchConfig,
@@ -18,20 +29,24 @@ from execution.services.monitor import (
     close_position_now,
     should_trigger_kill_switch,
     unrealized_pnl,
+    manage_scalper_position,
 )
 from execution.services.prices import get_price
-from core.metrics import task_failures_total
-from core.utils import audit_log
-from execution.services.marketdata import get_candles_for_account
-from execution.services.strategies.harami import detect_harami
-from execution.services.brokers import dispatch_place_order
-from execution.services.decision import make_decision_from_signal
-from execution.services.fanout import fanout_orders
-from execution.services.runtime_config import get_runtime_config
-from execution.models import Order, Position, PnLDaily, Signal, Decision  
-from execution.services.engine import run_engine_on_candles
-from collections import defaultdict
 from execution.services.psychology import bot_is_available_for_trading
+from execution.services.runtime_config import get_runtime_config
+from execution.services.strategies.breakout_retest import (
+    BreakoutRetestConfig,
+    run_breakout_retest,
+)
+from execution.services.strategies.doji_breakout import DojiBreakoutConfig, run_doji_breakout
+from execution.services.strategies.harami import detect_harami
+from execution.services.strategies.momentum_ignition import (
+    MomentumIgnitionConfig,
+    run_momentum_ignition,
+)
+from execution.services.strategies.price_action_pinbar import PinBarConfig, run_price_action_pinbar
+from execution.services.strategies.range_reversion import RangeReversionConfig, run_range_reversion
+from execution.services.strategies.trend_pullback import TrendPullbackConfig, run_trend_pullback
 
 
 HTF_MAP = {
@@ -46,6 +61,43 @@ def _get_htf(timeframe: str) -> str | None:
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ScalperStrategyEntry:
+    runner: Callable
+    config_factory: Callable[[], object]
+    requires_symbol: bool = False
+
+
+SCALPER_STRATEGY_REGISTRY: dict[str, ScalperStrategyEntry] = {
+    "price_action_pinbar": ScalperStrategyEntry(
+        runner=run_price_action_pinbar,
+        config_factory=PinBarConfig,
+        requires_symbol=True,
+    ),
+    "trend_pullback": ScalperStrategyEntry(
+        runner=run_trend_pullback,
+        config_factory=TrendPullbackConfig,
+    ),
+    "doji_breakout": ScalperStrategyEntry(
+        runner=run_doji_breakout,
+        config_factory=DojiBreakoutConfig,
+        requires_symbol=True,
+    ),
+    "range_reversion": ScalperStrategyEntry(
+        runner=run_range_reversion,
+        config_factory=RangeReversionConfig,
+    ),
+    "breakout_retest": ScalperStrategyEntry(
+        runner=run_breakout_retest,
+        config_factory=BreakoutRetestConfig,
+    ),
+    "momentum_ignition": ScalperStrategyEntry(
+        runner=run_momentum_ignition,
+        config_factory=MomentumIgnitionConfig,
+    ),
+}
 
 
 def _atr_like(candles, period: int = 14):
@@ -130,6 +182,9 @@ def trail_positions_task(self):
         moved_ids = []
         for pos in Position.objects.filter(status="open"):
             mkt = get_price(pos.symbol)
+            if manage_scalper_position(pos, mkt):
+                moved_ids.append(pos.id)
+                continue
             if apply_trailing(pos, mkt, tcfg):
                 pos.save(update_fields=["sl"])
                 moved_ids.append(pos.id)
@@ -645,6 +700,342 @@ def validate_broker_configs_task():
     retry_jitter=True,
     retry_kwargs={"max_retries": 3},
 )
+def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 100):
+    """
+    High-frequency scalper signal generator.
+    
+    - Picks bots with engine_mode="scalper", auto_trade=True, status="active"
+    - For each bot, scans M1 candles and runs bot.enabled_strategies (price_action_pinbar, trend_pullback, etc.)
+    - Emits Signal objects for each strategy match
+    - Routes through existing decision + execution pipeline
+    
+    This is the real "scalper brain" that powers high-frequency trading on XAUUSDm and other liquid assets.
+    """
+    from bots.models import Bot
+    
+    bots_qs = (
+        Bot.objects.select_related("broker_account", "asset")
+        .filter(
+            auto_trade=True,
+            status="active",
+            engine_mode="scalper",
+        )
+    )
+    
+    dispatched = 0
+    skipped_no_broker = 0
+    skipped_no_symbols = 0
+    skipped_no_strategies = 0
+    skipped_not_accepted = 0
+    
+    for bot in bots_qs:
+        broker_account = getattr(bot, "broker_account", None)
+        if not broker_account or not getattr(broker_account, "is_active", False):
+            skipped_no_broker += 1
+            continue
+        
+        symbol = getattr(bot.asset, "symbol", None)
+        if not symbol:
+            skipped_no_symbols += 1
+            continue
+        
+        # Must have at least one enabled strategy
+        enabled_strats = bot.enabled_strategies or []
+        if not enabled_strats:
+            skipped_no_strategies += 1
+            continue
+        
+        # Use M1 by default for scalper; allow override but keep it tight
+        tf = "1m"
+        
+        if not bot.accepts(symbol, tf):
+            skipped_not_accepted += 1
+            continue
+        
+        trade_scalper_strategies_for_bot.delay(bot.id, timeframe=tf, n_bars=n_bars)
+        dispatched += 1
+    
+    logger.info(
+        "[ScalperRunner] tf=%s dispatched=%s skipped_no_broker=%s skipped_no_symbols=%s skipped_no_strategies=%s skipped_not_accepted=%s",
+        timeframe,
+        dispatched,
+        skipped_no_broker,
+        skipped_no_symbols,
+        skipped_no_strategies,
+        skipped_not_accepted,
+    )
+    
+    return {
+        "status": "ok",
+        "timeframe": timeframe,
+        "dispatched": dispatched,
+        "skipped_no_broker": skipped_no_broker,
+        "skipped_no_symbols": skipped_no_symbols,
+        "skipped_no_strategies": skipped_no_strategies,
+        "skipped_not_accepted": skipped_not_accepted,
+    }
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(ConnectorError,),
+    retry_backoff=True,
+    retry_backoff_max=300,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 5},
+)
+def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n_bars: int = 100):
+    """
+    Runs all enabled scalper strategies for a single bot.
+    
+    - Fetches M1 candles
+    - Runs price_action_pinbar, trend_pullback, etc. (whatever is enabled for the bot)
+    - Creates Signal + Decision + Order for each match
+    - Emits to broker if decision passes risk checks
+    """
+    from bots.models import Bot
+    bot = Bot.objects.select_related("broker_account", "asset").get(id=bot_id)
+    broker_account = bot.broker_account
+    symbol = bot.asset.symbol
+    enabled_strats = bot.enabled_strategies or []
+    
+    if not enabled_strats:
+        return {"status": "ok", "reason": "no_enabled_strategies"}
+    
+    # Get M1 candles
+    try:
+        entry_candles = get_candles_for_account(
+            broker_account=broker_account,
+            symbol=symbol,
+            timeframe=timeframe,
+            n_bars=n_bars,
+        )
+    except Exception as e:
+        task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
+        logger.exception(
+            "[ScalperTrade] bot=%s symbol=%s tf=%s failed to fetch candles: %s",
+            bot.id,
+            symbol,
+            timeframe,
+            e,
+        )
+        raise
+    
+    if not entry_candles or len(entry_candles) < 20:
+        logger.debug(
+            "[ScalperTrade] bot=%s symbol=%s insufficient candles: %s",
+            bot.id,
+            symbol,
+            len(entry_candles) if entry_candles else 0,
+        )
+        return {"status": "ok", "reason": "insufficient_candles"}
+    
+    signals_created = []
+    decisions_made = []
+    orders_placed = []
+    
+    # Run each enabled strategy
+    for strategy_name in enabled_strats:
+        strategy_entry = SCALPER_STRATEGY_REGISTRY.get(strategy_name)
+        if not strategy_entry:
+            logger.debug(
+                "[ScalperTrade] bot=%s strategy %s not implemented yet, skipping",
+                bot.id,
+                strategy_name,
+            )
+            continue
+
+        engine_decision = None
+        try:
+            cfg = strategy_entry.config_factory()
+            if strategy_entry.requires_symbol:
+                engine_decision = strategy_entry.runner(symbol, entry_candles, cfg)
+            else:
+                engine_decision = strategy_entry.runner(entry_candles, cfg)
+        except Exception as e:
+            logger.exception(
+                "[ScalperTrade] bot=%s strategy=%s candle processing failed: %s",
+                bot.id,
+                strategy_name,
+                e,
+            )
+            continue
+        
+        # Safety check - should never happen, but guard against it
+        if engine_decision is None:
+            logger.warning(
+                "[ScalperTrade] bot=%s strategy=%s returned None decision, skipping",
+                bot.id,
+                strategy_name,
+            )
+            continue
+        
+        # Skip if strategy doesn't emit "open"
+        if engine_decision.action != "open" or not engine_decision.direction:
+            logger.debug(
+                "[ScalperTrade] bot=%s strategy=%s action=%s reason=%s",
+                bot.id,
+                strategy_name,
+                engine_decision.action,
+                engine_decision.reason,
+            )
+            continue
+        
+        # Create deterministic dedupe key per strategy/bar/bot to avoid duplicate signals
+        last_bar_time = entry_candles[-1]["time"]
+        if hasattr(last_bar_time, "isoformat"):
+            time_str = last_bar_time.isoformat()
+        else:
+            time_str = str(last_bar_time)
+        
+        dedupe_key = f"scalper:{bot.id}:{symbol}:{timeframe}:{strategy_name}:{time_str}"
+        
+        # Create or reuse signal
+        try:
+            signal, signal_created = Signal.objects.get_or_create(
+                dedupe_key=dedupe_key,
+                defaults={
+                    "bot": bot,
+                    "source": "scalper_engine",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "direction": engine_decision.direction,
+                    "payload": {
+                        "strategy": strategy_name,
+                        "sl": str(engine_decision.sl) if engine_decision.sl is not None else None,
+                        "tp": str(engine_decision.tp) if engine_decision.tp is not None else None,
+                        "reason": engine_decision.reason,
+                        "score": float(engine_decision.score or 0.0),
+                        "generated_at": timezone.now().isoformat(),
+                    },
+                }
+            )
+            signals_created.append((signal.id, signal_created))
+        except Exception as e:
+            logger.exception(
+                "[ScalperTrade] bot=%s strategy=%s failed to create signal: %s",
+                bot.id,
+                strategy_name,
+                e,
+            )
+            continue
+        
+        # Make decision from signal
+        try:
+            existing_decision = Decision.objects.filter(signal=signal, action="open").first()
+            if existing_decision:
+                decision = existing_decision
+                logger.debug(
+                    "[ScalperTrade] bot=%s signal=%s reusing existing decision=%s",
+                    bot.id,
+                    signal.id,
+                    decision.id,
+                )
+            else:
+                decision = make_decision_from_signal(signal)
+            decisions_made.append((decision.id, decision.action))
+        except Exception as e:
+            task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
+            logger.exception(
+                "[ScalperTrade] bot=%s signal=%s decision failed: %s",
+                bot.id,
+                signal.id,
+                e,
+            )
+            raise
+        
+        if decision.action != "open":
+            logger.debug(
+                "[ScalperTrade] decision ignored: bot=%s signal=%s action=%s reason=%s",
+                bot.id,
+                signal.id,
+                decision.action,
+                decision.reason,
+            )
+            continue
+        
+        # Fanout to orders and dispatch
+        try:
+            for order, created in fanout_orders(decision, master_qty=None):
+                should_dispatch = created or order.status in ("new", "ack")
+                if should_dispatch:
+                    try:
+                        dispatch_place_order(order)
+                        orders_placed.append((order.id, order.symbol, order.side))
+                    except Exception as e:
+                        audit_log(
+                            "order.dispatch_error",
+                            "Order",
+                            order.id,
+                            {
+                                "bot_id": bot.id,
+                                "symbol": order.symbol,
+                                "side": order.side,
+                                "strategy": strategy_name,
+                                "error": str(e),
+                            },
+                        )
+                        logger.exception(
+                            "[ScalperTrade] bot=%s strategy=%s failed to dispatch order %s: %s",
+                            bot.id,
+                            strategy_name,
+                            order.id,
+                            e,
+                        )
+        except Exception as e:
+            logger.exception(
+                "[ScalperTrade] bot=%s strategy=%s fanout failed: %s",
+                bot.id,
+                strategy_name,
+                e,
+            )
+            continue
+    
+    # Log summary
+    audit_log(
+        "scalper_engine_run",
+        "Bot",
+        bot.id,
+        {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "strategies_enabled": enabled_strats,
+            "signals": len(signals_created),
+            "decisions": len(decisions_made),
+            "orders": len(orders_placed),
+        },
+    )
+    
+    logger.info(
+        "[ScalperTrade] bot=%s symbol=%s strategies=%s signals=%s decisions=%s orders=%s",
+        bot.id,
+        symbol,
+        len(enabled_strats),
+        len(signals_created),
+        len(decisions_made),
+        len(orders_placed),
+    )
+    
+    return {
+        "status": "ok",
+        "bot_id": bot.id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "strategies_enabled": enabled_strats,
+        "signals": len(signals_created),
+        "decisions": len(decisions_made),
+        "orders": len(orders_placed),
+    }
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=300,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
+)
 def run_harami_engine_for_all_bots(self, timeframe: str = "5m", n_bars: int = 200):
     """
     Periodic runner for the internal engine.
@@ -898,9 +1289,11 @@ def reconcile_broker_positions_task(self):
 
     accounts = BrokerAccount.objects.filter(is_active=True, broker__in=["mt5", "exness_mt5", "icmarket_mt5"])
     for acct in accounts:
+        if not is_mt5_available():
+            logger.warning("[Recon] MetaTrader5 library unavailable; skipping acct=%s", acct.id)
+            continue
         try:
             connector.login_for_account(acct)
-            import MetaTrader5 as mt5  # type: ignore
             mt5_positions = mt5.positions_get()
         except Exception as e:
             errors.append((acct.id, str(e)))

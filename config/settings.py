@@ -164,6 +164,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "core.tasks.worker_heartbeat_task",
         "schedule": 30.0,
     },
+    "scalper-engine-45s": {
+        "task": "execution.tasks.run_scalper_engine_for_all_bots",
+        "schedule": 45.0,
+        "args": ("1m", 100),
+    },
     "harami-engine-5m": {
         "task": "execution.tasks.run_harami_engine_for_all_bots",
         "schedule": 300.0,

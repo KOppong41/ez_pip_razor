@@ -2,7 +2,6 @@
 from __future__ import annotations
 from decimal import Decimal
 import threading
-import MetaTrader5 as mt5
 import logging
 import time
 from execution.services.portfolio import record_fill
@@ -14,6 +13,36 @@ from django.conf import settings
 
 from core.metrics import mt5_errors_total
 from execution.services.runtime_config import get_runtime_config
+
+try:
+    import MetaTrader5 as _mt5_module  # type: ignore
+except Exception:
+    _mt5_module = None
+
+
+def is_mt5_available() -> bool:
+    return _mt5_module is not None
+
+
+class _MT5Proxy:
+    """
+    Lightweight proxy so the rest of the code can reference `mt5` even when the
+    MetaTrader5 package is not installed (e.g., in Docker/Linux environments).
+    """
+
+    def __getattr__(self, item):
+        if _mt5_module is None:
+            raise ConnectorError(
+                "MetaTrader5 Python package is not installed. "
+                "Install it on the host MT5 terminal machine to enable live trading."
+            )
+        return getattr(_mt5_module, item)
+
+    def __bool__(self):
+        return is_mt5_available()
+
+
+mt5 = _MT5Proxy()
 
 logger = logging.getLogger(__name__)
 
