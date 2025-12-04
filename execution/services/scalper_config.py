@@ -107,6 +107,7 @@ class RiskEnvelope:
     max_scale_ins_per_symbol: int
     max_symbol_risk_pct: Decimal
     kill_switch_exit_minutes: int
+    max_trades_per_day: int = 0
 
     def effective_risk_pct(self, drawdown_pct: Decimal | float, conservative: bool = False) -> Decimal:
         base = self.conservative_risk_pct if conservative else self.default_risk_pct
@@ -357,6 +358,7 @@ def _build_risk_envelope(raw: dict | None) -> RiskEnvelope:
         max_scale_ins_per_symbol=int(raw.get("max_scale_ins_per_symbol", 2)),
         max_symbol_risk_pct=Decimal(str(raw.get("max_symbol_risk_pct", 1.5))),
         kill_switch_exit_minutes=int(raw.get("kill_switch_exit_minutes", 10)),
+        max_trades_per_day=int(raw.get("max_trades_per_day", 0)),
     )
 
 

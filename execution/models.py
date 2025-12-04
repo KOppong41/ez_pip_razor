@@ -316,6 +316,8 @@ def default_scalper_profile_config() -> dict:
             "max_scale_ins_per_symbol": 2,
             "max_symbol_risk_pct": 1.5,
             "kill_switch_exit_minutes": 10,
+            # Optional daily trade cap for scalper (0 = disabled)
+            "max_trades_per_day": 0,
         },
         "sessions": [],
         "rollover_blackout": [],

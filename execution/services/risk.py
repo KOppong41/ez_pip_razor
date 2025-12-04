@@ -106,7 +106,9 @@ def _check_scalper_limits(
     if ctx.trades_today_symbol >= risk.max_trades_per_symbol:
         return False, "scalper:daily_symbol_cap"
 
-    if ctx.trades_today_total >= risk.max_concurrent_trades * 3:  # soft guardrail
+    # Optional daily total cap; disabled when set to 0
+    daily_cap = getattr(risk, "max_trades_per_day", 0) or 0
+    if daily_cap > 0 and ctx.trades_today_total >= daily_cap:
         return False, "scalper:daily_total_cap"
 
     reentry_rules = config.reentry
