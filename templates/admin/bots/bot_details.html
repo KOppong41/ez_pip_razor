@@ -409,7 +409,16 @@
             <div class="bot-info-grid">
                 <div class="info-item">
                     <span class="info-label">{% trans 'Decision Min Score' %}</span>
-                    <span class="info-value">{{ original.decision_min_score }}</span>
+                    {% if original.decision_min_score|floatformat:"4" == "0.0000" %}
+                        <span class="info-value">
+                            {% trans "Profile default" %} ({{ original.scalper_params.score_profile|default:"default" }})
+                        </span>
+                        <span class="info-hint">
+                            {% trans "Bot inherits the profile/global threshold. Set a value > 0 to override." %}
+                        </span>
+                    {% else %}
+                        <span class="info-value">{{ original.decision_min_score }}</span>
+                    {% endif %}
                 </div>
                 <div class="info-item">
                     <span class="info-label">{% trans 'Max Positions Per Symbol' %}</span>
@@ -485,6 +494,51 @@
                         <div class="activity-time">{% trans 'Current status' %}</div>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{% trans 'Recent Scalper Runs' %}</h3>
+            </div>
+            <div class="activity-timeline">
+                {% if scalper_run_logs %}
+                    {% for run in scalper_run_logs %}
+                        {% with summary=run.summary strategies=run.summary.strategies %}
+                        <div class="activity-item">
+                            <div class="activity-icon" style="background: rgba(16, 185, 129, 0.15); color: var(--success);">
+                                <i class="fas fa-robot"></i>
+                            </div>
+                            <div class="activity-content">
+                                <div class="activity-title">
+                                    {{ run.created_at|date:"H:i:s" }} · {{ run.session|default:"?" }} · {{ run.timeframe }}
+                                </div>
+                                <div class="activity-time">
+                                    {% if strategies %}
+                                        {% for item in strategies|slice:":2" %}
+                                            <strong>{{ item.strategy }}</strong>: {{ item.reason|default:item.action }}
+                                            {% if not forloop.last %} · {% endif %}
+                                        {% endfor %}
+                                        {% if strategies|length > 2 %}…{% endif %}
+                                    {% else %}
+                                        {% trans "No strategy feedback captured" %}
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        {% endwith %}
+                    {% endfor %}
+                {% else %}
+                    <div class="activity-item">
+                        <div class="activity-icon">
+                            <i class="fas fa-info-circle"></i>
+                        </div>
+                        <div class="activity-content">
+                            <div class="activity-title">{% trans 'No recent runs logged yet' %}</div>
+                            <div class="activity-time">{% trans 'Scalper runs will appear here when the bot scans.' %}</div>
+                        </div>
+                    </div>
+                {% endif %}
             </div>
         </div>
         

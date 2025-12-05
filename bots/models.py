@@ -389,7 +389,10 @@ class Bot(models.Model):
         max_digits=6,
         decimal_places=4,
         default=Decimal("0.5"),
-        help_text="Minimum decision score required for this bot (overrides global default).",
+        help_text=(
+            "Minimum decision score required for this bot. "
+            "Set to 0 to inherit the scalper profile/global default."
+        ),
     )
 
     risk_max_positions_per_symbol = models.PositiveIntegerField(

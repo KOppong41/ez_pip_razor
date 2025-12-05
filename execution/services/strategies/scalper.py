@@ -142,12 +142,21 @@ def _score_components(
     components: Dict[str, float] = {}
     total = Decimal("0")
 
+    bias_detail = payload.get("htf_bias_detail") or {}
+    bias_strength = Decimal("0")
+    if bias_detail and bias_detail.get("ema_slope_pct") is not None:
+        try:
+            bias_strength = Decimal(str(bias_detail.get("ema_slope_pct")))
+        except Exception:
+            bias_strength = Decimal("0")
+
     if bias and bias == direction:
-        w = DEFAULT_TREND_WEIGHT
+        boost = Decimal("1.0") + min(Decimal("0.5"), abs(bias_strength) * Decimal("2000"))
+        w = DEFAULT_TREND_WEIGHT * boost
     elif countertrend:
-        w = DEFAULT_TREND_WEIGHT / Decimal("2")
+        w = DEFAULT_TREND_WEIGHT * Decimal("0.5")
     else:
-        w = DEFAULT_TREND_WEIGHT * Decimal("0.75")
+        w = DEFAULT_TREND_WEIGHT * Decimal("0.8")
     total += w
     components["trend"] = float(w)
 
@@ -157,21 +166,40 @@ def _score_components(
             structure_weight *= Decimal("0.5")
     else:
         structure_weight *= Decimal("0.4")
+    strategy_metrics = payload.get("strategy_metrics") or {}
+    confidence = strategy_metrics.get("confidence")
+    if confidence is not None:
+        try:
+            conf_dec = Decimal(str(confidence))
+            structure_weight *= Decimal("0.5") + min(Decimal("1.5"), conf_dec + Decimal("0.2"))
+        except Exception:
+            pass
     total += structure_weight
     components["structure"] = float(structure_weight)
 
     spread_points = _parse_decimal(payload, "spread_points", "spread")
     market_weight = DEFAULT_MARKET_WEIGHT
     if spread_points is not None and spread_points > symbol_cfg.max_spread_points:
-        market_weight *= Decimal("0.25")
+        market_weight *= Decimal("0.4")
     elif spread_points is None:
-        market_weight *= Decimal("0.75")
+        market_weight *= Decimal("0.85")
+    atr_points = _parse_decimal(payload, "atr_points")
+    if atr_points is not None and atr_points < symbol_cfg.sl_points_min:
+        market_weight *= Decimal("0.6")
     total += market_weight
     components["market"] = float(market_weight)
 
-    session_weight = (
-        DEFAULT_SESSION_WEIGHT if config.sessions else DEFAULT_SESSION_WEIGHT * Decimal("0.5")
-    )
+    session_weight = DEFAULT_SESSION_WEIGHT
+    session_label = (payload.get("session") or "").lower()
+    if config.sessions:
+        if session_label in {"london", "new_york"}:
+            session_weight *= Decimal("1.2")
+        elif session_label in {"asia"}:
+            session_weight *= Decimal("0.6")
+        else:
+            session_weight *= Decimal("0.8")
+    else:
+        session_weight *= Decimal("0.5")
     total += session_weight
     components["session"] = float(session_weight)
 
@@ -208,17 +236,7 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     direction = (signal.direction or "").lower()
     countertrend = False
     if bias and bias in ("buy", "sell") and bias != direction:
-        allow_countertrend = symbol_cfg.allow_countertrend or (config.countertrend and config.countertrend.enabled)
-        # Require a strong score for countertrend; otherwise block.
-        score_raw = payload.get("score")
-        try:
-            score_raw = Decimal(str(score_raw)) if score_raw is not None else None
-        except Exception:
-            score_raw = None
-        min_ctr_score = config.countertrend.min_score if config.countertrend else Decimal("999")
-        if not allow_countertrend or score_raw is None or score_raw < min_ctr_score:
-            return StrategyDecision(action="ignore", reason="scalper:trend_only")
-        countertrend = True
+        return StrategyDecision(action="ignore", reason="scalper:trend_only")
 
     entry = _resolve_entry_price(signal.symbol, payload)
     if entry is None:

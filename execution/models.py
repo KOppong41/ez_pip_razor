@@ -1,9 +1,12 @@
 from datetime import time
 from decimal import Decimal
 from django.db import models
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 from django.conf import settings
 from bots.models import Bot
 from brokers.models import BrokerAccount
+from execution.services.journal import log_journal_event
 
 
 
@@ -31,9 +34,24 @@ class Signal(models.Model):
         indexes = [models.Index(fields=["dedupe_key"])]
 
     def save(self, *args, **kwargs):
+        is_new = self.pk is None
         if not self.owner and self.bot and self.bot.owner_id:
             self.owner = self.bot.owner
         super().save(*args, **kwargs)
+        if is_new:
+            log_journal_event(
+                "signal.received",
+                signal=self,
+                bot=self.bot,
+                owner=self.owner,
+                symbol=self.symbol,
+                message=f"{self.symbol} {self.direction} {self.timeframe}",
+                context={
+                    "source": self.source,
+                    "timeframe": self.timeframe,
+                    "dedupe_key": self.dedupe_key,
+                },
+            )
 
     def __str__(self) -> str:
         bot_name = self.bot.name if self.bot else "No bot"
@@ -56,12 +74,27 @@ class Decision(models.Model):
     decided_at = models.DateTimeField(auto_now_add=True)
 
     def save(self, *args, **kwargs):
+        is_new = self.pk is None
         if not self.owner:
             if self.bot and self.bot.owner_id:
                 self.owner = self.bot.owner
             elif self.signal and self.signal.owner_id:
                 self.owner_id = self.signal.owner_id
         super().save(*args, **kwargs)
+        if is_new:
+            log_journal_event(
+                "decision.created",
+                decision=self,
+                bot=self.bot,
+                signal=self.signal,
+                owner=self.owner,
+                symbol=self.signal.symbol if self.signal else "",
+                message=f"{self.action} {self.signal.symbol if self.signal else ''}",
+                context={
+                    "reason": self.reason,
+                    "score": self.score,
+                },
+            )
 
     def __str__(self) -> str:
         sym = self.signal.symbol if self.signal else "-"
@@ -243,9 +276,11 @@ class TradeLog(models.Model):
     side = models.CharField(max_length=4, choices=[("buy","buy"),("sell","sell")])
     qty = models.DecimalField(max_digits=20, decimal_places=8)
     price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    exit_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     status = models.CharField(max_length=32, default="new")
     pnl = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -272,6 +307,115 @@ class TradeLog(models.Model):
 
     def __str__(self):
         return f"TradeLog order={self.order_id} {self.symbol} {self.side} {self.qty} {self.status}"
+
+
+class ScalperRunLog(models.Model):
+    bot = models.ForeignKey("bots.Bot", on_delete=models.CASCADE, related_name="scalper_run_logs")
+    timeframe = models.CharField(max_length=8, default="1m")
+    session = models.CharField(max_length=32, blank=True, default="")
+    summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["bot", "created_at"]),
+            models.Index(fields=["session", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"ScalperRunLog bot={self.bot_id} tf={self.timeframe} at={self.created_at}"
+
+
+class JournalEntry(models.Model):
+    """
+    Unified operational log similar to the MT5 journal.
+    Captures significant lifecycle events with lightweight context so the UI
+    can show a single chronological feed regardless of source component.
+    """
+
+    SEVERITY_CHOICES = [
+        ("info", "Info"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+    ]
+
+    event_type = models.CharField(max_length=64)
+    severity = models.CharField(max_length=16, choices=SEVERITY_CHOICES, default="info")
+    message = models.TextField(blank=True, default="")
+    context = models.JSONField(default=dict, blank=True)
+    symbol = models.CharField(max_length=32, blank=True, default="")
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="execution_journal_entries",
+    )
+    bot = models.ForeignKey(
+        Bot,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="journal_entries",
+    )
+    broker_account = models.ForeignKey(
+        BrokerAccount,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="journal_entries",
+    )
+    order = models.ForeignKey(
+        Order,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="journal_entries",
+    )
+    position = models.ForeignKey(
+        "execution.Position",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="journal_entries",
+    )
+    signal = models.ForeignKey(
+        Signal,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="journal_entries",
+    )
+    decision = models.ForeignKey(
+        Decision,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="journal_entries",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["event_type", "created_at"]),
+            models.Index(fields=["bot", "created_at"]),
+            models.Index(fields=["broker_account", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"[{self.created_at}] {self.event_type} ({self.severity})"
+
+
+@receiver(post_save, sender=JournalEntry)
+def purge_disallowed_journal_entries(sender, instance, created, **kwargs):
+    if instance.event_type.startswith(("celery.", "audit.")):
+        # Remove disallowed entries immediately to avoid noisy logs.
+        instance.delete()
 
 
 DEFAULT_TRADING_PROFILE_SLUGS = [
@@ -312,14 +456,17 @@ def default_scalper_profile_config() -> dict:
             "soft_multiplier": 0.5,
             "hard_multiplier": 0.0,
             "max_concurrent_trades": 5,
-            "max_trades_per_symbol": 3,
-            "max_scale_ins_per_symbol": 2,
+            "max_trades_per_symbol": 5,
+            "max_scale_ins_per_symbol": 1,
             "max_symbol_risk_pct": 1.5,
             "kill_switch_exit_minutes": 10,
             # Optional daily trade cap for scalper (0 = disabled)
             "max_trades_per_day": 0,
         },
-        "sessions": [],
+        "sessions": [
+            {"start": "05:00", "end": "12:00", "label": "asia_eu"},
+            {"start": "12:00", "end": "21:00", "label": "us"},
+        ],
         "rollover_blackout": [],
         "news_blackouts": [
             {
@@ -463,6 +610,23 @@ def default_scalper_profile_config() -> dict:
                 "max_slippage_points": 6,
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
+            },
+            "BTCUSD": {
+                "aliases": ["BTCUSDm"],
+                "execution_timeframes": ["M1"],
+                "context_timeframes": ["M5", "M15", "H1"],
+                "sl_points": {"min": 200, "max": 600},
+                "tp_r_multiple": 1.3,
+                "be_trigger_r": 1.0,
+                "be_buffer_r": 0.25,
+                "trail_trigger_r": 1.8,
+                "trail_mode": "structure",
+                # BTC spreads/slippage expand sharply around volatility events,
+                # so cap them higher than FX while still rejecting wild fills.
+                "max_spread_points": 120,
+                "max_slippage_points": 60,
+                "allow_countertrend": False,
+                "risk_pct": 0.35,
             },
         },
         "countertrend": {

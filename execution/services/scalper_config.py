@@ -390,6 +390,20 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
     if bot and bot.scalper_params:
         base = _deep_merge(base, bot.scalper_params)
 
+    if bot:
+        risk_section = base.setdefault("risk", {})
+        if getattr(bot, "risk_max_positions_per_symbol", None):
+            risk_section["max_trades_per_symbol"] = int(bot.risk_max_positions_per_symbol)
+        if getattr(bot, "risk_max_concurrent_positions", None):
+            risk_section["max_concurrent_trades"] = int(bot.risk_max_concurrent_positions)
+        if getattr(bot, "max_trades_per_day", None) is not None:
+            risk_section["max_trades_per_day"] = int(bot.max_trades_per_day or 0)
+        if base.setdefault("sessions", []):
+            base["sessions"] = [
+                {"start": "05:00", "end": "12:00", "label": "asia_eu"},
+                {"start": "12:00", "end": "21:00", "label": "us"},
+            ]
+
     symbols, alias_map = _build_symbol_configs(base.get("symbols", {}))
     sessions = _build_sessions(base.get("sessions"))
     rollover = _build_sessions(base.get("rollover_blackout"))

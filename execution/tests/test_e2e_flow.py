@@ -5,18 +5,22 @@ from decimal import Decimal
 from bots.models import Bot
 from brokers.models import BrokerAccount
 from copytrade.models import Follower
-from execution.models import Signal, Decision, Order, Position
+from execution.models import Signal, Decision, Order, Position, JournalEntry
 from execution.tasks import monitor_positions_task, trail_positions_task
 from execution.services.prices import FIXED
+
 
 @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
 class EndToEndFlowTest(TestCase):
     def setUp(self):
         # 1) Active bot with routing + default size
         self.bot = Bot.objects.create(
-            name="MasterBot", status="active",
-            default_timeframe="5m", default_qty="0.10",
-            allowed_symbols=["EURUSD"], allowed_timeframes=["5m"]
+            name="MasterBot",
+            status="active",
+            default_timeframe="5m",
+            default_qty="0.10",
+            allowed_symbols=["EURUSD"],
+            allowed_timeframes=["5m"],
         )
 
         # 2) Two follower accounts (Paper connector)
@@ -24,10 +28,18 @@ class EndToEndFlowTest(TestCase):
         self.ba2 = BrokerAccount.objects.create(name="Follower-2", broker="paper", account_ref="f2")
 
         # 3) Attach followers (proportional x1, fixed 0.03)
-        Follower.objects.create(master_bot=self.bot, broker_account=self.ba1,
-                                model="proportional", params={"multiplier": 1})
-        Follower.objects.create(master_bot=self.bot, broker_account=self.ba2,
-                                model="fixed", params={"fixed_qty": "0.03"})
+        Follower.objects.create(
+            master_bot=self.bot,
+            broker_account=self.ba1,
+            model="proportional",
+            params={"multiplier": 1},
+        )
+        Follower.objects.create(
+            master_bot=self.bot,
+            broker_account=self.ba2,
+            model="fixed",
+            params={"fixed_qty": "0.03"},
+        )
 
     def test_full_pipeline(self):
         # === Ingest alert (TradingView-style) ===
@@ -37,13 +49,13 @@ class EndToEndFlowTest(TestCase):
             "symbol": "EURUSD",
             "timeframe": "5m",
             "direction": "buy",
-            "payload": {"note": "breakout"}
+            "payload": {"note": "breakout"},
         }
         r = self.client.post(url_alert, data=payload, content_type="application/json")
         self.assertEqual(r.status_code, 201)
         sig = Signal.objects.get()  # only one
         self.assertEqual(sig.symbol, "EURUSD")
-        self.assertEqual(sig.bot_id, self.bot.id)   # routed to active bot
+        self.assertEqual(sig.bot_id, self.bot.id)  # routed to active bot
 
         # === Strategy + Risk → Decision ===
         r = self.client.post(f"/api/signals/{sig.id}/decide/")
@@ -84,9 +96,10 @@ class EndToEndFlowTest(TestCase):
         FIXED["EURUSD"] = Decimal("1.0700")  # push price down hard
         monitor_positions_task()
         # Early-exit creates & sends close orders; Paper fills them
-        pos1.refresh_from_db(); pos2.refresh_from_db()
-        self.assertIn(pos1.status, ["open","closed"])  # may be closed if qty netted to 0
-        self.assertIn(pos2.status, ["open","closed"])
+        pos1.refresh_from_db()
+        pos2.refresh_from_db()
+        self.assertIn(pos1.status, ["open", "closed"])  # may be closed if qty netted to 0
+        self.assertIn(pos2.status, ["open", "closed"])
 
         # === Metrics exposed ===
         m = self.client.get("/api/metrics")
@@ -97,8 +110,7 @@ class EndToEndFlowTest(TestCase):
         self.assertIn("orders_created_total", content)
         self.assertIn("order_status_total", content)
 
-        # === Audit rows present ===
-        from core.models import Audit
-        self.assertTrue(Audit.objects.filter(action="signal.ingest").exists())
-        self.assertTrue(Audit.objects.filter(action="order.create").exists())
-        self.assertTrue(Audit.objects.filter(action="order.send").exists())
+        # === Journal entries present ===
+        self.assertTrue(JournalEntry.objects.filter(event_type="signal.received").exists())
+        self.assertTrue(JournalEntry.objects.filter(event_type="decision.created").exists())
+        self.assertTrue(JournalEntry.objects.filter(event_type="order.status_changed").exists())

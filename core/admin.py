@@ -2,15 +2,8 @@
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin, GroupAdmin as BaseGroupAdmin
 from django.contrib.auth.models import User, Group
 from django.core.exceptions import PermissionDenied
-from .models import CeleryActivity, Audit
-from datetime import timedelta
-from decimal import Decimal
 
-from django.contrib import admin, messages
-from django.shortcuts import redirect
-from django.urls import path
-from django.utils import timezone
-
+from django.contrib import admin
 
 
 def _is_admin(user):
@@ -86,78 +79,3 @@ class GroupAdmin(BaseGroupAdmin):
             total_groups=qs.count(),
         )
         return super().changelist_view(request, extra_context=extra_context)
-
-
-@admin.register(CeleryActivity)
-class CeleryActivityAdmin(admin.ModelAdmin):
-    change_list_template = "admin/core/celery_activities.html"
-    change_form_template = "admin/core/celery_activities_change_form.html"
-
-    list_display = ("ts", "level", "task_name", "component", "message_short")
-    list_filter = ("level", "component")
-    search_fields = ("task_name", "task_id", "message")
-
-    
-    def message_short(self, obj):
-        return (obj.message[:80] + "…") if obj.message and len(obj.message) > 80 else obj.message
-    message_short.short_description = "Message"
-
-    def get_urls(self):
-        urls = super().get_urls()
-        custom_urls = [
-            path(
-                "prune-30-days/",
-                self.admin_site.admin_view(self.prune_30_days),
-                name="core_celeryactivity_prune_30_days",
-            ),
-            path(
-                "prune-7-days/",
-                self.admin_site.admin_view(self.prune_7_days),
-                name="core_celeryactivity_prune_7_days",
-            ),
-        ]
-        
-        return custom_urls + urls
-
-
-    def prune_30_days(self, request):
-        if not self.has_delete_permission(request):
-            messages.error(request, "You do not have permission to prune activities.")
-            return redirect("admin:core_celeryactivity_changelist")
-
-        cutoff = timezone.now() - timedelta(days=30)
-        deleted, _ = CeleryActivity.objects.filter(ts__lt=cutoff).delete()
-        messages.success(request, f"Pruned {deleted} activities older than 30 days.")
-        return redirect("admin:core_celeryactivity_changelist")
-
-    def prune_7_days(self, request):
-        if not self.has_delete_permission(request):
-            messages.error(request, "You do not have permission to prune activities.")
-            return redirect("admin:core_celeryactivity_changelist")
-
-        cutoff = timezone.now() - timedelta(days=7)
-        deleted, _ = CeleryActivity.objects.filter(ts__lt=cutoff).delete()
-        messages.success(request, f"Pruned {deleted} activities older than 7 days.")
-        return redirect("admin:core_celeryactivity_changelist")
-
-    
-    def changelist_view(self, request, extra_context=None):
-        qs = self.get_queryset(request)
-        extra_context = extra_context or {}
-        extra_context.update(
-            {
-                "total_activities": qs.count(),
-                "info_count": qs.filter(level="INFO").count(),
-                "warning_count": qs.filter(level="WARNING").count(),
-                "error_count": qs.filter(level="ERROR").count(),
-            }
-        )
-        return super().changelist_view(request, extra_context=extra_context)
-
-@admin.register(Audit)
-class AuditAdmin(admin.ModelAdmin):
-    list_display = ("ts", "action", "entity", "entity_id")
-    list_filter = ("action", "entity")
-    search_fields = ("action", "entity", "entity_id")
-    ordering = ("-ts",)
-    readonly_fields = ("ts",)

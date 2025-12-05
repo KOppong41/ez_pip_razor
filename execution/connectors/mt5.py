@@ -7,7 +7,7 @@ import time
 from execution.services.portfolio import record_fill
 from execution.models import Order
 from execution.services.orchestrator import update_order_status
-from core.utils import audit_log
+from execution.services.journal import log_journal_event
 from .base import BaseConnector, ConnectorError
 from django.conf import settings
 
@@ -644,11 +644,15 @@ class MT5Connector(BaseConnector):
             err = mt5.last_error()
             msg = f"order_send failed after {max_retries} attempts: {err}"
             update_order_status(order, "error", error_msg=msg)
-            audit_log(
+            log_journal_event(
                 "order.dispatch_error",
-                "Order",
-                order.id,
-                {"retcode": None, "details": str(err), "symbol": order.symbol, "side": order.side},
+                severity="error",
+                order=order,
+                bot=order.bot,
+                broker_account=order.broker_account,
+                symbol=order.symbol,
+                message="MT5 order_send returned None",
+                context={"retcode": None, "details": str(err)},
             )
             raise ConnectorError(msg)
 
@@ -681,11 +685,15 @@ class MT5Connector(BaseConnector):
             details = result._asdict() if hasattr(result, "_asdict") else result
             msg = f"MT5 order placed but not filled: retcode={ret}, details={details}"
             update_order_status(order, "error", error_msg=msg)
-            audit_log(
+            log_journal_event(
                 "order.dispatch_error",
-                "Order",
-                order.id,
-                {"retcode": ret, "details": str(details), "symbol": order.symbol, "side": order.side},
+                severity="error",
+                order=order,
+                bot=order.bot,
+                broker_account=order.broker_account,
+                symbol=order.symbol,
+                message="MT5 order placed but not filled",
+                context={"retcode": ret, "details": str(details)},
             )
             raise ConnectorError(msg)
 
@@ -693,11 +701,15 @@ class MT5Connector(BaseConnector):
         details = result._asdict() if hasattr(result, "_asdict") else result
         msg = f"MT5 order failed: retcode={ret}, details={details}"
         update_order_status(order, "error", error_msg=msg)
-        audit_log(
+        log_journal_event(
             "order.dispatch_error",
-            "Order",
-            order.id,
-            {"retcode": ret, "details": str(details), "symbol": order.symbol, "side": order.side},
+            severity="error",
+            order=order,
+            bot=order.bot,
+            broker_account=order.broker_account,
+            symbol=order.symbol,
+            message="MT5 order rejected",
+            context={"retcode": ret, "details": str(details)},
         )
         raise ConnectorError(msg)
 

@@ -1,7 +1,9 @@
 
 from decimal import Decimal
 from django.db import transaction
+from django.utils import timezone
 from execution.models import Order, Execution, Position, TradeLog
+from execution.services.journal import log_journal_event
 from execution.services.psychology import update_bot_after_realized_pnl
 
 @transaction.atomic
@@ -23,6 +25,20 @@ def record_fill(
         fee=fee,
         account_balance=account_balance,
         owner=getattr(order, "owner", None),
+    )
+    log_journal_event(
+        "order.execution",
+        order=order,
+        bot=order.bot,
+        broker_account=order.broker_account,
+        symbol=order.symbol,
+        message=f"Fill {qty} @ {price}",
+        context={
+            "qty": str(qty),
+            "price": str(price),
+            "fee": str(fee),
+            "account_balance": str(account_balance) if account_balance is not None else None,
+        },
     )
 
     # --- existing position logic, keep as-is ---
@@ -63,6 +79,7 @@ def record_fill(
 
     # Detect realized PnL when reducing or closing an existing position.
     realized_pnl = None
+    closing_qty = None
     if old_qty != 0:
         # Position direction before this fill
         if (old_qty > 0 and delta < 0) or (old_qty < 0 and delta > 0):
@@ -74,6 +91,19 @@ def record_fill(
                 realized_pnl = (Decimal(str(price)) - Decimal(str(old_avg))) * closing_qty * direction
 
     pos.save()
+    log_journal_event(
+        "position.updated",
+        position=pos,
+        bot=order.bot,
+        broker_account=order.broker_account,
+        symbol=order.symbol,
+        message=f"qty {pos.qty} avg {pos.avg_price}",
+        context={
+            "status": pos.status,
+            "sl": str(pos.sl) if pos.sl is not None else None,
+            "tp": str(pos.tp) if pos.tp is not None else None,
+        },
+    )
 
     # Attach realized PnL to the TradeLog for this order (if any).
     if realized_pnl is not None:
@@ -105,7 +135,26 @@ def record_fill(
             tl.status = "loss"
         else:
             tl.status = "breakeven"
-        tl.save(update_fields=["pnl", "status"])
+        close_exec = execs[-1] if execs else None
+        close_time = getattr(close_exec, "exec_time", None) or timezone.now()
+        tl.closed_at = close_time
+        tl.exit_price = Decimal(str(price))
+        tl.save(update_fields=["pnl", "status", "closed_at", "exit_price"])
+
+        log_journal_event(
+            "trade.realized_pnl",
+            order=order,
+            bot=order.bot,
+            broker_account=order.broker_account,
+            position=pos,
+            symbol=order.symbol,
+            message=f"Realized {realized_pnl}",
+            context={
+                "pnl": str(realized_pnl),
+                "closing_qty": str(closing_qty) if closing_qty is not None else None,
+                "new_position_qty": str(pos.qty),
+            },
+        )
 
         # Update bot-level psychology state (loss streak / pause) based on this realized result.
         try:

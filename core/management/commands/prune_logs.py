@@ -3,11 +3,8 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from core.models import Audit, CeleryActivity
-
-
 class Command(BaseCommand):
-    help = "Prune old operational logs (Audit, CeleryActivity, NotificationLog)."
+    help = "Prune journal and notification logs."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -19,9 +16,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--include",
             nargs="+",
-            choices=["audit", "celery", "notifications"],
-            default=["audit", "celery", "notifications"],
-            help="Which tables to prune (default: all).",
+            choices=["notifications", "journal"],
+            default=["journal", "notifications"],
+            help="Which tables to prune (default: journal + notifications).",
         )
 
     def handle(self, *args, **options):
@@ -30,16 +27,6 @@ class Command(BaseCommand):
         cutoff = timezone.now() - timedelta(days=days)
 
         total_deleted = 0
-
-        if "audit" in include:
-            deleted, _ = Audit.objects.filter(ts__lt=cutoff).delete()
-            total_deleted += deleted
-            self.stdout.write(f"Pruned {deleted} Audit rows older than {days} days")
-
-        if "celery" in include:
-            deleted, _ = CeleryActivity.objects.filter(ts__lt=cutoff).delete()
-            total_deleted += deleted
-            self.stdout.write(f"Pruned {deleted} CeleryActivity rows older than {days} days")
 
         if "notifications" in include:
             try:
@@ -52,5 +39,17 @@ class Command(BaseCommand):
                 self.stdout.write(f"Pruned {deleted} NotificationLog rows older than {days} days")
             else:
                 self.stdout.write("Skipped notifications (model import failed)")
+
+        if "journal" in include:
+            try:
+                from execution.models import JournalEntry
+            except Exception:
+                JournalEntry = None
+            if JournalEntry:
+                deleted, _ = JournalEntry.objects.filter(created_at__lt=cutoff).delete()
+                total_deleted += deleted
+                self.stdout.write(f"Pruned {deleted} JournalEntry rows older than {days} days")
+            else:
+                self.stdout.write("Skipped journal (model import failed)")
 
         self.stdout.write(self.style.SUCCESS(f"Done. Total deleted: {total_deleted}"))

@@ -1,14 +1,20 @@
 from decimal import Decimal
-import csv
 
 from django.contrib import admin
-from django.db.models import Count, Sum, Q
-from django.db.models.functions import Coalesce
-from django.http import HttpResponse
-from django.utils import timezone
+from django.db.models import Count, Q
 
 from bots.models import Bot
-from .models import Signal, Decision, Order, Execution, Position, TradeLog, ExecutionSetting, TradingProfile
+from .models import (
+    Signal,
+    Decision,
+    Order,
+    Execution,
+    Position,
+    TradeLog,
+    ExecutionSetting,
+    TradingProfile,
+    JournalEntry,
+)
 
 class OwnedAdmin(admin.ModelAdmin):
     """
@@ -143,6 +149,7 @@ class TradeLogAdmin(OwnedAdmin):
             .select_related("order", "bot", "broker_account")
             .order_by("-created_at")
         )
+        base_qs = base_qs.filter(status__in=["filled", "win", "loss", "breakeven"])
         paginator = Paginator(base_qs, 50)
         page_number = request.GET.get("page") or 1
         try:
@@ -162,124 +169,70 @@ class TradeLogAdmin(OwnedAdmin):
         )
         return super().changelist_view(request, extra_context=extra_context)
 
-    def get_urls(self):
-        from django.urls import path
 
-        urls = super().get_urls()
-        custom = [
-            path(
-                "backtest/",
-                self.admin_site.admin_view(self.backtest_view),
-                name="execution_tradelog_backtest",
-            ),
-            path(
-                "backtest/export/",
-                self.admin_site.admin_view(self.backtest_export_view),
-                name="execution_tradelog_backtest_export",
-            ),
-        ]
-        return custom + urls
+@admin.register(JournalEntry)
+class JournalEntryAdmin(OwnedAdmin):
+    change_list_template = "admin/executions/journal.html"
+    list_display = ("created_at", "event_type", "severity", "bot", "broker_account", "symbol")
+    list_filter = ("severity", "event_type", "bot", "broker_account")
+    search_fields = ("message", "event_type", "symbol", "order__client_order_id")
+    readonly_fields = (
+        "event_type",
+        "severity",
+        "message",
+        "context",
+        "symbol",
+        "created_at",
+        "bot",
+        "broker_account",
+        "order",
+        "position",
+        "signal",
+        "decision",
+    )
+    date_hierarchy = "created_at"
 
-    def _backtest_queryset(self, request, symbol: str | None = None, period: str | None = None):
-        """
-        Base queryset for backtest logs:
-        - Only trades that actually reached MT5 (orders filled/part-filled)
-        - Include all outcomes for those orders; PnL may be empty for older rows.
-        - Optional symbol filter and period filter.
+    def has_add_permission(self, request):
+        return False
 
-        We build this queryset directly from TradeLog so that it mirrors the
-        CSV export and is independent from any changelist filters, while still
-        respecting per-owner scoping for non-superusers.
-        """
-        from .models import TradeLog
+    def changelist_view(self, request, extra_context=None):
+        from django.core.paginator import Paginator, InvalidPage
 
-        qs = TradeLog.objects.select_related("order", "bot", "broker_account")
-
-        # Respect owner scoping for normal staff users
-        if not request.user.is_superuser:
-            qs = qs.filter(owner=request.user)
-
-        # Only keep orders that actually made it to MT5 (filled/part-filled)
-        qs = qs.filter(order__status__in=["filled", "part_filled"]).order_by("-created_at")
-
-        if symbol:
-            qs = qs.filter(symbol__iexact=symbol)
-        if period == "today":
-            qs = qs.filter(created_at__date=timezone.localdate())
-        return qs
-
-    def backtest_view(self, request):
-        symbol = (request.GET.get("symbol") or "").strip()
-        period = (request.GET.get("period") or "all").lower()
-        qs = self._backtest_queryset(request, symbol or None, period)
-        logs = list(qs[:1000])
-
-        metrics = qs.aggregate(
-            total_count=Count("id"),
-            total_pnl=Coalesce(Sum("pnl"), Decimal("0")),
-            win_count=Count("id", filter=Q(status="win")),
-            loss_count=Count("id", filter=Q(status="loss")),
+        base_qs = (
+            self.get_queryset(request)
+            .select_related("bot", "broker_account", "order")
+            .order_by("-created_at")
         )
-        total_trades = (metrics["win_count"] or 0) + (metrics["loss_count"] or 0)
-        if total_trades > 0:
-            metrics["win_rate"] = (metrics["win_count"] / total_trades) * 100
-        else:
-            metrics["win_rate"] = Decimal("0")
 
-        context = {
-            **self.admin_site.each_context(request),
-            "opts": self.model._meta,
-            "logs": logs,
-            "title": "Backtest Data",
-            "metrics": metrics,
-            "current_symbol": symbol,
-            "current_period": period,
-        }
-        from django.template.response import TemplateResponse
+        paginator = Paginator(base_qs, 75)
+        page_number = request.GET.get("page") or 1
+        try:
+            page_obj = paginator.page(page_number)
+        except InvalidPage:
+            page_obj = paginator.page(1)
 
-        return TemplateResponse(request, "admin/executions/backtest_logs.html", context)
+        entries = list(page_obj.object_list)
+        stats = base_qs.aggregate(
+            total=Count("id"),
+            info=Count("id", filter=Q(severity="info")),
+            warning=Count("id", filter=Q(severity="warning")),
+            error=Count("id", filter=Q(severity="error")),
+        )
+        event_types = sorted(
+            base_qs.order_by().values_list("event_type", flat=True).distinct()
+        )
 
-    def backtest_export_view(self, request):
-        symbol = (request.GET.get("symbol") or "").strip()
-        period = (request.GET.get("period") or "all").lower()
-        logs = self._backtest_queryset(request, symbol or None, period)
-        now = timezone.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"backtest_logs_{now}.csv"
-
-        response = HttpResponse(content_type="text/csv")
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
-
-        writer = csv.writer(response)
-        headers = [
-            "time",
-            "bot",
-            "account",
-            "symbol",
-            "side",
-            "qty",
-            "price",
-            "pnl",
-        ]
-        writer.writerow(headers)
-
-        for log in logs.iterator():
-            order = log.order
-            bot = log.bot
-            acct = log.broker_account
-            writer.writerow(
-                [
-                    log.created_at.isoformat(),
-                    bot.name if bot else "",
-                    acct.name if acct else "",
-                    log.symbol,
-                    log.side,
-                    str(log.qty),
-                    str(log.price or ""),
-                    str(log.pnl or ""),
-                ]
-            )
-
-        return response
+        extra_context = extra_context or {}
+        extra_context.update(
+            {
+                "entries": entries,
+                "page_obj": page_obj,
+                "paginator": paginator,
+                "severity_stats": stats,
+                "event_types": event_types,
+            }
+        )
+        return super().changelist_view(request, extra_context=extra_context)
 
 @admin.register(Signal)
 class SignalAdmin(OwnedAdmin):

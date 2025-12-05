@@ -1,0 +1,276 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n %}
+
+{% block extra_css %}
+<style>
+    .metrics-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: var(--space-md);
+        margin-bottom: var(--space-lg);
+    }
+    .metric-card {
+        background: var(--bg-card);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        border: 1px solid var(--border-light);
+    }
+    .metric-label {
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        color: var(--gray-400);
+        letter-spacing: 0.05em;
+    }
+    .metric-value {
+        font-size: var(--text-2xl);
+        font-weight: 700;
+        margin-top: var(--space-xs);
+    }
+    .action-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-sm);
+        margin-bottom: var(--space-lg);
+    }
+    .action-bar input,
+    .action-bar select {
+        background: var(--bg-card);
+        border: 1px solid var(--border-light);
+        color: var(--gray-100);
+        border-radius: var(--radius-md);
+        padding: var(--space-sm) var(--space-md);
+    }
+    .severity-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-xs);
+        padding: var(--space-xxs) var(--space-sm);
+        border-radius: 999px;
+        font-size: var(--text-xs);
+        font-weight: 600;
+        text-transform: uppercase;
+    }
+    .severity-info {
+        background: rgba(59, 130, 246, 0.15);
+        color: #60a5fa;
+    }
+    .severity-warning {
+        background: rgba(245, 158, 11, 0.15);
+        color: #fbbf24;
+    }
+    .severity-error {
+        background: rgba(239, 68, 68, 0.15);
+        color: #f87171;
+    }
+    .journal-table tbody tr {
+        transition: background 0.2s ease;
+    }
+    .journal-table tbody tr:hover {
+        background: rgba(255,255,255,0.02);
+    }
+    .context-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.15);
+        color: var(--gray-200);
+        font-size: var(--text-xxs);
+        margin-right: 4px;
+    }
+</style>
+{% endblock %}
+
+{% block page_title %}{% trans "Execution Journal" %}{% endblock %}
+{% block page_subtitle %}{% trans "Unified MT5-style log capturing signals, orders, fills, and kill-switch events in one timeline." %}{% endblock %}
+
+{% block content %}
+<div class="metrics-grid">
+    <div class="metric-card">
+        <div class="metric-label">{% trans "Total entries" %}</div>
+        <div class="metric-value">{{ severity_stats.total|default:0 }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">{% trans "Info" %}</div>
+        <div class="metric-value">{{ severity_stats.info|default:0 }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">{% trans "Warnings" %}</div>
+        <div class="metric-value">{{ severity_stats.warning|default:0 }}</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">{% trans "Errors" %}</div>
+        <div class="metric-value">{{ severity_stats.error|default:0 }}</div>
+    </div>
+</div>
+
+<div class="action-bar">
+    <input type="search" id="journal-search" placeholder="{% trans 'Search message, bot, order...' %}">
+    <select id="severity-filter">
+        <option value="">{% trans "All severities" %}</option>
+        <option value="info">{% trans "Info" %}</option>
+        <option value="warning">{% trans "Warning" %}</option>
+        <option value="error">{% trans "Error" %}</option>
+    </select>
+    <select id="event-filter-options">
+        <option value="">{% trans "All event types" %}</option>
+        {% for event_type in event_types %}
+            <option value="{{ event_type }}">{{ event_type }}</option>
+        {% endfor %}
+    </select>
+    <button class="btn btn-outline" type="button" onclick="location.reload()">
+        <i class="fas fa-sync-alt"></i> {% trans "Refresh" %}
+    </button>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div>
+            <h3 class="card-title">{% trans "Recent journal entries" %}</h3>
+            <p class="card-subtitle">{% trans "Every action is recorded with bot, account, and optional order links." %}</p>
+        </div>
+        <div class="page-actions">
+            <a href="{% url 'admin:execution_tradelog_changelist' %}" class="btn btn-outline">
+                <i class="fas fa-history"></i> {% trans "Trade history" %}
+            </a>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table class="modern-table journal-table">
+            <thead>
+                <tr>
+                    <th>{% trans "Time" %}</th>
+                    <th>{% trans "Event" %}</th>
+                    <th>{% trans "Bot / Account" %}</th>
+                    <th>{% trans "Details" %}</th>
+                    <th>{% trans "Links" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in entries %}
+                <tr data-severity="{{ entry.severity }}" data-event="{{ entry.event_type|slugify }}" data-search="{{ entry.message|lower }} {{ entry.bot.name|default:''|lower }} {{ entry.broker_account.name|default:''|lower }} {{ entry.symbol|lower }}">
+                    <td style="white-space:nowrap;">
+                        {{ entry.created_at|date:"M d, H:i:s" }}
+                        <div style="color:var(--gray-400);font-size:var(--text-xxs);">
+                            {{ entry.created_at|date:"Y" }}
+                        </div>
+                    </td>
+                    <td>
+                        <div class="severity-badge severity-{{ entry.severity }}">
+                            <i class="fas {% if entry.severity == 'error' %}fa-circle-xmark{% elif entry.severity == 'warning' %}fa-triangle-exclamation{% else %}fa-circle-info{% endif %}"></i>
+                            {{ entry.severity }}
+                        </div>
+                        <div style="font-weight:600;margin-top:4px;">
+                            {{ entry.event_type }}
+                        </div>
+                        <div style="color:var(--gray-400);font-size:var(--text-xs);">
+                            {{ entry.symbol|default:"-" }}
+                        </div>
+                    </td>
+                    <td>
+                        <div>
+                            {% if entry.bot %}
+                                <i class="fas fa-robot"></i> {{ entry.bot.name }}
+                            {% else %}
+                                <span style="color:var(--gray-500);">{% trans "No bot" %}</span>
+                            {% endif %}
+                        </div>
+                        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:4px;">
+                            {% if entry.broker_account %}
+                                <i class="fas fa-building-columns"></i> {{ entry.broker_account.name }}
+                            {% else %}
+                                {% trans "Account not set" %}
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td>
+                        <div>{{ entry.message|default:"-" }}</div>
+                        {% if entry.context %}
+                            <div style="margin-top:4px;">
+                                {% for key, value in entry.context.items %}
+                                    {% if value %}
+                                        <span class="context-chip">{{ key }}: {{ value }}</span>
+                                    {% endif %}
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="action-buttons">
+                            {% if entry.order %}
+                                <a href="{% url 'admin:execution_order_change' entry.order.pk %}" class="btn-icon" title="{% trans 'View order' %}">
+                                    <i class="fas fa-diagram-project"></i>
+                                </a>
+                            {% endif %}
+                            {% if entry.position %}
+                                <a href="{% url 'admin:execution_position_change' entry.position.pk %}" class="btn-icon" title="{% trans 'View position' %}">
+                                    <i class="fas fa-chart-line"></i>
+                                </a>
+                            {% endif %}
+                            <a href="{% url 'admin:execution_journalentry_change' entry.pk %}" class="btn-icon" title="{% trans 'Inspect entry' %}">
+                                <i class="fas fa-eye"></i>
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" style="text-align:center;padding:var(--space-lg);color:var(--gray-400);">
+                        <i class="fas fa-inbox" style="font-size:var(--text-xl);display:block;margin-bottom:var(--space-sm);"></i>
+                        {% trans "No journal entries recorded yet." %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="pagination">
+        <div class="pagination-info">
+            {% blocktrans with page=page_obj.number total=paginator.num_pages %}Page {{ page }} of {{ total }}{% endblocktrans %}
+        </div>
+        <div class="pagination-controls">
+            {% if page_obj.has_previous %}
+                <a href="?page={{ page_obj.previous_page_number }}" class="btn btn-outline btn-sm">&laquo; {% trans "Prev" %}</a>
+            {% endif %}
+            {% if page_obj.has_next %}
+                <a href="?page={{ page_obj.next_page_number }}" class="btn btn-outline btn-sm">{% trans "Next" %} &raquo;</a>
+            {% endif %}
+            <a href="{% url 'admin:execution_journalentry_changelist' %}" class="btn btn-outline btn-sm">
+                <i class="fas fa-table"></i> {% trans "Open admin view" %}
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const searchInput = document.getElementById("journal-search");
+    const severityFilter = document.getElementById("severity-filter");
+    const eventFilter = document.getElementById("event-filter-options");
+    const rows = document.querySelectorAll(".journal-table tbody tr");
+
+    function applyFilters() {
+        const searchValue = (searchInput?.value || "").toLowerCase();
+        const severity = severityFilter?.value || "";
+        const eventType = eventFilter?.value || "";
+
+        rows.forEach(row => {
+            const matchesSearch = !searchValue || row.dataset.search.includes(searchValue);
+            const matchesSeverity = !severity || row.dataset.severity === severity;
+            const matchesEvent = !eventType || row.dataset.event === eventType.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+            row.style.display = (matchesSearch && matchesSeverity && matchesEvent) ? "" : "none";
+        });
+    }
+
+    searchInput?.addEventListener("input", applyFilters);
+    severityFilter?.addEventListener("change", applyFilters);
+    eventFilter?.addEventListener("change", applyFilters);
+
+    applyFilters();
+});
+</script>
+{% endblock %}

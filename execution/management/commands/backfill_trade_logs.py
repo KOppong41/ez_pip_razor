@@ -6,7 +6,7 @@ from execution.models import Order, TradeLog
 
 
 class Command(BaseCommand):
-    help = "Backfill TradeLog entries from existing orders (filled/error/canceled)."
+    help = "Backfill TradeLog entries from filled orders only."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -21,7 +21,7 @@ class Command(BaseCommand):
         if options.get("days"):
             cutoff = timezone.now() - timedelta(days=options["days"])
 
-        qs = Order.objects.filter(status__in=["filled", "error", "canceled"])
+        qs = Order.objects.filter(status__in=["filled", "part_filled"])
         if cutoff:
             qs = qs.filter(created_at__gte=cutoff)
 

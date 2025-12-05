@@ -142,7 +142,8 @@ class Command(BaseCommand):
             "default_sl_pips": Decimal(str(risk_profile.get("sl_pips", 70))),
             "auto_trade": auto_trade,
             "enabled_strategies": strategies,
-            "decision_min_score": Decimal("0.3"),
+            # Require higher-quality signals by default; admins can still lower it manually later.
+            "decision_min_score": Decimal("0.6"),
             "risk_max_concurrent_positions": 2,
             "risk_max_positions_per_symbol": 1,
             "kill_switch_enabled": True,

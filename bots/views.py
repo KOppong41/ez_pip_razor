@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from core.permissions import IsAdminOnlyWrite_ReadForAllAuth
 from .models import Bot
 from .serializers import BotSerializer, BotControlSerializer, BotSettingsSerializer
-from core.utils import audit_log
+from core.utils import structured_log
 
 class BotViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     permission_classes = [IsAdminOnlyWrite_ReadForAllAuth]
@@ -22,7 +22,7 @@ class BotViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Gene
         new_status = {"start":"active","pause":"paused","stop":"stopped"}[act]
         bot.status = new_status
         bot.save(update_fields=["status"])
-        audit_log("bot.control", "Bot", bot.id, {"to": new_status})
+        structured_log("bot.control", bot_id=bot.id, action=act, status=new_status)
         return Response(BotSerializer(bot).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["patch"], url_path="settings")
@@ -31,6 +31,6 @@ class BotViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Gene
         ser = BotSettingsSerializer(bot, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
         ser.save()
-        audit_log("bot.settings", "Bot", bot.id, ser.validated_data)
+        structured_log("bot.settings", bot_id=bot.id, changes=ser.validated_data)
         return Response(BotSerializer(bot).data, status=status.HTTP_200_OK)
     

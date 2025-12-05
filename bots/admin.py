@@ -18,8 +18,7 @@ from django.utils.safestring import mark_safe
 from .models import Asset, Bot, STRATEGY_CHOICES, STANDARD_TIMEFRAMES, DEFAULT_TRADING_DAYS, CATEGORY_CHOICES, STRATEGY_GUIDES
 from brokers.models import Broker
 from execution.services.psychology import get_size_multiplier
-from execution.models import default_scalper_profile_config
-from execution.models import Position, TradeLog
+from execution.models import default_scalper_profile_config, Position, ScalperRunLog, TradeLog
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -223,6 +222,11 @@ class BotForm(forms.ModelForm):
         self.fields["asset"].queryset = Asset.objects.filter(is_active=True)
         self.fields["enabled_strategies"].initial = self.instance.enabled_strategies or []
         self.fields["allowed_timeframes"].initial = self.instance.allowed_timeframes or []
+        if "decision_min_score" in self.fields:
+            self.fields["decision_min_score"].help_text = (
+                "Minimum signal quality required before placing trades. "
+                "Set to 0 to inherit the profile/global threshold."
+            )
         if self.request and not self.instance.pk and "owner" in self.fields:
             self.fields["owner"].initial = self.request.user
 
@@ -573,6 +577,11 @@ class BotAdmin(admin.ModelAdmin):
         )
         db_open_count = db_positions.count()
 
+        recent_logs = (
+            ScalperRunLog.objects.filter(bot=bot)
+            .order_by("-created_at")[:10]
+        )
+
         diagnostics = {
             "pnl_today": pnl_today,
             "size_multiplier": size_mult,
@@ -588,6 +597,7 @@ class BotAdmin(admin.ModelAdmin):
             "bot": bot,
             "title": f"Bot details: {bot.name}",
             "diagnostics": diagnostics,
+            "scalper_run_logs": recent_logs,
         }
         return TemplateResponse(request, "admin/bots/bot_details.html", context)  # Updated path
 

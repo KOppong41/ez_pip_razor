@@ -27,7 +27,8 @@ class EngineDecision:
     reason: str = ""
     strategy: str = ""   
     trend: Trend = "flat"
-    score: float = 0.0   
+    score: float = 0.0
+    metadata: Optional[dict] = None   
 
 
 @dataclass

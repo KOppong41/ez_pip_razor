@@ -4,6 +4,7 @@ from typing import Literal, Tuple
 from django.db import transaction
 from django.utils import timezone
 from execution.models import Decision, Order, BrokerAccount, Bot
+from execution.services.journal import log_journal_event
 import hashlib
 from core.metrics import orders_created_total, order_status_total
 from decimal import Decimal
@@ -179,6 +180,16 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
         orders_created_total.labels(
             broker=broker_account.broker, symbol=position.symbol, side=side
         ).inc()
+        log_journal_event(
+            "order.close_created",
+            bot=bot,
+            broker_account=broker_account,
+            order=order,
+            position=position,
+            symbol=position.symbol,
+            message=f"Close {position.symbol} {side} qty {order.qty}",
+            context={"qty": str(order.qty), "position_qty": str(position.qty)},
+        )
 
     return order, created
 
@@ -303,6 +314,21 @@ def create_order_from_decision(
         orders_created_total.labels(
             broker=broker_account.broker, symbol=symbol, side=side
         ).inc()
+        log_journal_event(
+            "order.created",
+            bot=order.bot,
+            broker_account=broker_account,
+            order=order,
+            decision=decision,
+            signal=decision.signal,
+            symbol=symbol,
+            message=f"{symbol} {side} qty {order.qty}",
+            context={
+                "qty": str(order.qty),
+                "sl": str(order.sl) if order.sl else None,
+                "tp": str(order.tp) if order.tp else None,
+            },
+        )
 
     return order, created
 
@@ -321,7 +347,8 @@ def update_order_status(
     if new_status not in VALID_STATUSES:
         raise ValueError(f"Unsupported order status: {new_status}")
 
-    was_filled = order.status == "filled"
+    previous_status = order.status
+    was_filled = previous_status == "filled"
     order.status = new_status
 
     if price is not None:
@@ -337,22 +364,21 @@ def update_order_status(
     order.updated_at = timezone.now()
     order.save(update_fields=["status", "price", "last_error", "updated_at"])
 
-    try:
-        audit_log(
-            "order.status",
-            "Order",
-            order.id,
-            {
-                "from": order.status if was_filled else None,
-                "to": new_status,
-                "symbol": order.symbol,
-                "side": order.side,
-                "price": str(price) if price is not None else None,
-                "last_error": error_msg,
-            },
-        )
-    except Exception:
-        pass
+    log_journal_event(
+        "order.status_changed",
+        severity="error" if new_status in {"error", "canceled"} else "info",
+        order=order,
+        bot=order.bot,
+        broker_account=order.broker_account,
+        symbol=order.symbol,
+        message=f"{order.symbol} {order.side} {previous_status} -> {new_status}",
+        context={
+            "from": previous_status,
+            "to": new_status,
+            "price": str(price) if price is not None else None,
+            "error": error_msg,
+        },
+    )
 
     # NOTE: We no longer auto-create executions here. Connectors/tasks that
     # mark an order filled must explicitly call record_fill once they have a
@@ -376,24 +402,5 @@ def update_order_status(
                     status=new_status,
                     pnl=None,
                 )
-        except Exception:
-            pass
-
-    if new_status in ("error", "canceled") and not was_filled:
-        try:
-            from execution.models import TradeLog
-
-            TradeLog.objects.create(
-                order=order,
-                bot=order.bot,
-                owner=order.owner,
-                broker_account=order.broker_account,
-                symbol=order.symbol,
-                side=order.side,
-                qty=order.qty,
-                price=order.price,
-                status=new_status,
-                pnl=None,
-            )
         except Exception:
             pass

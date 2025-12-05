@@ -13,8 +13,8 @@ register = template.Library()
 
 @register.simple_tag
 def get_trade_logs_count():
-    """Optimized count query for trade logs"""
-    return TradeLog.objects.count()
+    """Count only completed trades."""
+    return TradeLog.objects.filter(status__in=["filled", "win", "loss", "breakeven"]).count()
 
 
 @register.simple_tag
@@ -38,6 +38,7 @@ def get_recent_trade_logs(limit=50):
             "broker_account__name",
             
         )
+        .filter(status__in=["filled", "win", "loss", "breakeven"])
         .order_by("-created_at")[:limit]
     )
 
@@ -46,12 +47,12 @@ def get_recent_trade_logs(limit=50):
 @register.simple_tag
 def get_trade_logs_metrics():
     """Get comprehensive metrics for trade logs"""
-    metrics = TradeLog.objects.aggregate(
+    queryset = TradeLog.objects.filter(status__in=["filled", "win", "loss", "breakeven"])
+    metrics = queryset.aggregate(
         total_count=Count("id"),
         win_count=Count("id", filter=Q(status="win")),
         loss_count=Count("id", filter=Q(status="loss")),
         breakeven_count=Count("id", filter=Q(status="breakeven")),
-        error_count=Count("id", filter=Q(status="error")),
         total_pnl=Coalesce(Sum("pnl"), Decimal("0")),
     )
 
@@ -59,11 +60,7 @@ def get_trade_logs_metrics():
     win = metrics.get("win_count") or 0
     raw_loss = metrics.get("loss_count") or 0
     breakeven = metrics.get("breakeven_count") or 0
-    errors = metrics.get("error_count") or 0
-
-    # Treat error outcomes as losses for high-level stats so
-    # the win-rate isn't misleadingly based on 0 trades.
-    loss = raw_loss + errors
+    loss = raw_loss
     metrics["loss_count"] = loss
 
     total_trades = win + loss + breakeven

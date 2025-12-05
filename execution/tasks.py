@@ -2,7 +2,7 @@ import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from typing import Callable
 
@@ -11,15 +11,14 @@ from django.utils import timezone
 
 from brokers.models import BrokerAccount
 from core.metrics import task_failures_total
-from core.utils import audit_log
 from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector, is_mt5_available, mt5
-from execution.models import Decision, Order, PnLDaily, Position, Signal
+from execution.models import Decision, Order, PnLDaily, Position, ScalperRunLog, Signal
 from execution.services.brokers import dispatch_place_order
 from execution.services.decision import make_decision_from_signal
 from execution.services.engine import run_engine_on_candles
 from execution.services.fanout import fanout_orders
-from execution.services.marketdata import get_candles_for_account
+from execution.services.marketdata import get_candles_for_account, _login_mt5_for_account
 from execution.services.monitor import (
     EarlyExitConfig,
     KillSwitchConfig,
@@ -35,6 +34,7 @@ from execution.services.prices import get_price
 from execution.services.psychology import bot_is_available_for_trading
 from execution.services.scalper_config import build_scalper_config
 from execution.services.runtime_config import get_runtime_config
+from execution.services.journal import log_journal_event
 from execution.services.strategies.breakout_retest import (
     BreakoutRetestConfig,
     run_breakout_retest,
@@ -63,26 +63,81 @@ def _get_htf(timeframe: str) -> str | None:
 
 logger = logging.getLogger(__name__)
 
-def _compute_bias_from_htf(candles) -> str | None:
-    """
-    Simple 15m bias: EMA(20) slope and price relative to EMA.
-    Returns 'buy', 'sell', or None.
-    """
-    if not candles or len(candles) < 21:
+SESSION_WINDOWS = (
+    ("asia", 0, 6),
+    ("london", 6, 12),
+    ("new_york", 12, 20),
+)
+
+
+def _session_label(moment=None) -> str:
+    moment = moment or timezone.now()
+    hour = moment.hour
+    for label, start, end in SESSION_WINDOWS:
+        if start <= hour < end:
+            return label
+    return "overnight"
+
+
+def _analyze_htf_bias(candles) -> dict | None:
+    if not candles or len(candles) < 30:
         return None
+
     closes = [c["close"] for c in candles]
     k = Decimal("2") / Decimal("21")
     ema = closes[0]
+    ema_values = [ema]
     for c in closes[1:]:
         ema = c * k + ema * (Decimal("1") - k)
-    prev_close = closes[-2]
-    last_close = closes[-1]
-    slope = last_close - prev_close
-    if slope > 0 and last_close > ema:
-        return "buy"
-    if slope < 0 and last_close < ema:
-        return "sell"
-    return None
+        ema_values.append(ema)
+
+    ema_now = ema_values[-1]
+    lookback = min(5, len(ema_values) - 1)
+    ema_prev = ema_values[-lookback]
+    last_close = closes[-1] or Decimal("0")
+    slope = (ema_now - ema_prev)
+    slope_pct = (slope / last_close) if last_close else Decimal("0")
+
+    atr_points = _atr_like(candles, period=14)
+    atr_prev = _atr_like(candles[:-5], period=14) if len(candles) > 35 else atr_points
+    atr_ratio = (atr_points / atr_prev) if atr_prev else Decimal("1")
+
+    range_window = candles[-30:]
+    highs = [c["high"] for c in range_window]
+    lows = [c["low"] for c in range_window]
+    range_high = max(highs)
+    range_low = min(lows)
+    denom = range_high - range_low
+    position = ((last_close - range_low) / denom) if denom else Decimal("0.5")
+
+    structure = "range"
+    if highs[-1] >= range_high and lows[-1] >= lows[-2]:
+        structure = "higher_high"
+    elif lows[-1] <= range_low and highs[-1] <= highs[-2]:
+        structure = "lower_low"
+
+    bias = None
+    slope_threshold = Decimal("0.00008")
+    if slope_pct > slope_threshold and position > Decimal("0.55"):
+        bias = "buy"
+    elif slope_pct < -slope_threshold and position < Decimal("0.45"):
+        bias = "sell"
+
+    return {
+        "bias": bias,
+        "ema_slope_pct": float(slope_pct),
+        "atr_points": float(atr_points),
+        "atr_ratio": float(atr_ratio),
+        "range_high": str(range_high),
+        "range_low": str(range_low),
+        "position_in_range": float(position),
+        "structure": structure,
+    }
+
+
+def _compute_bias_from_htf(candles) -> str | None:
+    info = _analyze_htf_bias(candles)
+    return info.get("bias") if info else None
 
 
 @dataclass(frozen=True)
@@ -280,11 +335,24 @@ def ingest_tradingview_email(self):
             # validate & create/update Signal
             ser = AlertWebhookSerializer(data=payload)
             if not ser.is_valid():
-                audit_log("signal.ingest.error", "EmailAlert", "-", {"errors": ser.errors})
+                log_journal_event(
+                    "signal.ingest.error",
+                    severity="warning",
+                    message="TradingView email alert validation failed",
+                    context={"errors": ser.errors, "payload": payload},
+                )
                 continue
             signal, created = ser.save()
             signals_ingested_total.labels(signal.source, signal.symbol, signal.timeframe).inc()
-            audit_log("signal.ingest", "Signal", signal.id, {"via": "email"})
+            log_journal_event(
+                "signal.ingest",
+                signal=signal,
+                bot=signal.bot,
+                owner=getattr(signal, "owner", None),
+                symbol=signal.symbol,
+                message=f"{signal.symbol} {signal.direction} via email",
+                context={"via": "email", "timeframe": signal.timeframe},
+            )
 
             if created:
                 created_count += 1
@@ -298,9 +366,17 @@ def ingest_tradingview_email(self):
                         try:
                             dispatch_place_order(order)
                             sent_count += 1
-                            audit_log("order.send", "Order", order.id, {"via": "email"})
                         except Exception as e:
-                            audit_log("order.send.error", "Order", order.id, {"err": str(e)})
+                            log_journal_event(
+                                "order.dispatch_error",
+                                severity="error",
+                                order=order,
+                                bot=order.bot,
+                                broker_account=order.broker_account,
+                                symbol=order.symbol,
+                                message="Email auto-trade dispatch failed",
+                                context={"error": str(e)},
+                            )
 
         return {"alerts": len(alerts), "signals_new": created_count, "orders_sent": sent_count}
     except Exception as e:
@@ -493,16 +569,13 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
     # 2) Build engine context + run engine (requires explicit strategy opt-in)
     allowed = bot.enabled_strategies or []
     if not allowed:
-        audit_log(
+        log_journal_event(
             "engine.decision",
-            "EngineTrade",
-            bot.id,
-            {
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "action": "skipped",
-                "reason": "no_enabled_strategies",
-            },
+            bot=bot,
+            owner=getattr(bot, "owner", None),
+            symbol=symbol,
+            message=f"{symbol} {timeframe} skipped (no enabled strategies)",
+            context={"action": "skipped", "reason": "no_enabled_strategies"},
         )
         return {"status": "skipped", "reason": "no_enabled_strategies"}
 
@@ -515,12 +588,13 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
     )
     engine_decision = run_engine(ctx)
     # Trace every engine decision so we can see why trades are skipped.
-    audit_log(
+    log_journal_event(
         "engine.decision",
-        "EngineTrade",
-        bot.id,
-        {
-            "symbol": symbol,
+        bot=bot,
+        owner=getattr(bot, "owner", None),
+        symbol=symbol,
+        message=f"{symbol} {timeframe} action={engine_decision.action}",
+        context={
             "timeframe": timeframe,
             "action": engine_decision.action,
             "reason": engine_decision.reason,
@@ -618,14 +692,16 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
                 dispatch_place_order(order)
             except Exception as e:
                 dispatch_errors.append(e)
-                audit_log(
+                log_journal_event(
                     "order.dispatch_error",
-                    "Order",
-                    order.id,
-                    {
+                    severity="error",
+                    order=order,
+                    bot=order.bot,
+                    broker_account=order.broker_account,
+                    symbol=order.symbol,
+                    message="Engine dispatch failed",
+                    context={
                         "bot_id": bot.id if bot else None,
-                        "symbol": order.symbol,
-                        "side": order.side,
                         "status": order.status,
                         "error": str(e),
                     },
@@ -646,13 +722,14 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
     if dispatch_errors:
         raise ConnectorError(f"{len(dispatch_errors)} order dispatch failure(s); see logs for details")
 
-    audit_log(
+    log_journal_event(
         "harami_trade_executed",
-        "EngineTrade",
-        bot.id,
-        payload={
-            "summary": f"placed {len(orders_info)} order(s) for bot={bot.id}, symbol={symbol}, tf={timeframe}",
-            "bot_id": bot.id,
+        bot=bot,
+        owner=getattr(bot, "owner", None),
+        symbol=symbol,
+        message=f"Placed {len(orders_info)} order(s) for {symbol} {timeframe}",
+        context={
+            "bot_id": bot.id if bot else None,
             "signal_id": signal.id,
             "decision_id": decision.id,
             "orders": orders_info,
@@ -679,10 +756,25 @@ def check_broker_health_task(symbol_hint: str = "EURUSDm"):
         symbol = symbol_hint
         try:
             connector.check_health(creds, symbol)
-            audit_log("broker.health", "BrokerAccount", acct.id, {"status": "ok", "symbol": symbol})
+            log_journal_event(
+                "broker.health",
+                broker_account=acct,
+                owner=acct.owner,
+                message=f"Broker {acct.id} healthy",
+                symbol=symbol,
+                context={"status": "ok"},
+            )
             checked.append(acct.id)
         except Exception as e:
-            audit_log("broker.health.error", "BrokerAccount", acct.id, {"err": str(e), "symbol": symbol})
+            log_journal_event(
+                "broker.health.error",
+                severity="warning",
+                broker_account=acct,
+                owner=acct.owner,
+                symbol=symbol,
+                message="Broker health check failed",
+                context={"error": str(e)},
+            )
             checked.append(f"{acct.id}:error")
     return {"checked": checked}
 
@@ -708,7 +800,14 @@ def validate_broker_configs_task():
                 errs.append(f"missing_fields:{','.join(missing)}")
         if errs:
             issues.append((acct.id, errs))
-            audit_log("broker.config.error", "BrokerAccount", acct.id, {"errors": errs})
+            log_journal_event(
+                "broker.config.error",
+                severity="warning",
+                broker_account=acct,
+                owner=acct.owner,
+                message="Broker configuration invalid",
+                context={"errors": errs},
+            )
     return {"issues": issues}
 
     
@@ -846,28 +945,83 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     if not enabled_strats:
         return {"status": "ok", "reason": "no_active_strategies"}
     
-        # Get M1 candles
+    session_label = _session_label()
+    tick_snapshot = None
+    spread_points = None
+    # Get M1 candles
+    try:
+        # Skip if market is closed for this symbol
+        tick = None
         try:
-            # Skip if market is closed for this symbol
-            try:
-                from execution.connectors.mt5 import is_mt5_available, mt5
-                if is_mt5_available():
-                    info = mt5.symbol_info(symbol)
-                    if info is None or not info.visible:
-                        logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_or_symbol_not_visible", bot.id, symbol)
-                        return {"status": "ok", "reason": "market_closed"}
-                    if info.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED or info.session_deals == 0:
-                        logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed", bot.id, symbol)
-                        return {"status": "ok", "reason": "market_closed"}
-            except Exception:
-                pass
+            from execution.connectors.mt5 import is_mt5_available, mt5
+            if is_mt5_available():
+                info = mt5.symbol_info(symbol)
+                if info is None:
+                    try:
+                        _login_mt5_for_account(broker_account)
+                        info = mt5.symbol_info(symbol)
+                    except Exception:
+                        info = None
+                if info is None or not info.visible:
+                    logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_or_symbol_not_visible", bot.id, symbol)
+                    return {"status": "ok", "reason": "market_closed"}
 
-            entry_candles = get_candles_for_account(
-                broker_account=broker_account,
-                symbol=symbol,
-                timeframe=timeframe,
-                n_bars=n_bars,
-            )
+                disabled_modes = {mt5.SYMBOL_TRADE_MODE_DISABLED}
+                close_only = getattr(mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", None)
+                if close_only is not None:
+                    disabled_modes.add(close_only)
+                if info.trade_mode in disabled_modes:
+                    logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_trade_mode=%s", bot.id, symbol, info.trade_mode)
+                    return {"status": "ok", "reason": "market_closed"}
+
+                tick = None
+                try:
+                    tick = mt5.symbol_info_tick(symbol)
+                except Exception:
+                    tick = None
+
+                if not tick:
+                    logger.warning("[ScalperTrade] bot=%s symbol=%s no_tick_data; continuing with candle snapshot only", bot.id, symbol)
+                else:
+                    tick_seconds = getattr(tick, "time", None)
+                    bid = getattr(tick, "bid", None)
+                    ask = getattr(tick, "ask", None)
+                    if bid is not None and ask is not None:
+                        try:
+                            spread_points = Decimal(str(ask - bid))
+                        except Exception:
+                            spread_points = None
+                    tick_snapshot = {
+                        "bid": float(bid) if bid is not None else None,
+                        "ask": float(ask) if ask is not None else None,
+                        "last": float(getattr(tick, "last", 0.0)),
+                        "time": getattr(tick, "time", None),
+                    }
+                    if not tick_seconds:
+                        tick_millis = getattr(tick, "time_msc", None)
+                        if tick_millis:
+                            tick_seconds = tick_millis / 1000
+
+                    if tick_seconds:
+                        tick_dt = datetime.fromtimestamp(float(tick_seconds), tz=dt_timezone.utc)
+                        seconds_since_tick = (timezone.now() - tick_dt).total_seconds()
+                        if seconds_since_tick > 600:
+                            logger.warning(
+                                "[ScalperTrade] bot=%s symbol=%s stale_tick last_tick=%s age_sec=%s; continuing",
+                                bot.id,
+                                symbol,
+                                tick_dt.isoformat(),
+                                int(seconds_since_tick),
+                            )
+        except Exception:
+            pass
+
+        entry_candles = get_candles_for_account(
+            broker_account=broker_account,
+            symbol=symbol,
+            timeframe=timeframe,
+            n_bars=n_bars,
+        )
     except Exception as e:
         task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
         logger.exception(
@@ -888,48 +1042,79 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         )
         return {"status": "ok", "reason": "insufficient_candles"}
     
+    last_entry = entry_candles[-1]
+    entry_atr_points = _atr_like(entry_candles, period=14)
+    bar_range = last_entry["high"] - last_entry["low"]
+    volatility_snapshot = {
+        "atr_points": str(entry_atr_points),
+        "bar_range": str(bar_range),
+        "tick_volume": last_entry.get("tick_volume"),
+        "spread_points": str(spread_points) if spread_points is not None else None,
+    }
+    market_snapshot = {
+        "session": session_label,
+        "last_close": str(last_entry["close"]),
+        "tick": tick_snapshot,
+        "volatility": volatility_snapshot,
+    }
+    
     signals_created = []
     decisions_made = []
     orders_placed = []
+    strategy_events = []
 
     # Optional HTF bias (15m) to filter countertrend M1 entries
     htf_bias = None
+    htf_bias_detail = None
     try:
         htf_candles = get_candles_for_account(
             broker_account=broker_account,
             symbol=symbol,
             timeframe="15m",
-            n_bars=100,
+            n_bars=120,
         )
-        htf_bias = _compute_bias_from_htf(htf_candles)
+        analysis = _analyze_htf_bias(htf_candles)
+        if analysis:
+            htf_bias = analysis.get("bias")
+            htf_bias_detail = analysis
     except Exception:
         htf_bias = None
+        htf_bias_detail = None
 
     # Fallback: reuse last known bias if it is recent
     if htf_bias is None:
         try:
             last = (bot.scalper_params or {}).get("last_htf_bias", {})
             if last:
-                from datetime import datetime
                 ts = last.get("at")
                 val = last.get("value")
+                detail = last.get("info")
                 if ts and val:
                     parsed = datetime.fromisoformat(ts)
-                    age_min = (timezone.now() - timezone.make_aware(parsed, timezone=timezone.utc) if timezone.is_naive(parsed) else timezone.now() - parsed).total_seconds() / 60
-                    if age_min <= 90:
+                    age_min = (
+                        (timezone.now() - timezone.make_aware(parsed, timezone=dt_timezone.utc))
+                        if timezone.is_naive(parsed)
+                        else (timezone.now() - parsed)
+                    ).total_seconds() / 60
+                    if age_min <= 60:
                         htf_bias = val
+                        htf_bias_detail = detail
         except Exception:
             htf_bias = None
+            htf_bias_detail = None
 
     # If we cannot establish HTF bias, skip this cycle to avoid trading blind.
     if htf_bias is None:
-        logger.debug("[ScalperTrade] bot=%s symbol=%s skipped: htf_bias_missing", bot.id, symbol)
-        return {"status": "ok", "reason": "htf_bias_missing"}
+        logger.warning("[ScalperTrade] bot=%s symbol=%s proceeding without HTF bias", bot.id, symbol)
 
     # Cache latest bias for reuse
     try:
         params = bot.scalper_params or {}
-        params["last_htf_bias"] = {"value": htf_bias, "at": timezone.now().isoformat()}
+        params["last_htf_bias"] = {
+            "value": htf_bias,
+            "at": timezone.now().isoformat(),
+            "info": htf_bias_detail,
+        }
         bot.scalper_params = params
         bot.save(update_fields=["scalper_params"])
     except Exception:
@@ -961,6 +1146,15 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 e,
             )
             continue
+        strategy_events.append(
+            {
+                "strategy": strategy_name,
+                "action": engine_decision.action,
+                "reason": engine_decision.reason,
+                "score": float(engine_decision.score or 0.0),
+                "metadata": engine_decision.metadata or {},
+            }
+        )
         
         # Safety check - should never happen, but guard against it
         if engine_decision is None:
@@ -993,6 +1187,24 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         
         # Create or reuse signal
         try:
+            strategy_payload = {
+                "strategy": strategy_name,
+                "sl": str(engine_decision.sl) if engine_decision.sl is not None else None,
+                "tp": str(engine_decision.tp) if engine_decision.tp is not None else None,
+                "reason": engine_decision.reason,
+                "score": float(engine_decision.score or 0.0),
+                "generated_at": timezone.now().isoformat(),
+                "session": session_label,
+                "atr_points": str(entry_atr_points),
+                "tick_volume": last_entry.get("tick_volume"),
+                "spread_points": str(spread_points) if spread_points is not None else None,
+                "market_snapshot": market_snapshot,
+                "volatility": volatility_snapshot,
+                "strategy_metrics": engine_decision.metadata or {},
+                **({"bias_m15": htf_bias} if htf_bias else {}),
+            }
+            if htf_bias_detail:
+                strategy_payload["htf_bias_detail"] = htf_bias_detail
             signal, signal_created = Signal.objects.get_or_create(
                 dedupe_key=dedupe_key,
                 defaults={
@@ -1001,15 +1213,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "direction": engine_decision.direction,
-                    "payload": {
-                        "strategy": strategy_name,
-                        "sl": str(engine_decision.sl) if engine_decision.sl is not None else None,
-                        "tp": str(engine_decision.tp) if engine_decision.tp is not None else None,
-                        "reason": engine_decision.reason,
-                        "score": float(engine_decision.score or 0.0),
-                        "generated_at": timezone.now().isoformat(),
-                        **({"bias_m15": htf_bias} if htf_bias else {}),
-                    },
+                    "payload": strategy_payload,
                 }
             )
             signals_created.append((signal.id, signal_created))
@@ -1065,14 +1269,16 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                         dispatch_place_order(order)
                         orders_placed.append((order.id, order.symbol, order.side))
                     except Exception as e:
-                        audit_log(
+                        log_journal_event(
                             "order.dispatch_error",
-                            "Order",
-                            order.id,
-                            {
+                            severity="error",
+                            order=order,
+                            bot=order.bot,
+                            broker_account=order.broker_account,
+                            symbol=order.symbol,
+                            message="Scalper dispatch failed",
+                            context={
                                 "bot_id": bot.id,
-                                "symbol": order.symbol,
-                                "side": order.side,
                                 "strategy": strategy_name,
                                 "error": str(e),
                             },
@@ -1094,15 +1300,16 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             continue
     
     # Log summary
-    audit_log(
+    log_journal_event(
         "scalper_engine_run",
-        "Bot",
-        bot.id,
-        {
-            "symbol": symbol,
+        bot=bot,
+        owner=bot.owner if bot else None,
+        symbol=symbol,
+        message=f"Scalper run tf={timeframe}",
+        context={
             "timeframe": timeframe,
             "strategies_enabled": enabled_strats,
-             "strategy_profile": strategy_profile_key,
+            "strategy_profile": strategy_profile_key,
             "signals": len(signals_created),
             "decisions": len(decisions_made),
             "orders": len(orders_placed),
@@ -1119,6 +1326,24 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         len(orders_placed),
     )
     
+    if not signals_created:
+        summary = {
+            "strategies": strategy_events,
+            "market": market_snapshot,
+            "htf_bias": htf_bias,
+            "htf_bias_detail": htf_bias_detail,
+            "generated_at": timezone.now().isoformat(),
+        }
+        try:
+            ScalperRunLog.objects.create(
+                bot=bot,
+                timeframe=timeframe,
+                session=session_label,
+                summary=summary,
+            )
+        except Exception:
+            logger.exception("[ScalperTrade] failed to persist run log bot=%s", bot.id)
+
     return {
         "status": "ok",
         "bot_id": bot.id,
@@ -1299,13 +1524,15 @@ def kill_switch_monitor_task(self):
             try:
                 order = close_position_now(pos)
                 closed += 1
-                audit_log(
+                log_journal_event(
                     "kill_switch.close",
-                    "Position",
-                    pos.id,
-                    {
+                    severity="warning",
+                    position=pos,
+                    broker_account=pos.broker_account,
+                    symbol=pos.symbol,
+                    message="Kill switch closed position",
+                    context={
                         "order_id": order.id,
-                        "symbol": pos.symbol,
                         "qty": str(pos.qty),
                         "avg_price": str(pos.avg_price),
                         "mkt": str(mkt),
@@ -1353,11 +1580,11 @@ def cancel_stale_orders_task(self, max_age_seconds: int | None = None):
             task_failures_total.labels(task="cancel_stale_orders_task").inc()
 
     if canceled:
-        audit_log(
+        log_journal_event(
             "order.auto_cancel",
-            "Order",
-            "-",
-            {"orders": canceled, "timeout_sec": timeout},
+            severity="warning",
+            message=f"Auto-canceled {len(canceled)} stale orders",
+            context={"orders": canceled, "timeout_sec": timeout},
         )
     return {"canceled": canceled, "timeout_sec": timeout}
 
@@ -1450,11 +1677,11 @@ def reconcile_broker_positions_task(self):
                 skipped.append(sym)
 
     if flattened or errors or skipped_recent:
-        audit_log(
+        log_journal_event(
             "broker.reconcile",
-            "BrokerAccount",
-            "-",
-            {
+            severity="info",
+            message="Broker reconciliation summary",
+            context={
                 "flattened": flattened,
                 "errors": errors,
                 "skipped_db_only": skipped,

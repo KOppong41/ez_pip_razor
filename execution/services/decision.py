@@ -7,7 +7,6 @@ from execution.models import Signal, Decision, Position, Order
 from .strategy import naive_strategy, StrategyDecision
 from .risk import RiskConfig, check_risk, ScalperRiskContext
 from core.metrics import decisions_total
-from core.utils import audit_log
 from django.utils import timezone
 from bots.models import Bot  # for per-bot configs on the Bot model
 from execution.services.prices import get_price
@@ -44,7 +43,6 @@ def _log_scalper_trace(signal: Signal | None, stage: str, action: str, reason: s
     payload["decision_trace"] = trace[-30:]
     signal.payload = payload
     signal.save(update_fields=["payload"])
-    audit_log("scalper.decision_trace", "Signal", signal.id, entry)
 
 
 def count_open_positions(symbol: str) -> int:
@@ -233,9 +231,15 @@ def get_min_score_for_bot(bot: Bot, symbol: str) -> float | None:
     if not bot:
         return None
     try:
-        return float(bot.decision_min_score)
+        value = float(bot.decision_min_score)
     except Exception:
         return None
+    if value is None:
+        return None
+    if value <= 0:
+        # Treat zero/negative values as "inherit profile/engine defaults".
+        return None
+    return value
 
 
 def _resolve_scalper_profile_min_score(bot: Bot | None, scalper_cfg: ScalperConfig | None) -> float | None:

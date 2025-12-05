@@ -135,8 +135,6 @@ def alert_webhook(request):
     try:
         from core.metrics import signals_ingested_total
         signals_ingested_total.labels(signal.source, signal.symbol, signal.timeframe).inc()
-        from core.utils import audit_log
-        audit_log("signal.ingest", "Signal", signal.id, {"source": signal.source, "symbol": signal.symbol})
     except Exception:
         pass
 
@@ -157,13 +155,9 @@ def alert_webhook(request):
                 try:
                     dispatch_place_order(order)
                     orders_sent += 1
-                except Exception as e:
+                except Exception:
                     # soft-fail: one follower failing shouldn't break the whole webhook
-                    try:
-                        from core.utils import audit_log
-                        audit_log("order.send.error", "Order", order.id, {"error": str(e)})
-                    except Exception:
-                        pass
+                    pass
 
     return Response(
         {"detail": "External alerts are disabled. Bot now uses internal engine only."},

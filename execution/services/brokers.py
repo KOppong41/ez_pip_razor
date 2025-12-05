@@ -5,7 +5,7 @@ from execution.connectors.mt5 import MT5Connector
 from decimal import Decimal
 from datetime import datetime
 import logging
-from core.utils import audit_log
+from execution.services.journal import log_journal_event
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +97,15 @@ def dispatch_place_order(order: Order) -> None:
         msg = f"Order rejected: {reason}"
         update_order_status(order, "error", error_msg=msg)
         logger.warning(f"Order {order.id} rejected: {reason}")
-        audit_log(
+        log_journal_event(
             "order.dispatch_error",
-            "Order",
-            order.id,
-            {"reason": reason, "symbol": order.symbol, "side": order.side},
+            severity="warning",
+            order=order,
+            bot=order.bot,
+            broker_account=order.broker_account,
+            symbol=order.symbol,
+            message=f"{order.symbol} {order.side} rejected before dispatch",
+            context={"reason": reason},
         )
         raise ValueError(msg)
     

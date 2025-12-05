@@ -220,14 +220,6 @@
             </p>
         </div>
         <div class="page-actions">
-            <a href="{% url 'admin:execution_signal_changelist' %}" class="btn btn-outline">
-                <i class="fas fa-wave-square"></i>
-                <span>{% trans "Signals" %}</span>
-            </a>
-            <a href="{% url 'admin:execution_decision_changelist' %}" class="btn btn-outline">
-                <i class="fas fa-brain"></i>
-                <span>{% trans "Decisions" %}</span>
-            </a>
             <a href="{% url 'admin:execution_tradelog_changelist' %}" class="btn btn-outline">
                 <i class="fas fa-table"></i>
                 <span>{% trans "Open in Admin" %}</span>
@@ -238,86 +230,65 @@
     <div class="table-container">
         <table class="modern-table">
             <thead>
-                <tr data-timestamp="{{ log.created_at|date:'c' }}">
-                    <th>{% trans "Time" %}</th>
-                    <th>{% trans "Order" %}</th>
-                    <th>{% trans "Bot / Account" %}</th>
-                    <th>{% trans "Symbol / Side" %}</th>
-                    <th>{% trans "Qty / Price" %}</th>
-                    <th>{% trans "PnL" %}</th>
-                    <th>{% trans "Status" %}</th>
+                <tr>
+                    <th>{% trans "Open Time" %}</th>
+                    <th>{% trans "Position" %}</th>
+                    <th>{% trans "Symbol" %}</th>
+                    <th>{% trans "Type" %}</th>
+                    <th>{% trans "Volume" %}</th>
+                    <th>{% trans "Entry Price" %}</th>
+                    <th>{% trans "S / L" %}</th>
+                    <th>{% trans "T / P" %}</th>
+                    <th>{% trans "Close Time" %}</th>
+                    <th>{% trans "Close Price" %}</th>
+                    <th>{% trans "Profit" %}</th>
                     <th>{% trans "Actions" %}</th>
                 </tr>
             </thead>
             <tbody>
                 {% for log in logs %}
-                <tr>
-                    <td>{{ log.created_at|date:"M d, Y H:i" }}</td>
+                <tr data-timestamp="{{ log.closed_at|default:log.created_at|date:'c' }}">
+                    <td>{{ log.order.created_at|date:"Y.m.d H:i:s" }}</td>
+                    <td>{{ log.order.id }}</td>
+                    <td>{{ log.symbol }}</td>
+                    <td>{{ log.side|upper }}</td>
+                    <td>{{ log.qty }}</td>
                     <td>
-                        <div style="font-weight:600;">
-                            {% if log.order.client_order_id %}
-                                {{ log.order.client_order_id }}
-                            {% else %}
-                                #{{ log.order.id }}
-                            {% endif %}
-                        </div>
-                        <div style="font-size:var(--text-xs);color:var(--gray-400);">
-                            {% trans "Order ID" %}: {{ log.order.id }}
-                        </div>
+                        {% if log.price %}
+                            {{ log.price|format_currency }}
+                        {% elif log.order.price %}
+                            {{ log.order.price|format_currency }}
+                        {% else %}
+                            -
+                        {% endif %}
                     </td>
                     <td>
-                        <div style="font-size:var(--text-sm);">
-                            {% if log.bot %}
-                                <i class="fas fa-robot" style="margin-right:4px;font-size:10px;"></i>
-                                {{ log.bot.name }}
-                            {% else %}
-                                <span style="color:var(--gray-500);">
-                                    {% trans "No bot linked" %}
-                                </span>
-                            {% endif %}
-                        </div>
-                        <div style="font-size:var(--text-xs);color:var(--gray-400);margin-top:2px;">
-                            {% if log.broker_account %}
-                                <span class="pill pill-account">
-                                    <i class="fas fa-building-columns"></i>
-                                    {{ log.broker_account.name }}
-                                    {% if log.broker_account.login %}
-                                        · {{ log.broker_account.login }}
-                                    {% endif %}
-                                </span>
-                            {% else %}
-                                {% trans "Account not recorded" %}
-                            {% endif %}
-                        </div>
+                        {% if log.order.sl %}
+                            {{ log.order.sl|format_currency }}
+                        {% else %}
+                            -
+                        {% endif %}
                     </td>
                     <td>
-                        <div>
-                            <span class="pill pill-symbol">
-                                <i class="fas fa-coins"></i>
-                                {{ log.symbol }}
-                            </span>
-                        </div>
-                        <div style="margin-top:4px;">
-                            {% if log.side == "buy" %}
-                                <span class="pill pill-side-long">
-                                    <i class="fas fa-circle-up"></i>
-                                    {% trans "BUY" %}
-                                </span>
-                            {% else %}
-                                <span class="pill pill-side-short">
-                                    <i class="fas fa-circle-down"></i>
-                                    {% trans "SELL" %}
-                                </span>
-                            {% endif %}
-                        </div>
+                        {% if log.order.tp %}
+                            {{ log.order.tp|format_currency }}
+                        {% else %}
+                            -
+                        {% endif %}
                     </td>
                     <td>
-                        <div style="font-size:var(--text-sm);color:var(--gray-200);">
-                            {% trans "Qty" %}: {{ log.qty }}
-                        </div>
-                        <div style="font-size:var(--text-xs);color:var(--gray-400);">
-                            {% trans "Price" %}: {{ log.price|default:"-"|format_currency }}
-                        </div>
+                        {% if log.closed_at %}
+                            {{ log.closed_at|date:"Y.m.d H:i:s" }}
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if log.exit_price %}
+                            {{ log.exit_price|format_currency }}
+                        {% else %}
+                            -
+                        {% endif %}
                     </td>
                     <td>
                         {% if log.pnl %}
@@ -345,29 +316,6 @@
                         {% endif %}
                     </td>
                     <td>
-                        <span class="status-badge status-{{ log.status|default:'new' }}">
-                            {% if log.status == "win" %}
-                                <i class="fas fa-trophy"></i>
-                                {% trans "Win" %}
-                            {% elif log.status == "loss" %}
-                                <i class="fas fa-face-frown"></i>
-                                {% trans "Loss" %}
-                            {% elif log.status == "breakeven" %}
-                                <i class="fas fa-scale-unbalanced-flip"></i>
-                                {% trans "Breakeven" %}
-                            {% elif log.status == "error" %}
-                                <i class="fas fa-triangle-exclamation"></i>
-                                {% trans "Order Error (no fill)" %}
-                            {% elif log.status == "new" %}
-                                <i class="fas fa-circle-notch"></i>
-                                {% trans "Pending outcome" %}
-                            {% else %}
-                                <i class="fas fa-circle"></i>
-                                {{ log.status }}
-                            {% endif %}
-                        </span>
-                    </td>
-                    <td>
                         <div class="action-buttons">
                             <a href="{% url 'admin:execution_tradelog_change' log.pk %}"
                                class="action-btn inspect"
@@ -384,7 +332,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="8" style="text-align:center;color:var(--gray-400);padding:var(--space-lg);">
+                    <td colspan="12" style="text-align:center;color:var(--gray-400);padding:var(--space-lg);">
                         <i class="fas fa-inbox" style="font-size:var(--text-2xl);margin-bottom:var(--space-sm);display:block;"></i>
                         {% trans "No trade logs found." %}
                     </td>

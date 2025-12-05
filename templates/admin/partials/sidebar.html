@@ -16,23 +16,10 @@
         </div>
 
     <div class="nav-section">
-        <div class="nav-title">Trades</div>
-        <ul class="nav-links">
-            <li><a href="{% url 'admin:execution_signal_changelist' %}" class="nav-link {% if 'signal' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-bullseye"></i> Signals</a></li>
-            <li><a href="{% url 'admin:execution_decision_changelist' %}" class="nav-link {% if 'decision' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-play-circle"></i> Decisions</a></li>
-            <li><a href="{% url 'admin:execution_order_changelist' %}" class="nav-link {% if 'order' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-shopping-cart"></i> Orders</a></li>
-            <li><a href="{% url 'admin:execution_position_changelist' %}" class="nav-link {% if 'position' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-chart-line"></i> Positions</a></li>
-            <li><a href="{% url 'admin:execution_execution_changelist' %}" class="nav-link {% if 'execution_execution_' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-bolt"></i> Executions</a></li>
-            <li><a href="#" class="nav-link"><i class="fas fa-clipboard-list"></i> Audits</a></li>
-        </ul>
-    </div>
-
-    <div class="nav-section">
         <div class="nav-title">Log</div>
         <ul class="nav-links">
-            <li><a href="{% url 'admin:core_celeryactivity_changelist' %}" class="nav-link"><i class="fas fa-tasks"></i> Celery</a></li>
-            <li><a href="{% url 'admin:execution_tradelog_changelist' %}" class="nav-link"><i class="fas fa-history"></i> Trade History</a></li>
-            <li><a href="{% url 'admin:execution_tradelog_backtest' %}" class="nav-link"><i class="fas fa-database"></i> Backtest Data</a></li>
+            <li><a href="{% url 'admin:execution_journalentry_changelist' %}" class="nav-link {% if 'journalentry' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-book"></i> Journal</a></li>
+            <li><a href="{% url 'admin:execution_tradelog_changelist' %}" class="nav-link {% if 'tradelog' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-history"></i> Trade History</a></li>
         </ul>
     </div>
 
