@@ -135,8 +135,7 @@ def record_fill(
             tl.status = "loss"
         else:
             tl.status = "breakeven"
-        close_exec = execs[-1] if execs else None
-        close_time = getattr(close_exec, "exec_time", None) or timezone.now()
+        close_time = getattr(exe, "exec_time", None) or timezone.now()
         tl.closed_at = close_time
         tl.exit_price = Decimal(str(price))
         tl.save(update_fields=["pnl", "status", "closed_at", "exit_price"])

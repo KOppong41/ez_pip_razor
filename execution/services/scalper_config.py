@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from decimal import Decimal
@@ -157,6 +158,66 @@ class PsychologyProfile:
 class FlipSettings:
     min_score: Decimal
     cooldown_minutes: int
+
+
+FALLBACK_SYMBOL_PRESETS = {
+    "commodities": {
+        "execution_timeframes": ["M1"],
+        "context_timeframes": ["M15", "H1"],
+        "sl_points": {"min": 50, "max": 150},
+        "tp_r_multiple": 1.2,
+        "be_trigger_r": 1.0,
+        "be_buffer_r": 0.2,
+        "trail_trigger_r": 1.5,
+        "trail_mode": "swing",
+        "max_spread_points": 30,
+        "max_slippage_points": 10,
+        "allow_countertrend": False,
+        "risk_pct": 0.5,
+    },
+    "forex": {
+        "execution_timeframes": ["M1", "M5"],
+        "context_timeframes": ["M15", "H1"],
+        "sl_points": {"min": 5, "max": 8},
+        "tp_r_multiple": 1.2,
+        "be_trigger_r": 1.0,
+        "be_buffer_r": 0.2,
+        "trail_trigger_r": 1.5,
+        "trail_mode": "ema",
+        "max_spread_points": 15,
+        "max_slippage_points": 5,
+        "allow_countertrend": False,
+        "risk_pct": 0.5,
+    },
+    "indices": {
+        "execution_timeframes": ["M1", "M5"],
+        "context_timeframes": ["M15", "H1"],
+        "sl_points": {"min": 15, "max": 40},
+        "tp_r_multiple": 1.2,
+        "be_trigger_r": 1.0,
+        "be_buffer_r": 0.2,
+        "trail_trigger_r": 1.6,
+        "trail_mode": "structure",
+        "max_spread_points": 25,
+        "max_slippage_points": 10,
+        "allow_countertrend": False,
+        "risk_pct": 0.4,
+    },
+    "crypto": {
+        "execution_timeframes": ["M1"],
+        "context_timeframes": ["M5", "M15", "H1"],
+        "sl_points": {"min": 200, "max": 600},
+        "tp_r_multiple": 1.3,
+        "be_trigger_r": 1.0,
+        "be_buffer_r": 0.25,
+        "trail_trigger_r": 1.8,
+        "trail_mode": "structure",
+        "max_spread_points": 120,
+        "max_slippage_points": 60,
+        "allow_countertrend": False,
+        "risk_pct": 0.35,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -373,6 +434,44 @@ def _build_countertrend(raw: dict | None) -> CountertrendRule:
     )
 
 
+def _ensure_bot_asset_symbol(base: dict, bot: Bot) -> None:
+    """
+    If the scalper config does not already contain the bot's asset symbol (or one of its aliases),
+    inject a fallback configuration derived from the asset metadata so custom symbols can trade.
+    """
+    asset = getattr(bot, "asset", None)
+    if not asset or not asset.symbol:
+        return
+
+    symbol_key = asset.symbol.upper()
+    symbols = base.setdefault("symbols", {})
+
+    # Avoid duplicates if symbol already defined or referenced as an alias.
+    for key, cfg in symbols.items():
+        alias_set = {key.upper()}
+        alias_set.update(str(a).upper() for a in cfg.get("aliases", []) if a)
+        if symbol_key in alias_set:
+            return
+
+    preset_key = getattr(asset, "category", None) or "forex"
+    template = deepcopy(FALLBACK_SYMBOL_PRESETS.get(preset_key, FALLBACK_SYMBOL_PRESETS["forex"]))
+    alias_values = set(str(a).upper() for a in template.get("aliases", []) if a)
+    alias_values.add(symbol_key)
+    if symbol_key.endswith("M"):
+        alias_values.add(symbol_key[:-1])
+    template["aliases"] = sorted(alias_values)
+
+    max_spread = getattr(asset, "max_spread", None)
+    try:
+        spread_val = Decimal(str(max_spread))
+    except Exception:
+        spread_val = Decimal("0")
+    if spread_val and spread_val > 0:
+        template["max_spread_points"] = float(spread_val)
+
+    symbols[symbol_key] = template
+
+
 def build_scalper_config(bot: Bot | None) -> ScalperConfig:
     """
     Compose the effective scalper config for a bot by layering defaults, profile data, and per-bot overrides.
@@ -403,6 +502,7 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
                 {"start": "05:00", "end": "12:00", "label": "asia_eu"},
                 {"start": "12:00", "end": "21:00", "label": "us"},
             ]
+        _ensure_bot_asset_symbol(base, bot)
 
     symbols, alias_map = _build_symbol_configs(base.get("symbols", {}))
     sessions = _build_sessions(base.get("sessions"))

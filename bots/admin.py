@@ -18,6 +18,7 @@ from django.utils.safestring import mark_safe
 from .models import Asset, Bot, STRATEGY_CHOICES, STANDARD_TIMEFRAMES, DEFAULT_TRADING_DAYS, CATEGORY_CHOICES, STRATEGY_GUIDES
 from brokers.models import Broker
 from execution.services.psychology import get_size_multiplier
+from execution.services.scalper_config import build_scalper_config
 from execution.models import default_scalper_profile_config, Position, ScalperRunLog, TradeLog
 from django.db.models import Sum
 from django.utils import timezone
@@ -708,6 +709,14 @@ class BotAdmin(admin.ModelAdmin):
             raise PermissionDenied("Only Admins may create or modify bots.")
         if not obj.owner:
             obj.owner = request.user
+        # If no strategies were provided, seed sane defaults so the engine can run.
+        if not obj.enabled_strategies:
+            try:
+                cfg = build_scalper_config(obj)
+                profile = cfg.strategy_profiles.get(cfg.default_strategy_profile)
+                obj.enabled_strategies = list(profile.enabled_strategies) if profile else list(STRATEGY_CHOICES)
+            except Exception:
+                obj.enabled_strategies = list(STRATEGY_CHOICES)
         if obj.engine_mode == "scalper":
             self._apply_scalper_presets(obj, form.cleaned_data)
         super().save_model(request, obj, form, change)

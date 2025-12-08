@@ -57,7 +57,12 @@ def log_journal_event(
     ) or ""
 
     derived_bot = bot or getattr(order, "bot", None) or getattr(signal, "bot", None)
-    derived_broker = broker_account or getattr(order, "broker_account", None) or getattr(position, "broker_account", None)
+    derived_broker = (
+        broker_account
+        or getattr(order, "broker_account", None)
+        or getattr(position, "broker_account", None)
+        or (getattr(derived_bot, "broker_account", None) if derived_bot else None)
+    )
 
     derived_owner = (
         owner

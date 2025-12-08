@@ -429,19 +429,49 @@ class MT5Connector(BaseConnector):
         # 2) Move out of 'new' – we have submitted to broker
         update_order_status(order, "ack")
 
-        # Enforce broker min lot if available from bot.asset to avoid invalid volume errors.
+        # Enforce broker min lot using both asset config and MT5 symbol metadata to avoid invalid volume errors.
         try:
             asset_min = None
             if order.bot and getattr(order.bot, "asset", None):
                 asset_min = Decimal(str(order.bot.asset.min_qty))
-            if asset_min is not None and qty_dec < asset_min:
-                msg = f"Order {order.id} rejected: qty {order.qty} below broker minimum {asset_min}"
+
+            mt5_min = None
+            volume_step = None
+            try:
+                sinfo = mt5.symbol_info(order.symbol)
+                if sinfo:
+                    raw_min = getattr(sinfo, "volume_min", None)
+                    raw_step = getattr(sinfo, "volume_step", None)
+                    if raw_min is not None:
+                        mt5_min = Decimal(str(raw_min))
+                    if raw_step is not None:
+                        volume_step = Decimal(str(raw_step))
+            except Exception:
+                mt5_min = None
+                volume_step = None
+
+            effective_min = asset_min
+            if mt5_min is not None:
+                effective_min = mt5_min if effective_min is None else max(effective_min, mt5_min)
+
+            if effective_min is not None and qty_dec < effective_min:
+                msg = (
+                    f"Order {order.id} rejected: qty {order.qty} below broker minimum {effective_min} "
+                    f"(volume_min)"
+                )
                 update_order_status(order, "error", error_msg=msg)
                 raise ConnectorError(msg)
+
+            if volume_step is not None and volume_step > 0:
+                remainder = qty_dec % volume_step
+                if remainder != 0:
+                    msg = f"Order {order.id} rejected: qty {order.qty} not aligned to volume_step {volume_step}"
+                    update_order_status(order, "error", error_msg=msg)
+                    raise ConnectorError(msg)
         except ConnectorError:
             raise
         except Exception:
-            # If anything goes wrong reading asset, fall through and let broker validate.
+            # If anything goes wrong reading asset or symbol info, fall through and let broker validate.
             pass
 
         # Fetch tick for spread/notional checks
@@ -475,6 +505,17 @@ class MT5Connector(BaseConnector):
             update_order_status(order, "error", error_msg=msg)
             raise ConnectorError(msg)
 
+        # Identify asset + basic classification (used for contract size handling)
+        asset = getattr(order.bot, "asset", None) if order.bot else None
+        is_crypto = False
+        try:
+            sym_upper = (order.symbol or "").upper()
+            is_crypto = (getattr(asset, "category", "") == "crypto") or any(
+                key in sym_upper for key in ("BTC", "ETH", "SOL", "XRP", "LTC")
+            )
+        except Exception:
+            is_crypto = False
+
         # MT5 prices are per-unit; scale by contract size so notional checks use real exposure (e.g., 0.10 lot EURUSD = 10000 units).
         default_contract = runtime_cfg.mt5_default_contract_size
         contract_size = Decimal(str(default_contract))
@@ -487,16 +528,19 @@ class MT5Connector(BaseConnector):
                 if cs_val <= 0:
                     contract_size = Decimal(str(default_contract))
                 elif cs_val < Decimal("10") and default_contract > 10:
-                    contract_size = Decimal(str(default_contract))
+                    # Crypto symbols often have tiny contract sizes; keep the broker value to avoid inflating notional.
+                    contract_size = cs_val if is_crypto else Decimal(str(default_contract))
                 else:
                     contract_size = cs_val
+            elif is_crypto:
+                # If MT5 omits contract size for crypto, assume 1 to avoid over-scaling notional checks.
+                contract_size = Decimal("1")
         except Exception:
             # best-effort only; fall back to default if symbol info is unavailable
-            contract_size = Decimal(str(default_contract))
+            contract_size = Decimal("1") if is_crypto else Decimal(str(default_contract))
 
         spread = ask - bid
         # Asset-based guards
-        asset = getattr(order.bot, "asset", None) if order.bot else None
         asset_min_qty = Decimal(str(asset.min_qty)) if asset else Decimal("0")
         asset_max_spread = Decimal(str(asset.max_spread)) if asset else Decimal("0")
         # Allow close orders to proceed even if spread is wide to avoid being trapped.
