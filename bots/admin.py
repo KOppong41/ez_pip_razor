@@ -17,6 +17,7 @@ from django.utils.safestring import mark_safe
 
 from .models import Asset, Bot, STRATEGY_CHOICES, STANDARD_TIMEFRAMES, DEFAULT_TRADING_DAYS, CATEGORY_CHOICES, STRATEGY_GUIDES
 from brokers.models import Broker
+from execution.models import TradeLog
 from execution.services.psychology import get_size_multiplier
 from execution.services.scalper_config import build_scalper_config
 from execution.models import default_scalper_profile_config, Position, ScalperRunLog, TradeLog
@@ -615,12 +616,55 @@ class BotAdmin(admin.ModelAdmin):
             .order_by("-created_at")[:10]
         )
 
+        lifetime_pnl = (
+            TradeLog.objects.filter(bot=bot)
+            .exclude(pnl__isnull=True)
+            .aggregate(total=Sum("pnl"))
+            .get("total")
+            or Decimal("0")
+        )
+
+        allocation_amount = Decimal(str(getattr(bot, "allocation_amount", Decimal("0")) or 0))
+        profit_pct = Decimal(str(getattr(bot, "allocation_profit_pct", Decimal("0")) or 0))
+        loss_pct = Decimal(str(getattr(bot, "allocation_loss_pct", Decimal("100")) or 100))
+        profit_target = None
+        loss_limit = None
+        if allocation_amount > 0 and profit_pct > 0:
+            profit_target = (allocation_amount * profit_pct) / Decimal("100")
+        if allocation_amount > 0:
+            if loss_pct > 0:
+                loss_limit = (allocation_amount * loss_pct) / Decimal("100")
+            else:
+                loss_limit = allocation_amount
+
+        allocation_baseline = getattr(bot, "allocation_start_pnl", Decimal("0"))
+        allocation_relative = lifetime_pnl - allocation_baseline
+
+        allocation_status = "Disabled"
+        if allocation_amount > 0:
+            allocation_status = "Active"
+            if profit_target and allocation_relative >= profit_target:
+                allocation_status = "Profit target hit"
+            elif loss_limit and allocation_relative <= -loss_limit:
+                allocation_status = "Loss limit hit"
+
         diagnostics = {
             "pnl_today": pnl_today,
             "size_multiplier": size_mult,
             "loss_streak": getattr(bot, "current_loss_streak", 0),
             "paused_until": getattr(bot, "paused_until", None),
             "db_open_positions": db_open_count,
+            "allocation": {
+                "amount": allocation_amount,
+                "profit_pct": profit_pct,
+                "loss_pct": loss_pct,
+                "profit_target": profit_target,
+                "loss_limit": loss_limit,
+                "pnl_relative": allocation_relative,
+                "lifetime_pnl": lifetime_pnl,
+                "status": allocation_status,
+                "started_at": getattr(bot, "allocation_started_at", None),
+            },
         }
 
         context = {
@@ -750,6 +794,23 @@ class BotAdmin(admin.ModelAdmin):
                 obj.enabled_strategies = list(profile.enabled_strategies) if profile else list(STRATEGY_CHOICES)
             except Exception:
                 obj.enabled_strategies = list(STRATEGY_CHOICES)
+        allocation_amount = Decimal(str(obj.allocation_amount or 0))
+        allocation_changed = (not change and allocation_amount > 0) or ("allocation_amount" in form.changed_data if form else False)
+        if allocation_changed:
+            lifetime = (
+                TradeLog.objects.filter(bot=obj)
+                .exclude(pnl__isnull=True)
+                .aggregate(total=Sum("pnl"))
+                .get("total")
+                or Decimal("0")
+            )
+            if allocation_amount > 0:
+                obj.allocation_start_pnl = lifetime
+                obj.allocation_started_at = timezone.now()
+            else:
+                obj.allocation_start_pnl = Decimal("0")
+                obj.allocation_started_at = None
+
         if obj.engine_mode == "scalper":
             self._apply_scalper_presets(obj, form.cleaned_data)
         super().save_model(request, obj, form, change)

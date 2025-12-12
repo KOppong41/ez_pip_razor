@@ -400,6 +400,68 @@
             </div>
         </div>
         
+        {% with allocation=diagnostics.allocation %}
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{% trans 'Allocation & Limits' %}</h3>
+            </div>
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-value">
+                        {% if allocation.amount and allocation.amount > 0 %}
+                            {{ allocation.amount|floatformat:2 }}
+                        {% else %}
+                            {% trans "Disabled" %}
+                        {% endif %}
+                    </div>
+                    <div class="metric-label">{% trans 'Allocation Amount' %}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">
+                        {% if allocation.profit_target %}
+                            {{ allocation.profit_target|floatformat:2 }} ({{ allocation.profit_pct }}%)
+                        {% else %}
+                            {% trans "No target" %}
+                        {% endif %}
+                    </div>
+                    <div class="metric-label">{% trans 'Profit Target' %}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">
+                        {% if allocation.loss_limit %}
+                            {{ allocation.loss_limit|floatformat:2 }}{% if allocation.loss_pct %} ({{ allocation.loss_pct }}%){% endif %}
+                        {% else %}
+                            {% trans "No limit" %}
+                        {% endif %}
+                    </div>
+                    <div class="metric-label">{% trans 'Loss Limit' %}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value {% if allocation.pnl_relative > 0 %}positive{% elif allocation.pnl_relative < 0 %}negative{% endif %}">
+                        {{ allocation.pnl_relative|floatformat:2 }}
+                    </div>
+                    <div class="metric-label">{% trans 'Realized PnL (current allocation)' %}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">
+                        {{ allocation.status }}
+                    </div>
+                    <div class="metric-label">{% trans 'Allocation Status' %}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">
+                        {% if allocation.started_at %}
+                            {{ allocation.started_at|date:"Y-m-d H:i" }}
+                        {% else %}
+                            {% trans "Not started" %}
+                        {% endif %}
+                    </div>
+                    <div class="metric-label">{% trans 'Allocation Started' %}</div>
+                </div>
+            </div>
+        </div>
+        {% endwith %}
+
         <!-- Risk Settings -->
         <div class="card">
             <div class="card-header">

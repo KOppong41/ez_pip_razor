@@ -291,7 +291,7 @@
                         {% endif %}
                     </td>
                     <td>
-                        {% if log.pnl %}
+                        {% if log.pnl is not None %}
                             {% if log.pnl > 0 %}
                                 <span class="pnl-chip pnl-positive">
                                     <i class="fas fa-arrow-trend-up"></i>

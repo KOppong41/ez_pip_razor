@@ -473,6 +473,17 @@ class Bot(models.Model):
             "Defaults to 100%% (stop once the entire allocation is lost). Set to 0 to disable."
         ),
     )
+    allocation_start_pnl = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        default=Decimal("0.0"),
+        help_text="Internal baseline for realized PnL when the allocation was last reset.",
+    )
+    allocation_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the current allocation baseline was set.",
+    )
 
     trading_profile = models.CharField(
         max_length=64,

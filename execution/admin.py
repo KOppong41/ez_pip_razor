@@ -12,7 +12,6 @@ from .models import (
     Position,
     TradeLog,
     ExecutionSetting,
-    TradingProfile,
     JournalEntry,
 )
 
@@ -355,22 +354,3 @@ class ExecutionSettingAdmin(admin.ModelAdmin):
         })
         return super().changelist_view(request, extra_context=extra_context)
 
-
-@admin.register(TradingProfile)
-class TradingProfileAdmin(admin.ModelAdmin):
-    
-    change_list_template = "admin/executions/trading_types.html"
-    change_form_template = "admin/executions/trading_type_change_form.html"
-    
-    list_display = (
-        "slug",
-        "name",
-        "risk_per_trade_pct",
-        "max_trades_per_day",
-        "max_concurrent_positions",
-        "max_drawdown_pct",
-        "is_default",
-        "updated_at",
-    )
-    readonly_fields = ("updated_at",)
-    list_editable = ("is_default",)

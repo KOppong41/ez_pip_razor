@@ -68,7 +68,7 @@ python manage.py setup_scalper_bot \
 - ✅ engine_mode="scalper" (triggers M1 scanning)
 - ✅ default_timeframe="1m"
 - ✅ enabled_strategies (4 high-confidence price-action methods)
-- ✅ Aggressive but safe risk config (2 concurrent, 1 per symbol, kill-switch on)
+- ✅ Aggressive but safe risk config (2 concurrent, kill-switch on)
 - ✅ Appropriate qty defaults per asset (0.01 for metals, 0.10 for pairs)
 
 ---
@@ -204,7 +204,7 @@ python manage.py setup_scalper_bot \
 
 1. **Range reversion triggers** – Creates Signal
 2. **Decision pipeline evaluates** – Bot already has 2 open XAUUSDm positions
-3. **Rejected** – Decision action="ignore", reason="risk_max_positions_per_symbol_exceeded"
+3. **Rejected** – Decision action="ignore", reason="max_concurrent_positions"
 4. **No order created** – Audit logged, metrics updated
 5. **Next execution** – Will try again in 45 seconds (markets move, position might close)
 

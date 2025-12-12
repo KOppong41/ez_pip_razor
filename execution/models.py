@@ -456,7 +456,6 @@ def default_scalper_profile_config() -> dict:
             "soft_multiplier": 0.5,
             "hard_multiplier": 0.0,
             "max_concurrent_trades": 5,
-            "max_trades_per_symbol": 5,
             "max_scale_ins_per_symbol": 1,
             "max_symbol_risk_pct": 1.5,
             "kill_switch_exit_minutes": 10,

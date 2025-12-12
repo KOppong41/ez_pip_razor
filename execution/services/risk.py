@@ -10,7 +10,6 @@ from execution.services.scalper_config import ScalperConfig, SymbolConfig
 
 @dataclass
 class RiskConfig:
-    max_positions_per_symbol: int = 1
     max_concurrent_positions: int = 5
     allowed_symbols: tuple = ()
 
@@ -56,9 +55,6 @@ def check_risk(
     if open_positions_total >= cfg.max_concurrent_positions:
         return False, "max_concurrent_positions"
 
-    if open_positions_count_symbol >= cfg.max_positions_per_symbol:
-        return False, "max_positions_per_symbol"
-
     if scalper_ctx:
         return _check_scalper_limits(open_positions_count_symbol, open_positions_total, scalper_ctx)
 
@@ -82,9 +78,6 @@ def _check_scalper_limits(
     if open_positions_total >= risk.max_concurrent_trades:
         return False, "scalper:max_concurrent"
 
-    if open_positions_count_symbol >= risk.max_trades_per_symbol:
-        return False, "scalper:max_symbol_trades"
-
     scale_in_ok = (
         ctx.scale_in_allowed
         or ctx.allow_scale_in_default
@@ -102,9 +95,6 @@ def _check_scalper_limits(
         and open_positions_count_symbol >= config.countertrend.max_positions
     ):
         return False, "scalper:countertrend_cap"
-
-    if ctx.trades_today_symbol >= risk.max_trades_per_symbol:
-        return False, "scalper:daily_symbol_cap"
 
     # Optional daily total cap; disabled when set to 0
     daily_cap = getattr(risk, "max_trades_per_day", 0) or 0

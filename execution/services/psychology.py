@@ -110,6 +110,29 @@ def _get_today_realized_pnl(bot) -> Decimal:
     return agg["total"] or Decimal("0")
 
 
+def _get_lifetime_realized_pnl(bot) -> Decimal:
+    """
+    Total realized PnL for the bot across all historical trades.
+    """
+    if not bot:
+        return Decimal("0")
+    agg = (
+        TradeLog.objects.filter(bot=bot)
+        .exclude(pnl__isnull=True)
+        .aggregate(total=Sum("pnl"))
+    )
+    return agg["total"] or Decimal("0")
+
+
+def _get_allocation_cycle_pnl(bot) -> Decimal:
+    """
+    Realized PnL relative to the start of the current allocation cycle.
+    """
+    lifetime = _get_lifetime_realized_pnl(bot)
+    baseline = Decimal(str(getattr(bot, "allocation_start_pnl", Decimal("0")) or 0))
+    return lifetime - baseline
+
+
 def get_size_multiplier(bot) -> Decimal:
     """
     Compute a size multiplier based on daily drawdown.
@@ -186,17 +209,17 @@ def bot_is_available_for_trading(bot) -> bool:
 
     allocation = Decimal(str(getattr(bot, "allocation_amount", Decimal("0")) or 0))
     if allocation > 0:
-        realized_today = _get_today_realized_pnl(bot)
+        realized_cycle = _get_allocation_cycle_pnl(bot)
         loss_pct = Decimal(str(getattr(bot, "allocation_loss_pct", Decimal("100")) or 0))
         if loss_pct <= 0:
             loss_pct = Decimal("0")
         loss_cap = allocation * loss_pct / Decimal("100") if loss_pct > 0 else allocation
-        if loss_cap > 0 and realized_today <= -loss_cap:
+        if loss_cap > 0 and realized_cycle <= -loss_cap:
             return False
         profit_pct = Decimal(str(getattr(bot, "allocation_profit_pct", Decimal("0")) or 0))
         if profit_pct > 0:
             profit_cap = allocation * profit_pct / Decimal("100")
-            if profit_cap > 0 and realized_today >= profit_cap:
+            if profit_cap > 0 and realized_cycle >= profit_cap:
                 return False
 
     return True

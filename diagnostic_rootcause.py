@@ -68,10 +68,8 @@ if bot.scalper_profile:
     print(f'\nProfile exists: {bot.scalper_profile.name}')
     print(f'Config: {bot.scalper_profile.config}')
     
-    # Check if the profile has daily symbol cap
     config = bot.scalper_profile.config or {}
-    print(f'\nDaily symbol cap: {config.get("daily_symbol_cap")}')
-    print(f'Scale-in allowed: {config.get("allow_scale_in")}')
+    print(f'\nScale-in allowed: {config.get("allow_scale_in")}')
     print(f'Timeframe blocks: {config.get("timeframe_blocks")}')
 else:
     print('\nNO SCALPER PROFILE ASSIGNED!')

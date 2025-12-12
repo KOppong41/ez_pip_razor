@@ -164,7 +164,7 @@ Signal.objects.filter(source="scalper_engine").count()
 | `default_tp_pips` | `5` | Take-profit distance |
 | `decision_min_score` | `0.3` | Minimum signal quality to trade |
 | `risk_max_concurrent_positions` | `2` | Max open trades at once |
-| `risk_max_positions_per_symbol` | `1` | Max stacked trades on same symbol |
+| `max_trades_per_day` | `25` | Daily filled-trade cap per bot |
 | `kill_switch_enabled` | `True` | Auto-close if loss > 2% |
 
 ### Global (in `config/settings.py`)

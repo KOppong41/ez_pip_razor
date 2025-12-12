@@ -21,7 +21,6 @@ This meant scalper_engine signals went through **double-planning**:
 The second pass applied restrictive scalper profile checks:
 - `scalper:timeframe_blocked` – Only certain timeframes allowed (3 blocks)
 - `scalper:scale_in_blocked` – Position stacking rules (2 blocks)
-- `scalper:daily_symbol_cap` – Daily trade limit per symbol (1 block)
 - `existing_position_same_direction` – Can't add to existing position (5 blocks)
 - `existing_position_opposite_blocked` – Can't reverse existing position (1 block)
 

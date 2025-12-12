@@ -106,7 +106,6 @@ class RiskEnvelope:
     soft_multiplier: Decimal
     hard_multiplier: Decimal
     max_concurrent_trades: int
-    max_trades_per_symbol: int
     max_scale_ins_per_symbol: int
     max_symbol_risk_pct: Decimal
     kill_switch_exit_minutes: int
@@ -423,7 +422,6 @@ def _build_risk_envelope(raw: dict | None) -> RiskEnvelope:
         soft_multiplier=Decimal(str(raw.get("soft_multiplier", 0.5))),
         hard_multiplier=Decimal(str(raw.get("hard_multiplier", 0.0))),
         max_concurrent_trades=int(raw.get("max_concurrent_trades", 5)),
-        max_trades_per_symbol=int(raw.get("max_trades_per_symbol", 3)),
         max_scale_ins_per_symbol=int(raw.get("max_scale_ins_per_symbol", 2)),
         max_symbol_risk_pct=Decimal(str(raw.get("max_symbol_risk_pct", 1.5))),
         kill_switch_exit_minutes=int(raw.get("kill_switch_exit_minutes", 10)),

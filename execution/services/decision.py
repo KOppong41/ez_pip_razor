@@ -406,7 +406,9 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
         slippage_points=slippage_points,
         floating_symbol_risk_pct=floating_risk_pct,
         scale_in_allowed=scale_in_allowed,
-        allow_scale_in_default=bool(scalper_cfg.risk and scalper_cfg.risk.max_trades_per_symbol > 1),
+        allow_scale_in_default=bool(
+            scalper_cfg.risk and getattr(scalper_cfg.risk, "max_scale_ins_per_symbol", 0) > 0
+        ),
         countertrend=countertrend,
         payload_snapshot=payload,
         last_flip_at=last_flip_at,
@@ -461,7 +463,6 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             if scalper_cfg and scalper_cfg.risk:
                 allowed = tuple(scalper_cfg.alias_map.keys())
                 cfg = RiskConfig(
-                    max_positions_per_symbol=scalper_cfg.risk.max_trades_per_symbol,
                     max_concurrent_positions=scalper_cfg.risk.max_concurrent_trades,
                     allowed_symbols=allowed,
                 )
@@ -469,7 +470,6 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             else:
                 sym = bot.asset.symbol if bot.asset else None
                 cfg = RiskConfig(
-                    max_positions_per_symbol=None,
                     max_concurrent_positions=(bot.risk_max_concurrent_positions or 5),
                     allowed_symbols=(sym,) if sym else (),
                 )

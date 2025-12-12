@@ -27,7 +27,6 @@
         <div class="nav-title">Admin</div>
         <ul class="nav-links">
             <li><a href="{% url 'admin:auth_user_changelist' %}" class="nav-link {% if 'auth_user' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-users"></i> Users</a></li>
-            <li><a href="{% url 'admin:execution_tradingprofile_changelist' %}" class="nav-link {% if 'tradingprofile' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-layer-group"></i> Trading Profiles</a></li>
             <li><a href="{% url 'admin:execution_executionsetting_changelist' %}" class="nav-link {% if 'executionsetting' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-sliders-h"></i> Execution Settings</a></li>
             <li><a href="{% url 'admin:subscription_subscriptionplan_changelist' %}" class="nav-link {% if 'subscription_subscriptionplan' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-layer-group"></i> Plans</a></li>
             <li><a href="{% url 'admin:subscription_usersubscription_changelist' %}" class="nav-link {% if 'subscription_usersubscription' in request.resolver_match.url_name %}active{% endif %}"><i class="fas fa-id-card-alt"></i> User Subscriptions</a></li>

@@ -24,12 +24,19 @@ class DecisionPipelineTest(TestCase):
         self.assertIn("naive", body["reason"])
         self.assertEqual(Decision.objects.count(), 1)
 
-    def test_decision_ignore_when_symbol_at_capacity(self):
-        # Create an open position for that symbol to trigger risk max_positions_per_symbol=1
-        Position.objects.create(broker_account=self.acct, symbol="EURUSD", qty=1, avg_price=1.0, status="open")
+    def test_decision_ignore_when_total_capacity_reached(self):
+        # Saturate overall concurrent capacity to trigger the max_concurrent_positions guardrail
+        for idx in range(5):
+            Position.objects.create(
+                broker_account=self.acct,
+                symbol=f"SYM{idx}",
+                qty=1,
+                avg_price=1.0,
+                status="open",
+            )
         url = f"/api/signals/{self.sig.id}/decide/"
         r = self.client.post(url)
         self.assertEqual(r.status_code, 201)
         body = r.json()
         self.assertEqual(body["action"], "ignore")
-        self.assertIn("max_positions_per_symbol", body["reason"])
+        self.assertIn("max_concurrent_positions", body["reason"])
