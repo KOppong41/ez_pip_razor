@@ -78,6 +78,23 @@
         font-size: var(--text-xxs);
         margin-right: 4px;
     }
+    .event-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 10px;
+        font-weight: 600;
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+    }
+    .event-trade { background: rgba(16, 185, 129, 0.16); color: #34d399; }
+    .event-order { background: rgba(59, 130, 246, 0.18); color: #60a5fa; }
+    .event-position { background: rgba(168, 85, 247, 0.16); color: #c084fc; }
+    .event-engine { background: rgba(96, 165, 250, 0.12); color: #93c5fd; }
+    .event-risk { background: rgba(239, 68, 68, 0.16); color: #fca5a5; }
+    .event-generic { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; }
 </style>
 {% endblock %}
 
@@ -149,7 +166,8 @@
             </thead>
             <tbody>
                 {% for entry in entries %}
-                <tr data-severity="{{ entry.severity }}" data-event="{{ entry.event_type|slugify }}" data-search="{{ entry.message|lower }} {{ entry.bot.name|default:''|lower }} {{ entry.broker_account.name|default:''|lower }} {{ entry.symbol|lower }}">
+                {% with et_lower=entry.event_type|lower %}
+                <tr data-severity="{{ entry.severity }}" data-event="{{ entry.event_type|slugify }}" data-search="{{ entry.message|lower }} {{ entry.bot.name|default:''|lower }} {{ entry.broker_account.name|default:''|lower }} {{ entry.symbol|lower }} {{ entry.event_type|lower }}">
                     <td style="white-space:nowrap;">
                         {{ entry.created_at|date:"M d, H:i:s" }}
                         <div style="color:var(--gray-400);font-size:var(--text-xxs);">
@@ -162,7 +180,10 @@
                             {{ entry.severity }}
                         </div>
                         <div style="font-weight:600;margin-top:4px;">
-                            {{ entry.event_type }}
+                            <span class="event-chip {% if 'order.' in et_lower %}event-order{% elif 'position.' in et_lower or et_lower == 'position.updated' %}event-position{% elif 'trade' in et_lower or 'fill' in et_lower %}event-trade{% elif 'scalper_engine' in et_lower or 'harami_engine' in et_lower or 'engine' in et_lower %}event-engine{% elif 'kill' in et_lower or 'risk' in et_lower %}event-risk{% else %}event-generic{% endif %}">
+                                <i class="fas {% if 'order.' in et_lower %}fa-diagram-project{% elif 'position.' in et_lower or et_lower == 'position.updated' %}fa-layer-group{% elif 'trade' in et_lower or 'fill' in et_lower %}fa-chart-line{% elif 'scalper_engine' in et_lower or 'harami_engine' in et_lower or 'engine' in et_lower %}fa-gears{% elif 'kill' in et_lower or 'risk' in et_lower %}fa-skull-crossbones{% else %}fa-circle-dot{% endif %}"></i>
+                                {{ entry.event_type }}
+                            </span>
                         </div>
                         <div style="color:var(--gray-400);font-size:var(--text-xs);">
                             {{ entry.symbol|default:"-" }}
@@ -214,6 +235,7 @@
                         </div>
                     </td>
                 </tr>
+                {% endwith %}
                 {% empty %}
                 <tr>
                     <td colspan="5" style="text-align:center;padding:var(--space-lg);color:var(--gray-400);">

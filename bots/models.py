@@ -69,7 +69,7 @@ STRATEGY_GUIDES = {
     },
     "hammer": {
         "label": "Hammer (reversal off support)",
-        "best_for": "Gold and majors after selloffs (XAUUSD, EURUSD)",
+        "best_for": "Metals and majors after selloffs",
         "notes": "Higher win rate when wick rejects a prior demand zone; avoid mid-range entries.",
     },
     "marubozu": {
@@ -79,7 +79,7 @@ STRATEGY_GUIDES = {
     },
     "shooting_star": {
         "label": "Shooting Star (reversal off resistance)",
-        "best_for": "Gold and volatile crosses (XAUUSD, GBPJPY)",
+        "best_for": "Metals and volatile crosses",
         "notes": "Stronger when rejecting a prior supply zone or round number.",
     },
     "three_soldiers": {
@@ -89,17 +89,17 @@ STRATEGY_GUIDES = {
     },
     "sanpe_tonkachi_fvg": {
         "label": "Sanpe Tonkachi FVG (liquidity sweep + imbalance)",
-        "best_for": "FX majors and gold around session opens (EURUSD, XAUUSD)",
+        "best_for": "FX majors and metals around session opens",
         "notes": "Look for liquidity grab into a fair value gap before entry.",
     },
     "sansen_sutsumi_liquidity": {
         "label": "Sansen Sutsumi Liquidity (three-candle SMC)",
-        "best_for": "FX majors and metals (EURUSD, XAUUSD)",
+        "best_for": "FX majors and metals",
         "notes": "Combine with session timing and nearby equal highs/lows.",
     },
     "price_action_pinbar": {
         "label": "Price Action Pin Bar (wick rejection)",
-        "best_for": "Majors and commodities at swing highs/lows (EURUSD, XAUUSD)",
+        "best_for": "Majors and commodities at swing highs/lows",
         "notes": "Confluence with key levels and trend direction improves reliability.",
     },
     "doji_breakout": {
@@ -114,7 +114,7 @@ STRATEGY_GUIDES = {
     },
     "breakout_retest": {
         "label": "Breakout + Retest",
-        "best_for": "Liquid FX and gold on 5m–1h (EURUSD, XAUUSD)",
+        "best_for": "Liquid FX and metals on 5m–1h",
         "notes": "Trade range break then retest; require clean base and avoid high spread conditions.",
     },
     "range_reversion": {
@@ -327,6 +327,11 @@ class Bot(models.Model):
             "If enabled, decisions with action='open' will send live orders to MT5. "
             "If disabled, the bot only creates signals/decisions (paper mode)."
         ),
+    )
+
+    ai_trade_enabled = models.BooleanField(
+        default=False,
+        help_text="If enabled, ignore manual strategy selection and let the AI selector choose strategies per market conditions.",
     )
 
     broker_account = models.ForeignKey(
@@ -558,13 +563,14 @@ class Bot(models.Model):
         if not owner and not getattr(settings, "TESTING", False):
             raise ValidationError("Owner is required for bots.")
 
-        # Validate strategies are from the known registry
-        if not self.enabled_strategies:
-            raise ValidationError({"enabled_strategies": "Select at least one strategy for this bot."})
+        # Validate strategies are from the known registry unless AI Trade is handling selection.
+        if not self.ai_trade_enabled:
+            if not self.enabled_strategies:
+                raise ValidationError({"enabled_strategies": "Select at least one strategy for this bot."})
 
-        invalid = [s for s in self.enabled_strategies if s not in STRATEGY_CHOICES]
-        if invalid:
-            raise ValidationError({"enabled_strategies": f"Unknown strategies: {', '.join(invalid)}"})
+            invalid = [s for s in self.enabled_strategies if s not in STRATEGY_CHOICES]
+            if invalid:
+                raise ValidationError({"enabled_strategies": f"Unknown strategies: {', '.join(invalid)}"})
 
         # Decision score guardrail
         try:

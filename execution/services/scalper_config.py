@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from bots.models import Bot
 from execution.models import ScalperProfile, default_scalper_profile_config
+from execution.utils.symbols import canonical_symbol
 
 
 def _deep_merge(base: dict, override: dict | None) -> dict:
@@ -247,9 +248,9 @@ class ScalperConfig:
     def resolve_symbol(self, symbol: str) -> SymbolConfig | None:
         if not symbol:
             return None
-        key = symbol.upper()
-        canon = self.alias_map.get(key, key)
-        return self.symbols.get(canon)
+        canon = canonical_symbol(symbol)
+        key = self.alias_map.get(canon, canon)
+        return self.symbols.get(key)
 
     def is_session_open(self, moment: datetime | None = None) -> bool:
         moment = moment or timezone.now()
@@ -268,8 +269,11 @@ def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], D
     configs: Dict[str, SymbolConfig] = {}
     alias_map: Dict[str, str] = {}
     for symbol, settings in (raw_symbols or {}).items():
-        key = symbol.upper()
-        aliases = tuple(a.upper() for a in settings.get("aliases", []))
+        key = canonical_symbol(symbol)
+        primary_aliases = {symbol.upper()}
+        primary_aliases.update(a.upper() for a in settings.get("aliases", []) if a)
+        primary_aliases.discard(key)
+        aliases = tuple(sorted(primary_aliases))
         cfg = SymbolConfig(
             key=key,
             aliases=aliases,
@@ -289,8 +293,11 @@ def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], D
         )
         configs[key] = cfg
         alias_map[key] = key
+        alias_map[symbol.upper()] = key
+        alias_map[canonical_symbol(symbol)] = key
         for alias in aliases:
             alias_map[alias] = key
+            alias_map[canonical_symbol(alias)] = key
     return configs, alias_map
 
 
@@ -443,22 +450,25 @@ def _ensure_bot_asset_symbol(base: dict, bot: Bot) -> None:
     if not asset or not asset.symbol:
         return
 
-    symbol_key = asset.symbol.upper()
+    raw_symbol = asset.symbol.upper()
+    symbol_key = canonical_symbol(raw_symbol)
+    if not symbol_key:
+        return
     symbols = base.setdefault("symbols", {})
 
     # Avoid duplicates if symbol already defined or referenced as an alias.
     for key, cfg in symbols.items():
-        alias_set = {key.upper()}
-        alias_set.update(str(a).upper() for a in cfg.get("aliases", []) if a)
+        alias_set = {canonical_symbol(key)}
+        alias_set.update(canonical_symbol(str(a).upper()) for a in cfg.get("aliases", []) if a)
         if symbol_key in alias_set:
             return
 
     preset_key = getattr(asset, "category", None) or "forex"
     template = deepcopy(FALLBACK_SYMBOL_PRESETS.get(preset_key, FALLBACK_SYMBOL_PRESETS["forex"]))
     alias_values = set(str(a).upper() for a in template.get("aliases", []) if a)
-    alias_values.add(symbol_key)
-    if symbol_key.endswith("M"):
-        alias_values.add(symbol_key[:-1])
+    alias_values.update({raw_symbol, symbol_key})
+    if raw_symbol.endswith("M"):
+        alias_values.add(raw_symbol[:-1])
     template["aliases"] = sorted(alias_values)
 
     max_spread = getattr(asset, "max_spread", None)

@@ -10,12 +10,14 @@ from celery import shared_task
 from django.utils import timezone
 
 from brokers.models import BrokerAccount
+from bots.models import STRATEGY_CHOICES
 from core.metrics import task_failures_total
 from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector, is_mt5_available, mt5
 from execution.models import Decision, Order, PnLDaily, Position, ScalperRunLog, Signal
 from execution.services.brokers import dispatch_place_order
 from execution.services.decision import make_decision_from_signal
+from execution.services.ai_strategy_selector import select_ai_strategies
 from execution.services.engine import run_engine_on_candles
 from execution.services.fanout import fanout_orders
 from execution.services.marketdata import get_candles_for_account, _login_mt5_for_account
@@ -35,6 +37,7 @@ from execution.services.psychology import bot_is_available_for_trading
 from execution.services.scalper_config import build_scalper_config
 from execution.services.runtime_config import get_runtime_config
 from execution.services.journal import log_journal_event
+from execution.services.orchestrator import update_order_status
 from execution.services.strategies.breakout_retest import (
     BreakoutRetestConfig,
     run_breakout_retest,
@@ -48,6 +51,7 @@ from execution.services.strategies.momentum_ignition import (
 from execution.services.strategies.price_action_pinbar import PinBarConfig, run_price_action_pinbar
 from execution.services.strategies.range_reversion import RangeReversionConfig, run_range_reversion
 from execution.services.strategies.trend_pullback import TrendPullbackConfig, run_trend_pullback
+from execution.utils.symbols import canonical_symbol
 
 
 HTF_MAP = {
@@ -62,6 +66,21 @@ def _get_htf(timeframe: str) -> str | None:
 
 
 logger = logging.getLogger(__name__)
+
+def _json_safe(val):
+    """
+    Recursively convert values into JSON-serializable forms (e.g., datetime -> iso string,
+    Decimal -> string).
+    """
+    if isinstance(val, (list, tuple)):
+        return [_json_safe(v) for v in val]
+    if isinstance(val, dict):
+        return {k: _json_safe(v) for k, v in val.items()}
+    if isinstance(val, datetime):
+        return val.isoformat()
+    if isinstance(val, Decimal):
+        return str(val)
+    return val
 
 SESSION_WINDOWS = (
     ("asia", 0, 6),
@@ -508,6 +527,7 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
     if not symbol:
         logger.info("[EngineTrade] bot=%s has no asset configured, skipping", bot.id)
         return {"status": "skipped", "reason": "no_symbol"}
+    canonical_sym = canonical_symbol(symbol)
     if not bot.accepts(symbol, timeframe):
         logger.info(
             "[EngineTrade] bot=%s does not accept symbol=%s tf=%s, skipping",
@@ -566,8 +586,25 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
             )
             htf_candles = None
 
-    # 2) Build engine context + run engine (requires explicit strategy opt-in)
-    allowed = bot.enabled_strategies or []
+    htf_bias = _compute_bias_from_htf(htf_candles) if htf_candles else None
+
+    # 2) Build engine context + run engine (requires explicit strategy opt-in unless AI Trade is enabled)
+    if getattr(bot, "ai_trade_enabled", False):
+        last_entry = entry_candles[-1]
+        atr_points = _atr_like(entry_candles, period=14)
+        allowed = select_ai_strategies(
+            engine_mode="harami",
+            available=STRATEGY_CHOICES,
+            symbol=canonical_sym,
+            context={
+                "atr_points": atr_points,
+                "bar_range": last_entry["high"] - last_entry["low"],
+                "last_close": last_entry.get("close"),
+                "htf_bias": htf_bias,
+            },
+        )
+    else:
+        allowed = bot.enabled_strategies or []
     if not allowed:
         log_journal_event(
             "engine.decision",
@@ -860,18 +897,23 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             skipped_no_symbols += 1
             continue
         
-        # Must have at least one enabled strategy
+        # Must have at least one enabled strategy, unless AI Trade will select dynamically
         enabled_strats = bot.enabled_strategies or []
-        if not enabled_strats:
+        if not enabled_strats and not getattr(bot, "ai_trade_enabled", False):
             skipped_no_strategies += 1
             continue
         
-        # Use M1 by default for scalper; allow override but keep it tight
-        tf = "1m"
-        
+        # Prefer bot-specific default timeframe when provided, otherwise fall back to the global default.
+        tf = (bot.default_timeframe or timeframe or "1m").lower()
+        fallback_tf = (timeframe or "1m").lower()
+
         if not bot.accepts(symbol, tf):
-            skipped_not_accepted += 1
-            continue
+            # If the bot default is not accepted, attempt the fallback; otherwise skip.
+            if tf != fallback_tf and bot.accepts(symbol, fallback_tf):
+                tf = fallback_tf
+            else:
+                skipped_not_accepted += 1
+                continue
         
         # Run inline to guarantee scalper cycles execute even if a nested Celery worker is unavailable.
         trade_scalper_strategies_for_bot.apply(
@@ -925,25 +967,34 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     strategy_profile_key = (
         scalper_params.get("strategy_profile") or scalper_cfg.default_strategy_profile
     )
+    profile_aliases = {
+        "xauusd_standard": "core_standard",
+        "xauusd_aggressive": "core_aggressive",
+    }
+    original_profile_key = strategy_profile_key
+    strategy_profile_key = profile_aliases.get(strategy_profile_key, strategy_profile_key)
+    if strategy_profile_key != original_profile_key:
+        scalper_params["strategy_profile"] = strategy_profile_key
+        bot.scalper_params = scalper_params
+        bot.save(update_fields=["scalper_params"])
     strategy_profile = scalper_cfg.strategy_profiles.get(strategy_profile_key)
 
     broker_account = bot.broker_account
     symbol = bot.asset.symbol
-    enabled_strats = list(bot.enabled_strategies or [])
-    if strategy_profile and strategy_profile.enabled_strategies:
-        enabled_strats = list(strategy_profile.enabled_strategies)
-    disabled_profile_strats = set(
-        strategy_profile.disabled_strategies if strategy_profile else []
-    )
-    if not enabled_strats:
-        return {"status": "ok", "reason": "no_enabled_strategies"}
-    enabled_strats = [
-        s
-        for s in enabled_strats
-        if s in SCALPER_STRATEGY_REGISTRY and s not in disabled_profile_strats
-    ]
-    if not enabled_strats:
-        return {"status": "ok", "reason": "no_active_strategies"}
+    canonical_sym = canonical_symbol(symbol)
+    # Strategy selection:
+    ai_enabled = getattr(bot, "ai_trade_enabled", False)
+    enabled_strats: list[str] = []
+    ai_selected: list[str] = []
+    ai_context: dict[str, object] = {"symbol": canonical_sym}
+    if not ai_enabled:
+        # - If the bot has explicit enabled_strategies, use them.
+        # - Otherwise, fall back to the profile defaults.
+        enabled_strats = list(bot.enabled_strategies or [])
+        if not enabled_strats and strategy_profile and strategy_profile.enabled_strategies:
+            enabled_strats = list(strategy_profile.enabled_strategies)
+        if not enabled_strats:
+            return {"status": "ok", "reason": "no_enabled_strategies"}
     
     session_label = _session_label()
     tick_snapshot = None
@@ -983,7 +1034,8 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 if not tick:
                     logger.warning("[ScalperTrade] bot=%s symbol=%s no_tick_data; continuing with candle snapshot only", bot.id, symbol)
                 else:
-                    tick_seconds = getattr(tick, "time", None)
+                    tick_time = getattr(tick, "time", None)
+                    tick_seconds = tick_time
                     bid = getattr(tick, "bid", None)
                     ask = getattr(tick, "ask", None)
                     if bid is not None and ask is not None:
@@ -995,12 +1047,15 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                         "bid": float(bid) if bid is not None else None,
                         "ask": float(ask) if ask is not None else None,
                         "last": float(getattr(tick, "last", 0.0)),
-                        "time": getattr(tick, "time", None),
+                        "time": tick_time.isoformat() if isinstance(tick_time, datetime) else tick_time,
                     }
                     if not tick_seconds:
                         tick_millis = getattr(tick, "time_msc", None)
                         if tick_millis:
                             tick_seconds = tick_millis / 1000
+
+                    if isinstance(tick_seconds, datetime):
+                        tick_seconds = tick_seconds.timestamp()
 
                     if tick_seconds:
                         tick_dt = datetime.fromtimestamp(float(tick_seconds), tz=dt_timezone.utc)
@@ -1045,6 +1100,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     last_entry = entry_candles[-1]
     entry_atr_points = _atr_like(entry_candles, period=14)
     bar_range = last_entry["high"] - last_entry["low"]
+
     volatility_snapshot = {
         "atr_points": str(entry_atr_points),
         "bar_range": str(bar_range),
@@ -1119,6 +1175,41 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         bot.save(update_fields=["scalper_params"])
     except Exception:
         pass
+    
+    if ai_enabled:
+        ai_selected = select_ai_strategies(
+            engine_mode="scalper",
+            available=SCALPER_STRATEGY_REGISTRY.keys(),
+            symbol=canonical_sym,
+            context={
+                "atr_points": entry_atr_points,
+                "bar_range": bar_range,
+                "last_close": last_entry["close"],
+                "spread_points": spread_points,
+                "session": session_label,
+                "htf_bias": htf_bias,
+            },
+        )
+        enabled_strats = list(ai_selected)
+
+    disabled_profile_strats = set(strategy_profile.disabled_strategies if strategy_profile else [])
+    enabled_strats = [
+        s
+        for s in enabled_strats
+        if s in SCALPER_STRATEGY_REGISTRY and s not in disabled_profile_strats
+    ]
+    if ai_enabled:
+        ai_context["ai_selected"] = ai_selected
+        ai_context["ai_active"] = enabled_strats.copy()
+        if not enabled_strats:
+            fallback_pool = [
+                s for s in SCALPER_STRATEGY_REGISTRY.keys() if s not in disabled_profile_strats
+            ]
+            enabled_strats = fallback_pool[:3]
+            ai_context["ai_fallback_used"] = True
+            ai_context["ai_active"] = enabled_strats.copy()
+    if not enabled_strats:
+        return {"status": "ok", "reason": "no_active_strategies"}
     
     # Run each enabled strategy
     for strategy_name in enabled_strats:
@@ -1299,20 +1390,37 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             )
             continue
     
-    # Log summary
+    # Log summary with clearer outcome/context for UI
+    if orders_placed:
+        outcome = "orders_sent"
+    elif decisions_made:
+        outcome = "decisions_made_no_orders"
+    elif signals_created:
+        outcome = "signals_generated_no_decisions"
+    else:
+        outcome = "no_signals"
+
     log_journal_event(
         "scalper_engine_run",
         bot=bot,
         owner=bot.owner if bot else None,
         symbol=symbol,
-        message=f"Scalper run tf={timeframe}",
+        message=(
+            f"Scalper run tf={timeframe} signals={len(signals_created)} "
+            f"decisions={len(decisions_made)} orders={len(orders_placed)} "
+            f"profile={strategy_profile_key} session={session_label}"
+        ),
         context={
             "timeframe": timeframe,
+            "session": session_label,
+            "ai_trade_enabled": ai_enabled,
             "strategies_enabled": enabled_strats,
             "strategy_profile": strategy_profile_key,
+            "outcome": outcome,
             "signals": len(signals_created),
             "decisions": len(decisions_made),
             "orders": len(orders_placed),
+            **({"ai_context": ai_context} if ai_enabled else {}),
         },
     )
     
@@ -1339,7 +1447,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 bot=bot,
                 timeframe=timeframe,
                 session=session_label,
-                summary=summary,
+                summary=_json_safe(summary),
             )
         except Exception:
             logger.exception("[ScalperTrade] failed to persist run log bot=%s", bot.id)

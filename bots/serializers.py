@@ -21,6 +21,10 @@ class BotSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate_enabled_strategies(self, value):
+        ai_trade = bool(self.initial_data.get("ai_trade_enabled")) if isinstance(self.initial_data, dict) else False
+        if ai_trade:
+            # When AI trade is enabled, manual strategy list can be empty.
+            return value or []
         if not value:
             raise serializers.ValidationError("Select at least one strategy.")
         return value
@@ -48,9 +52,12 @@ class BotSettingsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Bot
-        fields = ("asset", "default_qty", "allowed_timeframes", "enabled_strategies", "strategy_guides")
+        fields = ("asset", "default_qty", "allowed_timeframes", "enabled_strategies", "ai_trade_enabled", "strategy_guides")
 
     def validate_enabled_strategies(self, value):
+        ai_trade = bool(self.initial_data.get("ai_trade_enabled")) if isinstance(self.initial_data, dict) else False
+        if ai_trade:
+            return value or []
         if not value:
             raise serializers.ValidationError("Select at least one strategy.")
         return value

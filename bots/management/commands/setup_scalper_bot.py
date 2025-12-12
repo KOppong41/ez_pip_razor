@@ -10,7 +10,7 @@ User = get_user_model()
 
 
 class Command(BaseCommand):
-    help = "Create or update a scalper bot for high-frequency trading on XAUUSDm"
+    help = "Create or update a scalper bot for high-frequency trading (default symbol XAUUSDm)"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -40,7 +40,7 @@ class Command(BaseCommand):
             "--profile",
             type=str,
             default=None,
-            help="Strategy profile key (default: xauusd_standard)",
+            help="Strategy profile key (default: core_standard; legacy keys still accepted)",
         )
         parser.add_argument(
             "--risk-profile",
@@ -62,7 +62,7 @@ class Command(BaseCommand):
         auto_trade = options["auto_trade"]
         cfg = default_scalper_profile_config()
         profile_key = options["profile"]
-        default_profile = cfg.get("default_strategy_profile", "xauusd_standard")
+        default_profile = cfg.get("default_strategy_profile", "core_standard")
         strategy_profiles = cfg.get("strategy_profiles", {})
         if not profile_key:
             profile_key = default_profile

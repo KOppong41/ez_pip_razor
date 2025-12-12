@@ -182,7 +182,7 @@ class BotChangeList(ChangeList):
 
 class BotForm(forms.ModelForm):
     enabled_strategies = forms.MultipleChoiceField(
-        required=True,
+        required=False,
         choices=[(s, STRATEGY_LABELS.get(s, s.title())) for s in STRATEGY_CHOICES],
         widget=forms.CheckboxSelectMultiple,
         help_text=_strategy_help_text(),
@@ -269,6 +269,8 @@ class BotForm(forms.ModelForm):
 
     def clean_enabled_strategies(self):
         strategies = self.cleaned_data.get("enabled_strategies") or []
+        if self.cleaned_data.get("ai_trade_enabled"):
+            return strategies
         if not strategies:
             raise forms.ValidationError("Select at least one strategy.")
         return strategies
@@ -410,6 +412,7 @@ class BotAdmin(admin.ModelAdmin):
         "asset",
         "status",
         "auto_trade",
+        "ai_trade_enabled",
         "engine_mode",
         "broker_account",
         "default_timeframe",
@@ -421,6 +424,7 @@ class BotAdmin(admin.ModelAdmin):
     list_filter = (
         "status",
         "auto_trade",
+        "ai_trade_enabled",
         "engine_mode",
         "default_timeframe",
         "broker_account__broker",
@@ -431,7 +435,7 @@ class BotAdmin(admin.ModelAdmin):
 
     base_fieldsets = (
         ("Identity", {
-            "fields": ("name", "owner", "status", "auto_trade", "engine_mode", "enabled_strategies"),
+            "fields": ("name", "owner", "status", "auto_trade", "ai_trade_enabled", "engine_mode", "enabled_strategies"),
         }),
         ("Routing & Sizing", {
             "fields": ("asset", "default_timeframe", "allowed_timeframes", "default_qty"),
@@ -709,8 +713,9 @@ class BotAdmin(admin.ModelAdmin):
             raise PermissionDenied("Only Admins may create or modify bots.")
         if not obj.owner:
             obj.owner = request.user
-        # If no strategies were provided, seed sane defaults so the engine can run.
-        if not obj.enabled_strategies:
+        # If no strategies were provided, seed sane defaults so the engine can run,
+        # unless AI mode is enabled (AI selects dynamically and can operate with an empty list).
+        if not obj.enabled_strategies and not obj.ai_trade_enabled:
             try:
                 cfg = build_scalper_config(obj)
                 profile = cfg.strategy_profiles.get(cfg.default_strategy_profile)
