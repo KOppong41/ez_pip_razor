@@ -501,8 +501,6 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
 
     if bot:
         risk_section = base.setdefault("risk", {})
-        if getattr(bot, "risk_max_positions_per_symbol", None):
-            risk_section["max_trades_per_symbol"] = int(bot.risk_max_positions_per_symbol)
         if getattr(bot, "risk_max_concurrent_positions", None):
             risk_section["max_concurrent_trades"] = int(bot.risk_max_concurrent_positions)
         if getattr(bot, "max_trades_per_day", None) is not None:

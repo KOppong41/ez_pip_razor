@@ -31,7 +31,6 @@ class FlipFlowTests(TestCase):
             auto_trade=True,
             broker_account=self.account,
             allowed_symbols=["EURUSDm"],
-            risk_max_positions_per_symbol=5,
             risk_max_concurrent_positions=5,
         )
 

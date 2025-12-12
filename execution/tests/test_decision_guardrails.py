@@ -26,7 +26,6 @@ class DecisionGuardrailTests(TestCase):
             auto_trade=True,
             broker_account=self.account,
             allowed_symbols=["EURUSDm"],
-            risk_max_positions_per_symbol=5,  # allow test to hit guardrails instead of hard cap
         )
         self.bot.allow_opposite_scalp = True
         self.bot.save(update_fields=["allow_opposite_scalp"])

@@ -183,4 +183,20 @@ def bot_is_available_for_trading(bot) -> bool:
     if paused_until:
         if timezone.now() < paused_until:
             return False
+
+    allocation = Decimal(str(getattr(bot, "allocation_amount", Decimal("0")) or 0))
+    if allocation > 0:
+        realized_today = _get_today_realized_pnl(bot)
+        loss_pct = Decimal(str(getattr(bot, "allocation_loss_pct", Decimal("100")) or 0))
+        if loss_pct <= 0:
+            loss_pct = Decimal("0")
+        loss_cap = allocation * loss_pct / Decimal("100") if loss_pct > 0 else allocation
+        if loss_cap > 0 and realized_today <= -loss_cap:
+            return False
+        profit_pct = Decimal(str(getattr(bot, "allocation_profit_pct", Decimal("0")) or 0))
+        if profit_pct > 0:
+            profit_cap = allocation * profit_pct / Decimal("100")
+            if profit_cap > 0 and realized_today >= profit_cap:
+                return False
+
     return True

@@ -20,6 +20,7 @@ from brokers.models import Broker
 from execution.services.psychology import get_size_multiplier
 from execution.services.scalper_config import build_scalper_config
 from execution.models import default_scalper_profile_config, Position, ScalperRunLog, TradeLog
+from execution.utils.symbols import canonical_symbol
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -269,8 +270,33 @@ class BotForm(forms.ModelForm):
 
     def clean_enabled_strategies(self):
         strategies = self.cleaned_data.get("enabled_strategies") or []
-        if self.cleaned_data.get("ai_trade_enabled"):
+        ai_mode = self.cleaned_data.get("ai_trade_enabled")
+        if ai_mode:
             return strategies
+        if not strategies:
+            asset = self.cleaned_data.get("asset") or self.instance.asset
+            default_set: list[str] = []
+            try:
+                cfg = build_scalper_config(self.instance)
+                strategy_profiles = cfg.strategy_profiles or {}
+                canon_symbol = canonical_symbol(getattr(asset, "symbol", ""))
+                # Use explicitly chosen profile, then symbol-specific profile, then default.
+                symbol_match = next(
+                    (
+                        prof.enabled_strategies
+                        for prof in strategy_profiles.values()
+                        if prof.symbol and canon_symbol(prof.symbol) == canon_symbol
+                    ),
+                    None,
+                )
+                if symbol_match:
+                    default_set = list(symbol_match)
+                if not default_set:
+                    profile = strategy_profiles.get(cfg.default_strategy_profile)
+                    default_set = list(profile.enabled_strategies) if profile else []
+            except Exception:
+                default_set = []
+            strategies = default_set or strategies
         if not strategies:
             raise forms.ValidationError("Select at least one strategy.")
         return strategies
@@ -443,11 +469,13 @@ class BotAdmin(admin.ModelAdmin):
         ("Risk Limits", {
             "fields": (
                 "decision_min_score",
-                "risk_max_positions_per_symbol",
                 "risk_max_concurrent_positions",
                 "max_trades_per_day",
                 "trade_interval_minutes",
                 "allow_opposite_scalp",
+                "allocation_amount",
+                "allocation_profit_pct",
+                "allocation_loss_pct",
             ),
         }),
         ("Scalper Profiles", {

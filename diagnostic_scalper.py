@@ -44,7 +44,8 @@ else:
             print(f'       Broker: {bot.broker_account.broker}')
         print(f'     Decision min score: {bot.decision_min_score}')
         print(f'     Max concurrent positions: {bot.risk_max_concurrent_positions}')
-        print(f'     Max positions per symbol: {bot.risk_max_positions_per_symbol}')
+        if bot.allocation_amount and bot.allocation_amount > 0:
+            print(f'     Allocation amount: {bot.allocation_amount} (profit target {bot.allocation_profit_pct}%, loss cap {bot.allocation_loss_pct}%)')
 
 # 3. Check recent signals
 print('\n3. RECENT SIGNALS (last 24 hours):')

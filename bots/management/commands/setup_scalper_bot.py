@@ -145,7 +145,6 @@ class Command(BaseCommand):
             # Require higher-quality signals by default; admins can still lower it manually later.
             "decision_min_score": Decimal("0.6"),
             "risk_max_concurrent_positions": 2,
-            "risk_max_positions_per_symbol": 1,
             "kill_switch_enabled": True,
             "kill_switch_max_unrealized_pct": Decimal(str(risk_profile.get("kill_switch_pct", 5.0))),
             # Default to NO autopause unless the psychology profile explicitly enables it.

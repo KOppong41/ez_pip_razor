@@ -469,7 +469,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             else:
                 sym = bot.asset.symbol if bot.asset else None
                 cfg = RiskConfig(
-                    max_positions_per_symbol=(bot.risk_max_positions_per_symbol or 1),
+                    max_positions_per_symbol=None,
                     max_concurrent_positions=(bot.risk_max_concurrent_positions or 5),
                     allowed_symbols=(sym,) if sym else (),
                 )

@@ -400,11 +400,6 @@ class Bot(models.Model):
         ),
     )
 
-    risk_max_positions_per_symbol = models.PositiveIntegerField(
-        default=1,
-        help_text="Maximum number of open positions this bot may hold per symbol (e.g. 1 = never stack multiple EURUSD trades).",
-    )
-
     risk_max_concurrent_positions = models.PositiveIntegerField(
         default=5,
         help_text="Maximum number of open positions this bot may hold across all symbols at the same time.",
@@ -448,6 +443,34 @@ class Bot(models.Model):
         help_text=(
             "Daily cap on filled trades for this bot. Once this number of trades is filled in a day, "
             "new trade decisions are ignored. Set to 0 to disable the daily cap."
+        ),
+    )
+
+    allocation_amount = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        default=Decimal("0.0"),
+        validators=[MinValueValidator(Decimal("0"))],
+        help_text=(
+            "Virtual bankroll for this bot in account currency. "
+            "When cumulative realized losses reach this allocation (or the configured loss %), trading pauses."
+        ),
+    )
+    allocation_profit_pct = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("1000"))],
+        help_text="Optional profit target as a percent of the allocation. Set to 0 to disable the cap.",
+    )
+    allocation_loss_pct = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("100.00"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("1000"))],
+        help_text=(
+            "Loss limit expressed as a percent of the allocation. "
+            "Defaults to 100%% (stop once the entire allocation is lost). Set to 0 to disable."
         ),
     )
 

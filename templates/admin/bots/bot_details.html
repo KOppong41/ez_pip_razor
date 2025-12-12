@@ -421,10 +421,6 @@
                     {% endif %}
                 </div>
                 <div class="info-item">
-                    <span class="info-label">{% trans 'Max Positions Per Symbol' %}</span>
-                    <span class="info-value">{{ original.risk_max_positions_per_symbol }}</span>
-                </div>
-                <div class="info-item">
                     <span class="info-label">{% trans 'Max Concurrent Positions' %}</span>
                     <span class="info-value">{{ original.risk_max_concurrent_positions }}</span>
                 </div>
@@ -435,6 +431,24 @@
                 <div class="info-item">
                     <span class="info-label">{% trans 'Trade Interval (Minutes)' %}</span>
                     <span class="info-value">{{ original.trade_interval_minutes }}</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">{% trans 'Allocation Amount' %}</span>
+                    <span class="info-value">
+                        {% if original.allocation_amount %}
+                            {{ original.allocation_amount }}
+                        {% else %}
+                            {% trans "Not set" %}
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">{% trans 'Allocation Profit Target %' %}</span>
+                    <span class="info-value">{{ original.allocation_profit_pct }}%</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">{% trans 'Allocation Loss Limit %' %}</span>
+                    <span class="info-value">{{ original.allocation_loss_pct }}%</span>
                 </div>
                 <div class="info-item">
                     <span class="info-label">{% trans 'Allow Opposite Scalp' %}</span>
