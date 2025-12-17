@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import threading
 import logging
 import time
@@ -45,6 +45,39 @@ class _MT5Proxy:
 mt5 = _MT5Proxy()
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_ticket(value):
+    if value in (None, "", 0):
+        return None
+    try:
+        return int(Decimal(str(value)))
+    except (InvalidOperation, ValueError, TypeError):
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+
+def _maybe_store_broker_ticket(order: Order, result) -> None:
+    """
+    Persist the MT5 order/deal ticket for downstream reporting.
+    """
+    if result is None or order is None:
+        return
+
+    ticket = None
+    for attr in ("order", "deal", "position"):
+        ticket = _coerce_ticket(getattr(result, attr, None))
+        if ticket:
+            break
+
+    if ticket and getattr(order, "broker_ticket", None) != ticket:
+        order.broker_ticket = ticket
+        try:
+            order.save(update_fields=["broker_ticket"])
+        except Exception:
+            logger.warning("[MT5] unable to persist broker ticket for order %s", order.id, exc_info=True)
 
 # MT5 only allows one login per process. We'll keep a singleton session.
 class _MT5Session:
@@ -382,6 +415,7 @@ class MT5Connector(BaseConnector):
                     "type_filling": mt5.ORDER_FILLING_IOC,
                 }
                 result = mt5.order_send(req)
+                _maybe_store_broker_ticket(order, result)
                 if result is None or getattr(result, "retcode", None) not in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
                     details = result._asdict() if result and hasattr(result, "_asdict") else result
                     msg = f"MT5 close failed for pos {pos.ticket}: retcode={getattr(result, 'retcode', None)} details={details}"
@@ -707,6 +741,7 @@ class MT5Connector(BaseConnector):
         # 4) Handle retcodes
         if ret in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
             # mark order filled
+            _maybe_store_broker_ticket(order, result)
             update_order_status(order, "filled", price=fill_price)
 
             # fetch account balance at the time of fill
@@ -721,6 +756,7 @@ class MT5Connector(BaseConnector):
                 qty=qty_dec,
                 price=fill_price if fill_price is not None else Decimal("0"),
                 account_balance=balance,
+                contract_size=contract_size,
             )
             return
 

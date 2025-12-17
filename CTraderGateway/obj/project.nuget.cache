@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "dgSpecHash": "sWtaNjmbjBI=",
+  "success": true,
+  "projectFilePath": "D:\\Software Projects\\EzScalperBot\\CTraderGateway\\CTraderGateway.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\IkobTek\\.nuget\\packages\\ctrader.openapi.net\\1.4.4\\ctrader.openapi.net.1.4.4.nupkg.sha512",
+    "C:\\Users\\IkobTek\\.nuget\\packages\\google.protobuf\\3.20.1\\google.protobuf.3.20.1.nupkg.sha512",
+    "C:\\Users\\IkobTek\\.nuget\\packages\\system.reactive\\5.0.0\\system.reactive.5.0.0.nupkg.sha512",
+    "C:\\Users\\IkobTek\\.nuget\\packages\\system.threading.channels\\4.7.0\\system.threading.channels.4.7.0.nupkg.sha512",
+    "C:\\Users\\IkobTek\\.nuget\\packages\\websocket.client\\4.4.43\\websocket.client.4.4.43.nupkg.sha512"
+  ],
+  "logs": []
+}

@@ -14,6 +14,12 @@ DEFAULT_BROKER_CHOICES = [
     ("fbs", "FBS"),
 ]
 
+BROKER_CONNECTOR_CHOICES = [
+    ("mt5_local", "MetaTrader 5 Desktop (local terminal)"),
+    ("exness_web", "Exness Web Terminal API"),
+    ("ctrader_api", "cTrader Open API"),
+    ("paper", "Paper Simulator"),
+]
 
 def get_broker_choices():
     """
@@ -89,6 +95,22 @@ class BrokerAccount(models.Model):
         default=False,
         help_text="Set to True after credentials are validated/authorized.",
     )
+    connector = models.CharField(
+        max_length=32,
+        choices=BROKER_CONNECTOR_CHOICES,
+        default="mt5_local",
+        help_text="Transport used to connect to this broker account.",
+    )
+    adapter_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional extra credentials/settings required by the selected connector.",
+    )
+    timezone = models.CharField(
+        max_length=64,
+        default="UTC",
+        help_text="IANA timezone for this broker account (e.g. Europe/London). Used for reporting timestamps.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -97,14 +119,23 @@ class BrokerAccount(models.Model):
     def __str__(self):
         return f"{self.name} [{self.broker}]"
 
+    def requires_mt5_connector(self) -> bool:
+        connector = self.connector or "mt5_local"
+        return connector == "mt5_local"
+
     def get_creds(self) -> dict:
-        """Return decrypted MT5 credentials."""
-        return {
-            "login": self.mt5_login,
-            "server": self.mt5_server,
-            "path": self.mt5_path,
-            "password": decrypt_secret(self.mt5_password_enc),
-        }
+        """
+        Return credentials for the selected connector.
+        MT5 desktop expects login/server/path/password; API adapters can pull from adapter_config.
+        """
+        if self.requires_mt5_connector():
+            return {
+                "login": self.mt5_login,
+                "server": self.mt5_server,
+                "path": self.mt5_path,
+                "password": decrypt_secret(self.mt5_password_enc),
+            }
+        return self.adapter_config or {}
 
     def set_mt5_password(self, raw: str):
         self.mt5_password_enc = encrypt_secret(raw or "")
@@ -116,7 +147,12 @@ class BrokerAccount(models.Model):
         """
         Return normalized MT5 credentials.
         """
-        return self.get_creds()
+        return {
+            "login": self.mt5_login,
+            "server": self.mt5_server,
+            "path": self.mt5_path,
+            "password": decrypt_secret(self.mt5_password_enc),
+        }
 
     @staticmethod
     def available_brokers():
@@ -162,14 +198,15 @@ class BrokerAccount(models.Model):
                 raise ValidationError(
                     "Paper broker accounts are disabled. Set ALLOW_PAPER_BROKERS=1 to enable."
                 )
+        if self.broker == "paper":
+            self.connector = "paper"
 
         # Enforce single active MT5-type account per owner (one terminal session per user).
-        mt5_codes = {"mt5", "exness_mt5", "icmarket_mt5"}
-        if not testing and self.is_active and self.broker in mt5_codes and owner:
+        if not testing and self.is_active and self.requires_mt5_connector() and owner:
             active_conflict = (
                 self.__class__
                 .objects
-                .filter(owner=owner, broker__in=mt5_codes, is_active=True)
+                .filter(owner=owner, connector="mt5_local", is_active=True)
                 .exclude(pk=self.pk if self.pk else None)
                 .exists()
             )

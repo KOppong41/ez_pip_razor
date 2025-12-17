@@ -7,6 +7,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from execution.models import ExecutionSetting, TradeLog
+from execution.services.journal import log_journal_event
 
 
 @dataclass
@@ -19,6 +20,133 @@ def _get_settings() -> ExecutionSetting | None:
         return ExecutionSetting.objects.first()
     except Exception:
         return None
+
+
+def _set_allocation_guard(bot, payload: dict) -> bool:
+    """
+    Persist a small flag in scalper_params so we only log allocation guard hits once per reason/cap.
+    Returns True when the payload changed (i.e., first time we log this event).
+    """
+    if not hasattr(bot, "scalper_params"):
+        return True
+    params = bot.scalper_params or {}
+    existing = params.get("_allocation_guard")
+    if (
+        existing
+        and existing.get("reason") == payload.get("reason")
+        and existing.get("cap") == payload.get("cap")
+    ):
+        return False
+    params["_allocation_guard"] = payload
+    bot.scalper_params = params
+    bot.save(update_fields=["scalper_params"])
+    return True
+
+
+def _clear_allocation_guard(bot) -> None:
+    if not hasattr(bot, "scalper_params"):
+        return
+    params = bot.scalper_params or {}
+    if "_allocation_guard" in params:
+        params.pop("_allocation_guard", None)
+        bot.scalper_params = params
+        bot.save(update_fields=["scalper_params"])
+
+
+def reset_allocation_cycle(bot, *, reason: str = "manual", log_event: bool = True) -> bool:
+    """
+    Reset the allocation baseline to the current lifetime PnL.
+    """
+    if not bot:
+        return False
+    allocation = Decimal(str(getattr(bot, "allocation_amount", Decimal("0")) or 0))
+    if allocation <= 0:
+        return False
+    lifetime = _get_lifetime_realized_pnl(bot)
+    bot.allocation_start_pnl = lifetime
+    bot.allocation_started_at = timezone.now()
+    bot.save(update_fields=["allocation_start_pnl", "allocation_started_at"])
+    _clear_allocation_guard(bot)
+    if log_event:
+        symbol = getattr(getattr(bot, "asset", None), "symbol", None)
+        log_journal_event(
+            "allocation.cycle_reset",
+            bot=bot,
+            symbol=symbol,
+            owner=getattr(bot, "owner", None),
+            message=f"{bot.name} allocation cycle reset",
+            context={
+                "reason": reason,
+                "allocation_amount": str(allocation),
+            },
+        )
+    return True
+
+
+def _maybe_reset_allocation_cycle(bot) -> None:
+    if not bot:
+        return
+    allocation = Decimal(str(getattr(bot, "allocation_amount", Decimal("0")) or 0))
+    if allocation <= 0:
+        return
+    started_at = getattr(bot, "allocation_started_at", None)
+    today = timezone.localdate()
+    if not started_at or started_at.date() < today:
+        reset_allocation_cycle(bot, reason="daily_reset")
+
+
+def _get_broker_balance_decimal(bot) -> Decimal | None:
+    account = getattr(bot, "broker_account", None)
+    if not account:
+        return None
+    try:
+        from execution.services.accounts import get_account_balances  # noqa: WPS433
+    except Exception:
+        return None
+    try:
+        data = get_account_balances(account)
+    except Exception:
+        return None
+    balance = data.get("balance") if isinstance(data, dict) else None
+    if balance is None:
+        return None
+    try:
+        return Decimal(str(balance))
+    except Exception:
+        return None
+
+
+def _stop_bot(bot, *, event_type: str, message: str, context: dict | None = None, new_baseline: Decimal | None = None):
+    if not bot:
+        return
+    update_fields: list[str] = []
+    if getattr(bot, "status", None) != "stopped":
+        bot.status = "stopped"
+        update_fields.append("status")
+    if hasattr(bot, "paused_until"):
+        bot.paused_until = None
+        update_fields.append("paused_until")
+    if new_baseline is None:
+        new_baseline = _get_lifetime_realized_pnl(bot)
+    if hasattr(bot, "allocation_start_pnl"):
+        bot.allocation_start_pnl = new_baseline
+        update_fields.append("allocation_start_pnl")
+    if hasattr(bot, "allocation_started_at"):
+        bot.allocation_started_at = None
+        update_fields.append("allocation_started_at")
+    if update_fields:
+        bot.save(update_fields=update_fields)
+    symbol = getattr(getattr(bot, "asset", None), "symbol", None)
+    log_journal_event(
+        event_type,
+        severity="warning",
+        bot=bot,
+        broker_account=getattr(bot, "broker_account", None),
+        symbol=symbol,
+        owner=getattr(bot, "owner", None),
+        message=message,
+        context=context or {},
+    )
 
 
 def update_bot_after_realized_pnl(order, realized_pnl: Decimal) -> None:
@@ -197,9 +325,11 @@ def bot_is_available_for_trading(bot) -> bool:
     Centralised guard for whether a bot should be allowed to trade.
     - status must be 'active'
     - paused_until (if set) must be in the past
+    - market must be open for the bot's asset (calendar-based; MT5 probe happens upstream)
     """
     if not bot:
         return False
+    _maybe_reset_allocation_cycle(bot)
     if getattr(bot, "status", None) != "active":
         return False
     paused_until = getattr(bot, "paused_until", None)
@@ -207,19 +337,77 @@ def bot_is_available_for_trading(bot) -> bool:
         if timezone.now() < paused_until:
             return False
 
+    # Lazy import to avoid circular import with MT5 connector -> portfolio -> psychology.
+    try:
+        from execution.services.market_hours import get_market_status_for_bot  # noqa: WPS433
+    except Exception:
+        get_market_status_for_bot = None
+
+    if get_market_status_for_bot:
+        market_status = get_market_status_for_bot(bot, use_mt5_probe=False)
+        if market_status and not market_status.is_open:
+            return False
+
     allocation = Decimal(str(getattr(bot, "allocation_amount", Decimal("0")) or 0))
+    if allocation > 0:
+        broker_balance = _get_broker_balance_decimal(bot)
+        if broker_balance is not None and allocation > broker_balance:
+            context = {
+                "required_allocation": str(allocation),
+                "account_balance": str(broker_balance),
+            }
+            _stop_bot(
+                bot,
+                event_type="allocation.balance_insufficient",
+                message=f"{bot.name} stopped: insufficient trading balance",
+                context=context,
+            )
+            return False
     if allocation > 0:
         realized_cycle = _get_allocation_cycle_pnl(bot)
         loss_pct = Decimal(str(getattr(bot, "allocation_loss_pct", Decimal("100")) or 0))
         if loss_pct <= 0:
             loss_pct = Decimal("0")
         loss_cap = allocation * loss_pct / Decimal("100") if loss_pct > 0 else allocation
-        if loss_cap > 0 and realized_cycle <= -loss_cap:
-            return False
         profit_pct = Decimal(str(getattr(bot, "allocation_profit_pct", Decimal("0")) or 0))
-        if profit_pct > 0:
-            profit_cap = allocation * profit_pct / Decimal("100")
-            if profit_cap > 0 and realized_cycle >= profit_cap:
-                return False
+        profit_cap = allocation * profit_pct / Decimal("100") if profit_pct > 0 else Decimal("0")
+
+        guard_reason = None
+        guard_cap = None
+        if loss_cap > 0 and realized_cycle <= -loss_cap:
+            guard_reason = "loss"
+            guard_cap = loss_cap
+        elif profit_cap > 0 and realized_cycle >= profit_cap:
+            guard_reason = "profit"
+            guard_cap = profit_cap
+
+        if guard_reason and guard_cap is not None:
+            payload = {
+                "reason": guard_reason,
+                "cap": str(guard_cap),
+                "cycle_pnl": str(realized_cycle),
+                "at": timezone.now().isoformat(),
+            }
+            _set_allocation_guard(bot, payload)
+            baseline = Decimal(str(getattr(bot, "allocation_start_pnl", Decimal("0")) or 0))
+            new_baseline = baseline + realized_cycle
+            cap_context = {
+                "cycle_pnl": str(realized_cycle),
+                "cap": str(guard_cap),
+                "allocation_amount": str(allocation),
+                "allocation_profit_pct": str(profit_pct),
+                "allocation_loss_pct": str(loss_pct),
+                "reason": guard_reason,
+            }
+            _stop_bot(
+                bot,
+                event_type="allocation.cap_hit",
+                message=f"{bot.name} allocation {guard_reason} cap reached; bot stopped",
+                context=cap_context,
+                new_baseline=new_baseline,
+            )
+            return False
+        else:
+            _clear_allocation_guard(bot)
 
     return True

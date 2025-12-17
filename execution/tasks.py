@@ -15,7 +15,7 @@ from core.metrics import task_failures_total
 from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector, is_mt5_available, mt5
 from execution.models import Decision, Order, PnLDaily, Position, ScalperRunLog, Signal
-from execution.services.brokers import dispatch_place_order
+from execution.services.brokers import dispatch_place_order, get_broker_symbol_constraints
 from execution.services.decision import make_decision_from_signal
 from execution.services.ai_strategy_selector import select_ai_strategies
 from execution.services.engine import run_engine_on_candles
@@ -34,6 +34,13 @@ from execution.services.monitor import (
 )
 from execution.services.prices import get_price
 from execution.services.psychology import bot_is_available_for_trading
+from execution.services.market_hours import (
+    get_market_status_for_bot,
+    maybe_pause_bot_for_market,
+    maybe_unpause_crypto_for_open_market,
+    is_crypto_symbol,
+)
+from execution.tasks_market_guard import apply_market_guard
 from execution.services.scalper_config import build_scalper_config
 from execution.services.runtime_config import get_runtime_config
 from execution.services.journal import log_journal_event
@@ -224,7 +231,7 @@ def simulate_fill_task(self, order_id: int):
         price = Decimal("1.1000") if order.side == "buy" else Decimal("1.1005")
         # Transition to filled + create execution/position
         update_order_status(order, "filled", price=price)
-        record_fill(order, order.qty, price)
+        record_fill(order, order.qty, price, contract_size=Decimal("1"))
         return {"status": "filled", "order_id": order.id, "price": str(price)}
     except Exception as e:
         task_failures_total.labels(task="simulate_fill_task").inc()
@@ -514,6 +521,14 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
         logger.info("[EngineTrade] bot=%s auto_trade=False, skipping", bot.id)
         return {"status": "skipped", "reason": "bot_auto_trade_disabled"}
 
+    market_status = get_market_status_for_bot(bot, use_mt5_probe=True)
+    if market_status and not market_status.is_open:
+        maybe_pause_bot_for_market(bot, market_status)
+        logger.info("[EngineTrade] bot=%s symbol=%s skipped: market_closed (%s)", bot.id, getattr(bot.asset, "symbol", None), market_status.reason)
+        return {"status": "skipped", "reason": f"market_closed:{market_status.reason}"}
+    if market_status and market_status.is_open:
+        maybe_unpause_crypto_for_open_market(bot, market_status)
+
     if not bot_is_available_for_trading(bot):
         logger.info("[EngineTrade] bot=%s unavailable (status/paused), skipping", bot.id)
         return {"status": "skipped", "reason": "bot_unavailable"}
@@ -588,8 +603,8 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
 
     htf_bias = _compute_bias_from_htf(htf_candles) if htf_candles else None
 
-    # 2) Build engine context + run engine (requires explicit strategy opt-in unless AI Trade is enabled)
-    if getattr(bot, "ai_trade_enabled", False):
+    # 2) Build engine context + run engine (auto-trade mode uses asset/profile presets)
+    if getattr(bot, "auto_trade", False):
         last_entry = entry_candles[-1]
         atr_points = _atr_like(entry_candles, period=14)
         allowed = select_ai_strategies(
@@ -885,21 +900,35 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
     skipped_no_symbols = 0
     skipped_no_strategies = 0
     skipped_not_accepted = 0
-    
+    skipped_market_closed = 0
+    skipped_unavailable = 0
+
     for bot in bots_qs:
         broker_account = getattr(bot, "broker_account", None)
         if not broker_account or not getattr(broker_account, "is_active", False):
             skipped_no_broker += 1
             continue
-        
+
         symbol = getattr(bot.asset, "symbol", None)
         if not symbol:
             skipped_no_symbols += 1
             continue
-        
-        # Must have at least one enabled strategy, unless AI Trade will select dynamically
+
+        market_status = get_market_status_for_bot(bot, use_mt5_probe=False)
+        if market_status and not market_status.is_open:
+            maybe_pause_bot_for_market(bot, market_status)
+            skipped_market_closed += 1
+            continue
+        if market_status and market_status.is_open:
+            maybe_unpause_crypto_for_open_market(bot, market_status)
+
+        if not bot_is_available_for_trading(bot):
+            skipped_unavailable += 1
+            continue
+
+        # Must have manual strategies when auto-trade is disabled
         enabled_strats = bot.enabled_strategies or []
-        if not enabled_strats and not getattr(bot, "ai_trade_enabled", False):
+        if not getattr(bot, "auto_trade", True) and not enabled_strats:
             skipped_no_strategies += 1
             continue
         
@@ -923,15 +952,17 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
         dispatched += 1
     
     logger.info(
-        "[ScalperRunner] tf=%s dispatched=%s skipped_no_broker=%s skipped_no_symbols=%s skipped_no_strategies=%s skipped_not_accepted=%s",
+        "[ScalperRunner] tf=%s dispatched=%s skipped_no_broker=%s skipped_no_symbols=%s skipped_no_strategies=%s skipped_not_accepted=%s skipped_market_closed=%s skipped_unavailable=%s",
         timeframe,
         dispatched,
         skipped_no_broker,
         skipped_no_symbols,
         skipped_no_strategies,
         skipped_not_accepted,
+        skipped_market_closed,
+        skipped_unavailable,
     )
-    
+
     return {
         "status": "ok",
         "timeframe": timeframe,
@@ -940,6 +971,8 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
         "skipped_no_symbols": skipped_no_symbols,
         "skipped_no_strategies": skipped_no_strategies,
         "skipped_not_accepted": skipped_not_accepted,
+        "skipped_market_closed": skipped_market_closed,
+        "skipped_unavailable": skipped_unavailable,
     }
 
 
@@ -954,7 +987,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
 def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n_bars: int = 100):
     """
     Runs all enabled scalper strategies for a single bot.
-    
+
     - Fetches M1 candles
     - Runs price_action_pinbar, trend_pullback, etc. (whatever is enabled for the bot)
     - Creates Signal + Decision + Order for each match
@@ -962,6 +995,42 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     """
     from bots.models import Bot
     bot = Bot.objects.select_related("broker_account", "asset").get(id=bot_id)
+
+    if not getattr(bot, "auto_trade", False):
+        logger.info("[ScalperTrade] bot=%s auto_trade=False, skipping", bot.id)
+        return {"status": "skipped", "reason": "bot_auto_trade_disabled"}
+
+    market_status = get_market_status_for_bot(bot, use_mt5_probe=True)
+    if market_status and not market_status.is_open:
+        maybe_pause_bot_for_market(bot, market_status)
+        logger.info(
+            "[ScalperTrade] bot=%s symbol=%s skipped: market_closed (%s)",
+            bot.id,
+            getattr(bot.asset, "symbol", None),
+            market_status.reason,
+        )
+        return {"status": "skipped", "reason": f"market_closed:{market_status.reason}"}
+    if market_status and market_status.is_open:
+        maybe_unpause_crypto_for_open_market(bot, market_status)
+
+    if not bot_is_available_for_trading(bot):
+        logger.info("[ScalperTrade] bot=%s unavailable (status/paused/allocation), skipping", bot.id)
+        return {"status": "skipped", "reason": "bot_unavailable"}
+
+    broker_account = getattr(bot, "broker_account", None)
+    if not broker_account or not getattr(broker_account, "is_active", False):
+        logger.info("[ScalperTrade] bot=%s has no active broker account, skipping", bot.id)
+        return {"status": "skipped", "reason": "no_active_broker"}
+
+    if not getattr(bot, "asset", None) or not getattr(bot.asset, "symbol", None):
+        logger.info("[ScalperTrade] bot=%s has no asset configured, skipping", bot.id)
+        return {"status": "skipped", "reason": "no_symbol"}
+
+    broker_constraints = get_broker_symbol_constraints(broker_account, getattr(bot.asset, "symbol", None))
+    broker_min_stop_points = broker_constraints.stops_level_points or Decimal("0")
+    broker_point = broker_constraints.point
+    broker_lot_step = broker_constraints.lot_step
+
     scalper_cfg = build_scalper_config(bot)
     scalper_params = bot.scalper_params or {}
     strategy_profile_key = (
@@ -977,22 +1046,36 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         scalper_params["strategy_profile"] = strategy_profile_key
         bot.scalper_params = scalper_params
         bot.save(update_fields=["scalper_params"])
+    asset_profile_key = None
+    if getattr(bot, "asset", None) and getattr(bot.asset, "symbol", None):
+        asset_canon = canonical_symbol(bot.asset.symbol)
+        for key, profile in (scalper_cfg.strategy_profiles or {}).items():
+            if profile.symbol and canonical_symbol(profile.symbol) == asset_canon:
+                asset_profile_key = key
+                break
+    if getattr(bot, "auto_trade", False) and asset_profile_key:
+        strategy_profile_key = asset_profile_key
     strategy_profile = scalper_cfg.strategy_profiles.get(strategy_profile_key)
 
-    broker_account = bot.broker_account
     symbol = bot.asset.symbol
     canonical_sym = canonical_symbol(symbol)
-    # Strategy selection:
-    ai_enabled = getattr(bot, "ai_trade_enabled", False)
+    auto_mode = bool(getattr(bot, "auto_trade", False))
+    manual_strats = list(bot.enabled_strategies or [])
+    profile_strats = (
+        list(strategy_profile.enabled_strategies)
+        if strategy_profile and strategy_profile.enabled_strategies
+        else []
+    )
     enabled_strats: list[str] = []
-    ai_selected: list[str] = []
-    ai_context: dict[str, object] = {"symbol": canonical_sym}
-    if not ai_enabled:
-        # - If the bot has explicit enabled_strategies, use them.
-        # - Otherwise, fall back to the profile defaults.
-        enabled_strats = list(bot.enabled_strategies or [])
-        if not enabled_strats and strategy_profile and strategy_profile.enabled_strategies:
-            enabled_strats = list(strategy_profile.enabled_strategies)
+    strategy_context: dict[str, object] = {
+        "symbol": canonical_sym,
+        "mode": "auto_profile" if auto_mode else "manual",
+        "profile_key": strategy_profile_key,
+        "profile_symbol": getattr(strategy_profile, "symbol", None) if strategy_profile else None,
+        "manual_configured": bool(manual_strats),
+    }
+    if not auto_mode:
+        enabled_strats = manual_strats
         if not enabled_strats:
             return {"status": "ok", "reason": "no_enabled_strategies"}
     
@@ -1001,75 +1084,75 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     spread_points = None
     # Get M1 candles
     try:
-        # Skip if market is closed for this symbol
+        # Skip market-closed checks for crypto (24/7); otherwise enforce tradable state.
         tick = None
-        try:
-            from execution.connectors.mt5 import is_mt5_available, mt5
-            if is_mt5_available():
-                info = mt5.symbol_info(symbol)
-                if info is None:
-                    try:
-                        _login_mt5_for_account(broker_account)
-                        info = mt5.symbol_info(symbol)
-                    except Exception:
-                        info = None
-                if info is None or not info.visible:
-                    logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_or_symbol_not_visible", bot.id, symbol)
-                    return {"status": "ok", "reason": "market_closed"}
-
-                disabled_modes = {mt5.SYMBOL_TRADE_MODE_DISABLED}
-                close_only = getattr(mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", None)
-                if close_only is not None:
-                    disabled_modes.add(close_only)
-                if info.trade_mode in disabled_modes:
-                    logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_trade_mode=%s", bot.id, symbol, info.trade_mode)
-                    return {"status": "ok", "reason": "market_closed"}
-
-                tick = None
-                try:
-                    tick = mt5.symbol_info_tick(symbol)
-                except Exception:
-                    tick = None
-
-                if not tick:
-                    logger.warning("[ScalperTrade] bot=%s symbol=%s no_tick_data; continuing with candle snapshot only", bot.id, symbol)
-                else:
-                    tick_time = getattr(tick, "time", None)
-                    tick_seconds = tick_time
-                    bid = getattr(tick, "bid", None)
-                    ask = getattr(tick, "ask", None)
-                    if bid is not None and ask is not None:
+        if not is_crypto_symbol(symbol):
+            try:
+                from execution.connectors.mt5 import is_mt5_available, mt5
+                if is_mt5_available():
+                    info = mt5.symbol_info(symbol)
+                    if info is None:
                         try:
-                            spread_points = Decimal(str(ask - bid))
+                            _login_mt5_for_account(broker_account)
+                            info = mt5.symbol_info(symbol)
                         except Exception:
-                            spread_points = None
-                    tick_snapshot = {
-                        "bid": float(bid) if bid is not None else None,
-                        "ask": float(ask) if ask is not None else None,
-                        "last": float(getattr(tick, "last", 0.0)),
-                        "time": tick_time.isoformat() if isinstance(tick_time, datetime) else tick_time,
-                    }
-                    if not tick_seconds:
-                        tick_millis = getattr(tick, "time_msc", None)
-                        if tick_millis:
-                            tick_seconds = tick_millis / 1000
+                            info = None
+                    if info is None or not info.visible:
+                        logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_or_symbol_not_visible", bot.id, symbol)
+                        return {"status": "ok", "reason": "market_closed"}
 
-                    if isinstance(tick_seconds, datetime):
-                        tick_seconds = tick_seconds.timestamp()
+                    disabled_modes = {mt5.SYMBOL_TRADE_MODE_DISABLED}
+                    close_only = getattr(mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", None)
+                    if close_only is not None:
+                        disabled_modes.add(close_only)
+                    if info.trade_mode in disabled_modes:
+                        logger.info("[ScalperTrade] bot=%s symbol=%s skipped: market_closed_trade_mode=%s", bot.id, symbol, info.trade_mode)
+                        return {"status": "ok", "reason": "market_closed"}
 
-                    if tick_seconds:
-                        tick_dt = datetime.fromtimestamp(float(tick_seconds), tz=dt_timezone.utc)
-                        seconds_since_tick = (timezone.now() - tick_dt).total_seconds()
-                        if seconds_since_tick > 600:
-                            logger.warning(
-                                "[ScalperTrade] bot=%s symbol=%s stale_tick last_tick=%s age_sec=%s; continuing",
-                                bot.id,
-                                symbol,
-                                tick_dt.isoformat(),
-                                int(seconds_since_tick),
-                            )
-        except Exception:
-            pass
+                    try:
+                        tick = mt5.symbol_info_tick(symbol)
+                    except Exception:
+                        tick = None
+
+                    if not tick:
+                        logger.warning("[ScalperTrade] bot=%s symbol=%s no_tick_data; continuing with candle snapshot only", bot.id, symbol)
+                    else:
+                        tick_time = getattr(tick, "time", None)
+                        tick_seconds = tick_time
+                        bid = getattr(tick, "bid", None)
+                        ask = getattr(tick, "ask", None)
+                        if bid is not None and ask is not None:
+                            try:
+                                spread_points = Decimal(str(ask - bid))
+                            except Exception:
+                                spread_points = None
+                        tick_snapshot = {
+                            "bid": float(bid) if bid is not None else None,
+                            "ask": float(ask) if ask is not None else None,
+                            "last": float(getattr(tick, "last", 0.0)),
+                            "time": tick_time.isoformat() if isinstance(tick_time, datetime) else tick_time,
+                        }
+                        if not tick_seconds:
+                            tick_millis = getattr(tick, "time_msc", None)
+                            if tick_millis:
+                                tick_seconds = tick_millis / 1000
+
+                        if isinstance(tick_seconds, datetime):
+                            tick_seconds = tick_seconds.timestamp()
+
+                        if tick_seconds:
+                            tick_dt = datetime.fromtimestamp(float(tick_seconds), tz=dt_timezone.utc)
+                            seconds_since_tick = (timezone.now() - tick_dt).total_seconds()
+                            if seconds_since_tick > 600:
+                                logger.warning(
+                                    "[ScalperTrade] bot=%s symbol=%s stale_tick last_tick=%s age_sec=%s; continuing",
+                                    bot.id,
+                                    symbol,
+                                    tick_dt.isoformat(),
+                                    int(seconds_since_tick),
+                                )
+            except Exception:
+                pass
 
         entry_candles = get_candles_for_account(
             broker_account=broker_account,
@@ -1107,11 +1190,21 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         "tick_volume": last_entry.get("tick_volume"),
         "spread_points": str(spread_points) if spread_points is not None else None,
     }
+    broker_snapshot = {
+        "min_lot": str(broker_constraints.min_lot) if broker_constraints.min_lot is not None else None,
+        "max_lot": str(broker_constraints.max_lot) if broker_constraints.max_lot is not None else None,
+        "lot_step": str(broker_lot_step) if broker_lot_step is not None else None,
+        "point": str(broker_point) if broker_point is not None else None,
+        "stops_level_points": str(broker_min_stop_points) if broker_min_stop_points else None,
+        "freeze_level_points": str(broker_constraints.freeze_level_points) if broker_constraints.freeze_level_points else None,
+        "max_deviation": str(broker_constraints.max_deviation) if broker_constraints.max_deviation is not None else None,
+    }
     market_snapshot = {
         "session": session_label,
         "last_close": str(last_entry["close"]),
         "tick": tick_snapshot,
         "volatility": volatility_snapshot,
+        "broker_constraints": broker_snapshot,
     }
     
     signals_created = []
@@ -1176,10 +1269,12 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     except Exception:
         pass
     
-    if ai_enabled:
-        ai_selected = select_ai_strategies(
+    available_pool: list[str] = []
+    if auto_mode:
+        available_pool = profile_strats or list(SCALPER_STRATEGY_REGISTRY.keys())
+        auto_selected = select_ai_strategies(
             engine_mode="scalper",
-            available=SCALPER_STRATEGY_REGISTRY.keys(),
+            available=available_pool,
             symbol=canonical_sym,
             context={
                 "atr_points": entry_atr_points,
@@ -1190,7 +1285,8 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 "htf_bias": htf_bias,
             },
         )
-        enabled_strats = list(ai_selected)
+        enabled_strats = list(auto_selected)
+        strategy_context["auto_selected"] = list(auto_selected)
 
     disabled_profile_strats = set(strategy_profile.disabled_strategies if strategy_profile else [])
     enabled_strats = [
@@ -1198,16 +1294,17 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         for s in enabled_strats
         if s in SCALPER_STRATEGY_REGISTRY and s not in disabled_profile_strats
     ]
-    if ai_enabled:
-        ai_context["ai_selected"] = ai_selected
-        ai_context["ai_active"] = enabled_strats.copy()
+    if auto_mode:
         if not enabled_strats:
             fallback_pool = [
-                s for s in SCALPER_STRATEGY_REGISTRY.keys() if s not in disabled_profile_strats
+                s for s in (available_pool or SCALPER_STRATEGY_REGISTRY.keys())
+                if s not in disabled_profile_strats
             ]
-            enabled_strats = fallback_pool[:3]
-            ai_context["ai_fallback_used"] = True
-            ai_context["ai_active"] = enabled_strats.copy()
+            enabled_strats = list(fallback_pool)[:3]
+            strategy_context["auto_fallback_used"] = True
+        strategy_context["active"] = enabled_strats.copy()
+    else:
+        strategy_context["active"] = enabled_strats.copy()
     if not enabled_strats:
         return {"status": "ok", "reason": "no_active_strategies"}
     
@@ -1289,6 +1386,10 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 "atr_points": str(entry_atr_points),
                 "tick_volume": last_entry.get("tick_volume"),
                 "spread_points": str(spread_points) if spread_points is not None else None,
+                "point": str(broker_point) if broker_point is not None else None,
+                "min_stop_points": str(broker_min_stop_points) if broker_min_stop_points else None,
+                "lot_step": str(broker_lot_step) if broker_lot_step is not None else None,
+                "broker_constraints": broker_snapshot,
                 "market_snapshot": market_snapshot,
                 "volatility": volatility_snapshot,
                 "strategy_metrics": engine_decision.metadata or {},
@@ -1413,14 +1514,14 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         context={
             "timeframe": timeframe,
             "session": session_label,
-            "ai_trade_enabled": ai_enabled,
+            "auto_trade_active": auto_mode,
             "strategies_enabled": enabled_strats,
             "strategy_profile": strategy_profile_key,
             "outcome": outcome,
             "signals": len(signals_created),
             "decisions": len(decisions_made),
             "orders": len(orders_placed),
-            **({"ai_context": ai_context} if ai_enabled else {}),
+            "strategy_context": strategy_context,
         },
     )
     
@@ -1802,3 +1903,28 @@ def reconcile_broker_positions_task(self):
         "skipped_db_only": skipped,
         "skipped_recent": skipped_recent,
     }
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=300,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 3},
+)
+def market_hours_guard_task(self):
+    """
+    Background guard to auto-stop bots whose market is closed and resume them when open.
+    Uses a reversible flag in scalper_params to avoid touching manually stopped bots.
+    """
+    result = apply_market_guard()
+    logger.info(
+        "[MarketGuard] stopped=%s resumed=%s skipped_crypto=%s skipped_no_asset=%s errors=%s",
+        result["stopped"],
+        result["resumed"],
+        result["skipped_crypto"],
+        result["skipped_no_asset"],
+        len(result["errors"]),
+    )
+    return result

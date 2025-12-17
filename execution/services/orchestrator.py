@@ -379,28 +379,3 @@ def update_order_status(
             "error": error_msg,
         },
     )
-
-    # NOTE: We no longer auto-create executions here. Connectors/tasks that
-    # mark an order filled must explicitly call record_fill once they have a
-    # confirmed broker success to avoid phantom fills or double-counting.
-    if new_status == "filled" and not was_filled:
-        # Log trade history entry
-        try:
-            from execution.models import TradeLog
-
-            already_logged = TradeLog.objects.filter(order=order, status=new_status).exists()
-            if not already_logged:
-                TradeLog.objects.create(
-                    order=order,
-                    bot=order.bot,
-                    owner=order.owner,
-                    broker_account=order.broker_account,
-                    symbol=order.symbol,
-                    side=order.side,
-                    qty=order.qty,
-                    price=order.price,
-                    status=new_status,
-                    pnl=None,
-                )
-        except Exception:
-            pass

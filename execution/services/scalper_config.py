@@ -81,13 +81,16 @@ class SymbolConfig:
     context_timeframes: Tuple[str, ...]
     sl_points_min: Decimal
     sl_points_max: Decimal
+    sl_points_unit: str
     tp_r_multiple: Decimal
     be_trigger_r: Decimal
     be_buffer_r: Decimal
     trail_trigger_r: Decimal
     trail_mode: str
     max_spread_points: Decimal
+    max_spread_unit: str
     max_slippage_points: Decimal
+    max_slippage_unit: str
     allow_countertrend: bool
     risk_pct: Decimal
 
@@ -164,58 +167,66 @@ FALLBACK_SYMBOL_PRESETS = {
     "commodities": {
         "execution_timeframes": ["M1"],
         "context_timeframes": ["M15", "H1"],
-        "sl_points": {"min": 50, "max": 150},
+        "sl_points": {"min": 50, "max": 150, "unit": "points"},
         "tp_r_multiple": 1.2,
         "be_trigger_r": 1.0,
         "be_buffer_r": 0.2,
         "trail_trigger_r": 1.5,
         "trail_mode": "swing",
-        "max_spread_points": 30,
+        "max_spread_points": 25,
+        "max_spread_unit": "points",
         "max_slippage_points": 10,
+        "max_slippage_unit": "points",
         "allow_countertrend": False,
-        "risk_pct": 0.5,
+        "risk_pct": 0.35,
     },
     "forex": {
         "execution_timeframes": ["M1", "M5"],
         "context_timeframes": ["M15", "H1"],
-        "sl_points": {"min": 5, "max": 8},
+        "sl_points": {"min": 5, "max": 8, "unit": "pips"},
         "tp_r_multiple": 1.2,
         "be_trigger_r": 1.0,
         "be_buffer_r": 0.2,
         "trail_trigger_r": 1.5,
         "trail_mode": "ema",
         "max_spread_points": 15,
+        "max_spread_unit": "pips",
         "max_slippage_points": 5,
+        "max_slippage_unit": "pips",
         "allow_countertrend": False,
         "risk_pct": 0.5,
     },
     "indices": {
         "execution_timeframes": ["M1", "M5"],
         "context_timeframes": ["M15", "H1"],
-        "sl_points": {"min": 15, "max": 40},
+        "sl_points": {"min": 15, "max": 40, "unit": "points"},
         "tp_r_multiple": 1.2,
         "be_trigger_r": 1.0,
         "be_buffer_r": 0.2,
         "trail_trigger_r": 1.6,
         "trail_mode": "structure",
         "max_spread_points": 25,
+        "max_spread_unit": "points",
         "max_slippage_points": 10,
+        "max_slippage_unit": "points",
         "allow_countertrend": False,
         "risk_pct": 0.4,
     },
     "crypto": {
         "execution_timeframes": ["M1"],
         "context_timeframes": ["M5", "M15", "H1"],
-        "sl_points": {"min": 200, "max": 600},
+        "sl_points": {"min": 200, "max": 600, "unit": "price"},
         "tp_r_multiple": 1.3,
         "be_trigger_r": 1.0,
         "be_buffer_r": 0.25,
         "trail_trigger_r": 1.8,
         "trail_mode": "structure",
-        "max_spread_points": 120,
+        "max_spread_points": 90,
+        "max_spread_unit": "price",
         "max_slippage_points": 60,
+        "max_slippage_unit": "price",
         "allow_countertrend": False,
-        "risk_pct": 0.35,
+        "risk_pct": 0.25,
     },
 }
 
@@ -273,6 +284,9 @@ def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], D
         primary_aliases.update(a.upper() for a in settings.get("aliases", []) if a)
         primary_aliases.discard(key)
         aliases = tuple(sorted(primary_aliases))
+        sl_unit = settings.get("sl_points", {}).get("unit") or "points"
+        spread_unit = settings.get("max_spread_unit") or "points"
+        slippage_unit = settings.get("max_slippage_unit") or "points"
         cfg = SymbolConfig(
             key=key,
             aliases=aliases,
@@ -280,13 +294,16 @@ def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], D
             context_timeframes=tuple(settings.get("context_timeframes", [])),
             sl_points_min=Decimal(str(settings.get("sl_points", {}).get("min", 1))),
             sl_points_max=Decimal(str(settings.get("sl_points", {}).get("max", 10))),
+            sl_points_unit=sl_unit,
             tp_r_multiple=Decimal(str(settings.get("tp_r_multiple", 1.0))),
             be_trigger_r=Decimal(str(settings.get("be_trigger_r", 1.0))),
             be_buffer_r=Decimal(str(settings.get("be_buffer_r", 0.2))),
             trail_trigger_r=Decimal(str(settings.get("trail_trigger_r", 1.5))),
             trail_mode=settings.get("trail_mode", "swing"),
             max_spread_points=Decimal(str(settings.get("max_spread_points", 10))),
+            max_spread_unit=spread_unit,
             max_slippage_points=Decimal(str(settings.get("max_slippage_points", 5))),
+            max_slippage_unit=slippage_unit,
             allow_countertrend=bool(settings.get("allow_countertrend", False)),
             risk_pct=Decimal(str(settings.get("risk_pct", 0.5))),
         )

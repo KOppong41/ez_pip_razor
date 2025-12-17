@@ -8,6 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
+    ALLOW_SQLITE_DESKTOP=(bool, False),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -109,7 +110,7 @@ else:
     }
 
 # Hard guard: never allow sqlite in production stacks.
-if "sqlite" in DATABASES["default"]["ENGINE"]:
+if "sqlite" in DATABASES["default"]["ENGINE"] and not env.bool("ALLOW_SQLITE_DESKTOP"):
     raise RuntimeError("SQLite is disabled for this project. Set DATABASE_URL or DB_* env vars for Postgres.")
 
 LANGUAGE_CODE = "en-us"
@@ -188,6 +189,10 @@ CELERY_BEAT_SCHEDULE = {
     },
     "reconcile-broker-positions-5m": {
         "task": "execution.tasks.reconcile_broker_positions_task",
+        "schedule": 300.0,
+    },
+    "market-hours-guard-5m": {
+        "task": "execution.tasks.market_hours_guard_task",
         "schedule": 300.0,
     },
 }

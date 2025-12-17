@@ -122,7 +122,8 @@ class Command(BaseCommand):
                     f"No active BrokerAccount found for user {user.username}. "
                     "Specify --account-id or create a broker account first."
                 )
-            self.stdout.write(self.style.WARNING(f"Using broker account: {broker_account.mt5_login}"))
+            acct_label = broker_account.mt5_login or broker_account.account_ref or broker_account.name
+            self.stdout.write(self.style.WARNING(f"Using broker account: {acct_label}"))
 
         # Validate strategies
         invalid = [s for s in strategies if s not in STRATEGY_CHOICES]
@@ -180,7 +181,8 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f"  Symbol: {symbol}"))
         self.stdout.write(self.style.SUCCESS(f"  User: {user.username}"))
-        self.stdout.write(self.style.SUCCESS(f"  Account: {broker_account.mt5_login}"))
+        acct_label = broker_account.mt5_login or broker_account.account_ref or broker_account.name
+        self.stdout.write(self.style.SUCCESS(f"  Account: {acct_label}"))
         self.stdout.write(self.style.SUCCESS(f"  Auto-trade: {auto_trade}"))
         self.stdout.write(self.style.SUCCESS(f"  Strategies: {', '.join(strategies)}"))
         self.stdout.write(self.style.SUCCESS(f"  Strategy profile: {profile_key}"))

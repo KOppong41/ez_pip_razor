@@ -1,0 +1,23 @@
+# Desktop mode configuration (copied to %APPDATA%/EzScalperBot/config.yml on first run)
+django:
+  host: 127.0.0.1
+  port: 4000
+  settings_module: config.settings_desktop
+celery:
+  worker:
+    args: "-A config worker -l info --concurrency=2"
+  beat:
+    args: "-A config beat -l info"
+mt5:
+  terminal_path: "C:/Program Files/MetaTrader 5/terminal64.exe"  # set to your terminal path
+  login: ""   # optional: can be left blank to use existing creds in DB
+  password: ""
+  server: ""
+logging:
+  root_dir: "%APPDATA%/EzScalperBot/logs"
+  max_bytes: 10485760
+  backup_count: 5
+ui:
+  width: 1280
+  height: 800
+  title: "EzScalperBot Desktop"

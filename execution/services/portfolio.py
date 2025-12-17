@@ -5,6 +5,40 @@ from django.utils import timezone
 from execution.models import Order, Execution, Position, TradeLog
 from execution.services.journal import log_journal_event
 from execution.services.psychology import update_bot_after_realized_pnl
+from execution.services.timezones import to_broker_timezone
+from execution.services.runtime_config import get_runtime_config
+
+
+def _resolve_contract_size(order: Order, provided: Decimal | None) -> Decimal:
+    """
+    Determine an appropriate contract size for PnL math.
+    Preference order:
+      1. Explicit value passed from the connector (MT5 trade_contract_size).
+      2. Asset category hints (crypto = 1, metals = 100).
+      3. Runtime default contract size (usually 100k for FX).
+    """
+    if provided is not None:
+        try:
+            val = Decimal(str(provided))
+            if val > 0:
+                return val
+        except Exception:
+            pass
+
+    asset = getattr(getattr(order, "bot", None), "asset", None)
+    category = (getattr(asset, "category", "") or "").lower()
+    symbol = (order.symbol or "").upper()
+
+    if category == "crypto" or symbol.startswith(("BTC", "ETH", "XRP", "SOL", "LTC")):
+        return Decimal("1")
+    if category in {"commodities", "metals"} or "XAU" in symbol or "GOLD" in symbol:
+        return Decimal("100")
+
+    try:
+        runtime_cfg = get_runtime_config()
+        return Decimal(str(runtime_cfg.mt5_default_contract_size))
+    except Exception:
+        return Decimal("100000")
 
 @transaction.atomic
 def record_fill(
@@ -13,6 +47,7 @@ def record_fill(
     price: Decimal,
     fee: Decimal = Decimal("0"),
     account_balance: Decimal | None = None,
+    contract_size: Decimal | None = None,
 ) -> Execution:
     """
     Record a single fill for an order, update the running Position,
@@ -80,6 +115,7 @@ def record_fill(
     # Detect realized PnL when reducing or closing an existing position.
     realized_pnl = None
     closing_qty = None
+    eff_contract = _resolve_contract_size(order, contract_size)
     if old_qty != 0:
         # Position direction before this fill
         if (old_qty > 0 and delta < 0) or (old_qty < 0 and delta > 0):
@@ -88,7 +124,7 @@ def record_fill(
             if closing_qty > 0:
                 # For longs, profit when price increases; for shorts, opposite.
                 direction = Decimal("1") if old_qty > 0 else Decimal("-1")
-                realized_pnl = (Decimal(str(price)) - Decimal(str(old_avg))) * closing_qty * direction
+                realized_pnl = ((Decimal(str(price)) - Decimal(str(old_avg))) * closing_qty * direction * eff_contract)
 
     pos.save()
     log_journal_event(
@@ -125,9 +161,11 @@ def record_fill(
                 price=order.price,
                 status="filled",
                 pnl=None,
+                broker_ticket=getattr(order, "broker_ticket", None),
+                opened_at_broker=to_broker_timezone(getattr(order, "created_at", None), order.broker_account),
             )
-
-        tl.pnl = realized_pnl
+        prior_pnl = tl.pnl or Decimal("0")
+        tl.pnl = prior_pnl + realized_pnl
         # Classify outcome for easier analytics
         if realized_pnl > 0:
             tl.status = "win"
@@ -137,8 +175,19 @@ def record_fill(
             tl.status = "breakeven"
         close_time = getattr(exe, "exec_time", None) or timezone.now()
         tl.closed_at = close_time
+        tl.closed_at_broker = to_broker_timezone(close_time, order.broker_account)
         tl.exit_price = Decimal(str(price))
-        tl.save(update_fields=["pnl", "status", "closed_at", "exit_price"])
+        update_fields = ["pnl", "status", "closed_at", "exit_price"]
+        if tl.opened_at_broker is None:
+            tl.opened_at_broker = to_broker_timezone(getattr(order, "created_at", None), order.broker_account)
+            update_fields.append("opened_at_broker")
+        if tl.closed_at_broker is not None and "closed_at_broker" not in update_fields:
+            update_fields.append("closed_at_broker")
+        order_ticket = getattr(order, "broker_ticket", None)
+        if order_ticket and tl.broker_ticket != order_ticket:
+            tl.broker_ticket = order_ticket
+            update_fields.append("broker_ticket")
+        tl.save(update_fields=update_fields)
 
         log_journal_event(
             "trade.realized_pnl",

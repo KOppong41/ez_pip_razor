@@ -38,9 +38,12 @@ class BrokerAccountForm(forms.ModelForm):
         broker = cleaned_data.get("broker")
         password = cleaned_data.get("mt5_password", "")
         
-        # For MT5 brokers on new accounts, password is required
-        if is_new and broker in ["mt5", "exness_mt5", "icmarket_mt5", "fbs"]:
-            if not password:
+        connector = cleaned_data.get("connector") or getattr(instance, "connector", "mt5_local")
+
+        # For MT5 connectors, ensure we have a stored password
+        if connector == "mt5_local":
+            has_stored_pwd = bool(getattr(instance, "mt5_password_enc", ""))
+            if (is_new or not has_stored_pwd) and not password:
                 raise ValidationError({
                     "mt5_password": _("Password is required for MT5 brokers when creating a new account.")
                 })

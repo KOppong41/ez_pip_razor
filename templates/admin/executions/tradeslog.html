@@ -233,6 +233,7 @@
                 <tr>
                     <th>{% trans "Open Time" %}</th>
                     <th>{% trans "Position" %}</th>
+                    <th>{% trans "MT5 Ticket" %}</th>
                     <th>{% trans "Symbol" %}</th>
                     <th>{% trans "Type" %}</th>
                     <th>{% trans "Volume" %}</th>
@@ -247,9 +248,22 @@
             </thead>
             <tbody>
                 {% for log in logs %}
-                <tr data-timestamp="{{ log.closed_at|default:log.created_at|date:'c' }}">
-                    <td>{{ log.order.created_at|date:"Y.m.d H:i:s" }}</td>
+                <tr data-timestamp="{{ log.closed_at_broker|default:log.closed_at|default:log.created_at|date:'c' }}">
+                    <td>
+                        {% if log.opened_at_broker %}
+                            {{ log.opened_at_broker|date:"Y.m.d H:i:s" }}
+                        {% else %}
+                            {{ log.order.created_at|date:"Y.m.d H:i:s" }}
+                        {% endif %}
+                    </td>
                     <td>{{ log.order.id }}</td>
+                    <td>
+                        {% if log.broker_ticket or log.order.broker_ticket %}
+                            {{ log.broker_ticket|default:log.order.broker_ticket }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
                     <td>{{ log.symbol }}</td>
                     <td>{{ log.side|upper }}</td>
                     <td>{{ log.qty }}</td>
@@ -277,7 +291,9 @@
                         {% endif %}
                     </td>
                     <td>
-                        {% if log.closed_at %}
+                        {% if log.closed_at_broker %}
+                            {{ log.closed_at_broker|date:"Y.m.d H:i:s" }}
+                        {% elif log.closed_at %}
                             {{ log.closed_at|date:"Y.m.d H:i:s" }}
                         {% else %}
                             —
@@ -332,7 +348,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="12" style="text-align:center;color:var(--gray-400);padding:var(--space-lg);">
+                    <td colspan="13" style="text-align:center;color:var(--gray-400);padding:var(--space-lg);">
                         <i class="fas fa-inbox" style="font-size:var(--text-2xl);margin-bottom:var(--space-sm);display:block;"></i>
                         {% trans "No trade logs found." %}
                     </td>

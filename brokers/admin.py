@@ -60,6 +60,8 @@ class BrokerAccountForm(forms.ModelForm):
             "broker",
             "account_ref",
             "owner",
+            "connector",
+            "adapter_config",
             "mt5_server",
             "mt5_login",
             "mt5_path",
@@ -90,8 +92,8 @@ class BrokerAccountAdmin(admin.ModelAdmin):
     change_list_template = "admin/brokers/brokeraccount.html"
     change_form_template = "admin/brokers/brokeraccount_change_form.html"
 
-    list_display = ("name", "broker", "owner", "masked_creds", "is_verified", "is_active")
-    list_filter = ("broker", "is_active", "created_at")
+    list_display = ("name", "broker", "connector", "owner", "masked_creds", "is_verified", "is_active")
+    list_filter = ("broker", "connector", "is_active", "created_at")
     search_fields = ("name", "owner__username")
     readonly_fields = ("owner",)
     exclude = ("mt5_password_enc",)
@@ -184,6 +186,8 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         obj = self.get_object(request, object_id)
         if not obj:
             return JsonResponse({"ok": False, "message": "Broker account not found."}, status=404)
+        if not obj.requires_mt5_connector():
+            return JsonResponse({"ok": False, "message": "Connection test only applies to MT5 desktop connectors."}, status=400)
         if not obj.is_active:
             return JsonResponse({"ok": False, "message": "Account is inactive. Activate before testing."}, status=400)
         symbols = self._get_health_symbols(obj)
@@ -204,6 +208,8 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         obj = self.get_object(request, object_id)
         if not obj:
             return JsonResponse({"ok": False, "message": "Broker account not found."}, status=404)
+        if not obj.requires_mt5_connector():
+            return JsonResponse({"ok": False, "message": "Balance refresh is only supported for MT5 desktop connectors."}, status=400)
         if not obj.is_active:
             return JsonResponse({"ok": False, "message": "Account is inactive. Activate before refresh."}, status=400)
         
@@ -221,6 +227,9 @@ class BrokerAccountAdmin(admin.ModelAdmin):
             if not obj.is_active:
                 skipped += 1
                 continue
+            if not obj.requires_mt5_connector():
+                skipped += 1
+                continue
             creds = obj.get_creds()
             try:
                 MT5Connector().check_health(creds, symbol="EURUSDm")
@@ -232,7 +241,11 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         if checked:
             self.message_user(request, f"Verified {checked} account(s).")
         if skipped:
-            self.message_user(request, f"Skipped {skipped} inactive account(s); activate before verifying.", level="warning")
+            self.message_user(
+                request,
+                f"Skipped {skipped} account(s) (inactive or unsupported connector).",
+                level="warning",
+            )
 
     def get_form(self, request, obj=None, **kwargs):
         BaseForm = super().get_form(request, obj, **kwargs)
@@ -245,11 +258,22 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         return RequestAwareForm
 
     def masked_creds(self, obj):
-        creds = obj.get_creds() or {}
-        login = creds.get("login") or "<none>"
-        server = creds.get("server") or "<none>"
-        has_pwd = bool(creds.get("password"))
-        return f"login={login}, server={server}, password={'***' if has_pwd else '<none>'}"
+        if obj.requires_mt5_connector():
+            creds = obj.get_creds() or {}
+            login = creds.get("login") or "<none>"
+            server = creds.get("server") or "<none>"
+            has_pwd = bool(creds.get("password"))
+            return f"login={login}, server={server}, password={'***' if has_pwd else '<none>'}"
+        cfg = obj.adapter_config or {}
+        if not cfg:
+            return "<no adapter config>"
+        masked_pairs = []
+        for key, value in cfg.items():
+            if isinstance(value, str) and any(token in key.lower() for token in ("secret", "token", "password", "key")):
+                masked_pairs.append(f"{key}=***")
+            else:
+                masked_pairs.append(f"{key}={value}")
+        return ", ".join(masked_pairs)
 
     masked_creds.short_description = "Credentials"
 
@@ -273,7 +297,7 @@ class BrokerAccountAdmin(admin.ModelAdmin):
 
         # Optional MT5 health check on save (can be slow). Default: skip and leave unverified.
         run_healthcheck = getattr(settings, "ADMIN_MT5_HEALTHCHECK_ON_SAVE", False)
-        if run_healthcheck and obj.is_active:
+        if run_healthcheck and obj.is_active and obj.requires_mt5_connector():
             creds = {
                 "login": form.cleaned_data.get("mt5_login") or obj.mt5_login,
                 "server": form.cleaned_data.get("mt5_server") or obj.mt5_server,
@@ -304,13 +328,20 @@ class BrokerAccountAdmin(admin.ModelAdmin):
                     + " | ".join(errors)
                     + " (adjust MT5_HEALTHCHECK_SYMBOLS/_MAP or ensure symbol is visible).",
                 )
-        elif run_healthcheck and not obj.is_active:
+        elif run_healthcheck and not obj.is_active and obj.requires_mt5_connector():
             # Inactive accounts should not hit MT5; leave as unverified.
             if change is False:
                 obj.is_verified = False
             messages.info(
                 request,
                 "Skipped MT5 health check because account is inactive. Activate before verifying.",
+            )
+        elif run_healthcheck and not obj.requires_mt5_connector():
+            if change is False:
+                obj.is_verified = False
+            messages.info(
+                request,
+                "Skipping MT5 health check: connector does not use the desktop terminal.",
             )
         else:
             # mark unverified; admins can use the Test Connection button

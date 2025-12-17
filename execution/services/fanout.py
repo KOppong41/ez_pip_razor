@@ -1,4 +1,4 @@
-﻿from decimal import Decimal
+﻿from decimal import Decimal, ROUND_FLOOR
 import logging
 import re
 from typing import List, Tuple
@@ -16,6 +16,8 @@ from datetime import timedelta
 from execution.services.runtime_config import get_runtime_config
 from execution.services.trading_type import is_within_trading_window
 from execution.services.psychology import get_size_multiplier
+from execution.services.brokers import get_broker_symbol_constraints
+from execution.services.trade_constraints import LotConstraints, snap_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,8 @@ def fanout_orders(decision: Decision, master_qty: str | None) -> List[Tuple[Orde
         logger.info("Skipping order: bot %s is outside its trading window", bot.name)
         return []
 
+    symbol = getattr(decision.signal, "symbol", None)
+    broker_constraints = get_broker_symbol_constraints(bot.broker_account, symbol)
     params = decision.params or {}
 
     qty = Decimal(master_qty) if master_qty is not None else Decimal(str(bot.default_qty))
@@ -80,11 +84,41 @@ def fanout_orders(decision: Decision, master_qty: str | None) -> List[Tuple[Orde
         if qty > cap:
             qty = cap
 
-    # Ensure we never send smaller than the broker's minimum
+    # Enforce broker/account-level quantity constraints first, then asset-level minimums.
+    broker_min = broker_constraints.min_lot or Decimal("0")
+    broker_step = broker_constraints.lot_step or Decimal("0")
+    broker_max = broker_constraints.max_lot or Decimal("0")
+
+    lot_constraints = LotConstraints(
+        min_lot=broker_min,
+        max_lot=broker_max,
+        lot_step=broker_step,
+    )
+    qty = snap_quantity(qty, lot_constraints)
+
+    # Skip trade if snapping drops below broker minimum (avoid rounding up and inflating risk).
+    if broker_min > 0 and qty < broker_min:
+        logger.info(
+            "SKIP_ORDER: snapped_lot %s < min_lot %s (bot=%s symbol=%s account=%s)",
+            qty,
+            broker_min,
+            getattr(bot, "id", None),
+            symbol,
+            getattr(bot.broker_account, "id", None),
+        )
+        return []
+
+    # Asset min remains a guardrail (after broker constraints).
     if asset_min_qty > 0 and qty < asset_min_qty:
         qty = asset_min_qty
 
     if qty <= 0:
+        logger.info(
+            "SKIP_ORDER: non-positive qty after constraints (bot=%s symbol=%s qty=%s)",
+            getattr(bot, "id", None),
+            symbol,
+            qty,
+        )
         return []
 
     if decision.action == "close":

@@ -3,6 +3,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from execution.models import Order, TradeLog
+from execution.services.timezones import to_broker_timezone
 
 
 class Command(BaseCommand):
@@ -40,6 +41,8 @@ class Command(BaseCommand):
                 price=order.price,
                 status=order.status,
                 pnl=None,
+                broker_ticket=getattr(order, "broker_ticket", None),
+                opened_at_broker=to_broker_timezone(getattr(order, "created_at", None), order.broker_account),
             )
             created += 1
 

@@ -322,16 +322,11 @@ class Bot(models.Model):
     )
 
     auto_trade = models.BooleanField(
-        default=False,
+        default=True,
         help_text=(
-            "If enabled, decisions with action='open' will send live orders to MT5. "
-            "If disabled, the bot only creates signals/decisions (paper mode)."
+            "If enabled, the bot dispatches live orders and uses its asset/profile strategy presets. "
+            "Disable to keep trades in manual/sandbox mode using the selected strategies."
         ),
-    )
-
-    ai_trade_enabled = models.BooleanField(
-        default=False,
-        help_text="If enabled, ignore manual strategy selection and let the AI selector choose strategies per market conditions.",
     )
 
     broker_account = models.ForeignKey(
@@ -385,7 +380,7 @@ class Bot(models.Model):
         default=list,
         blank=True,
         help_text=(
-            "Select which engine strategies this bot may run (tick one or more). "
+            "Select which strategies this bot may run while auto-trade is disabled (tick one or more). "
             "Examples: Harami, Engulfing, Hammer, Marubozu, Shooting Star, Three Soldiers, "
             "Sanpe Tonkachi FVG, Sansen Sutsumi Liquidity, Doji, Price Action Pin Bar, Doji Breakout."
         ),
@@ -597,14 +592,15 @@ class Bot(models.Model):
         if not owner and not getattr(settings, "TESTING", False):
             raise ValidationError("Owner is required for bots.")
 
-        # Validate strategies are from the known registry unless AI Trade is handling selection.
-        if not self.ai_trade_enabled:
-            if not self.enabled_strategies:
-                raise ValidationError({"enabled_strategies": "Select at least one strategy for this bot."})
+        # Validate strategies when auto-trade is disabled (manual strategy mode).
+        invalid = [s for s in (self.enabled_strategies or []) if s not in STRATEGY_CHOICES]
+        if invalid:
+            raise ValidationError({"enabled_strategies": f"Unknown strategies: {', '.join(invalid)}"})
 
-            invalid = [s for s in self.enabled_strategies if s not in STRATEGY_CHOICES]
-            if invalid:
-                raise ValidationError({"enabled_strategies": f"Unknown strategies: {', '.join(invalid)}"})
+        if not self.auto_trade and not self.enabled_strategies:
+            raise ValidationError(
+                {"enabled_strategies": "Select at least one strategy for this bot when auto-trade is off."}
+            )
 
         # Decision score guardrail
         try:
@@ -680,6 +676,28 @@ class Bot(models.Model):
                 other_syms = set([other.asset.symbol] if other.asset else [])
                 if not other_syms or symbols & other_syms:
                     raise ValidationError("Another bot already targets one of these symbols for this user.")
+
+        allocation_amount = Decimal(str(getattr(self, "allocation_amount", Decimal("0")) or 0))
+        if allocation_amount > 0 and getattr(self, "broker_account", None):
+            try:
+                from execution.services.accounts import get_account_balances  # noqa: WPS433
+                balances = get_account_balances(self.broker_account)
+            except Exception:
+                balances = {}
+            balance_value = balances.get("balance") if isinstance(balances, dict) else None
+            if balance_value is not None:
+                try:
+                    balance_dec = Decimal(str(balance_value))
+                except Exception:
+                    balance_dec = None
+                if balance_dec is not None and allocation_amount > balance_dec:
+                    raise ValidationError(
+                        {
+                            "allocation_amount": (
+                                f"Allocation {allocation_amount} exceeds available broker balance {balance_dec}."
+                            )
+                        }
+                    )
 
         return super().clean()
 

@@ -15,6 +15,8 @@ _CANONICAL_OVERRIDES: dict[str, str] = {
     "BTCUSD": "BTCUSD",
     "BTCUSDM": "BTCUSD",
     "BTCUSDTP": "BTCUSD",
+    "ETHUSD": "ETHUSD",
+    "ETHUSDM": "ETHUSD",
     "EURUSD": "EURUSD",
     "EURUSDM": "EURUSD",
     "GBPUSD": "GBPUSD",

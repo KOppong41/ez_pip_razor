@@ -15,6 +15,39 @@ DEFAULT_STRUCTURE_WEIGHT = Decimal("0.3")
 DEFAULT_MARKET_WEIGHT = Decimal("0.2")
 DEFAULT_SESSION_WEIGHT = Decimal("0.1")
 
+def _parse_decimal(payload: dict[str, Any], *keys: str) -> Decimal | None:
+    payload = payload or {}
+    for key in keys:
+        if payload.get(key) is None:
+            continue
+        try:
+            return Decimal(str(payload[key]))
+        except Exception:
+            continue
+    return None
+
+
+def _pip_size(point: Decimal | None) -> Decimal | None:
+    if point is None:
+        return None
+    # MT5: pip = 10 points on most FX symbols (5-digit brokers). For metals/indices, point is already a larger tick.
+    return point * Decimal("10") if point < Decimal("1") else point
+
+
+def _to_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decimal:
+    """
+    Normalize a distance to price units given the declared unit and broker point size.
+    Units supported: "price" (passthrough), "points", "pips".
+    """
+    unit = (unit or "points").lower()
+    if unit == "price":
+        return value
+    if unit == "points":
+        return value * point if point else value
+    if unit == "pips":
+        pip = _pip_size(point) or Decimal("0.0001")
+        return value * pip
+    return value
 
 @dataclass
 class ScalpRuntimeState:
@@ -49,12 +82,28 @@ def _point_size_for_symbol(symbol_cfg: SymbolConfig, symbol: str, payload: dict[
 
 def _estimate_sl_distance_points(symbol_cfg: SymbolConfig, payload: dict[str, Any]) -> Decimal:
     payload = payload or {}
+    point = _parse_decimal(payload, "point")
+    min_stop_points = None
+    for key in ("min_stop_points", "stops_level_points", "broker_min_stop_points"):
+        candidate = _parse_decimal(payload, key)
+        if candidate and candidate > 0:
+            min_stop_points = max(min_stop_points or Decimal("0"), candidate)
+
     if payload.get("sl_points"):
         try:
             pts = Decimal(str(payload["sl_points"]))
             return pts
         except Exception:
             pass
+    min_stop = None
+    for key in ("min_stop_points", "stops_level_points", "broker_min_stop_points"):
+        if key in payload and payload.get(key) is not None:
+            try:
+                candidate = Decimal(str(payload.get(key)))
+                if candidate > 0:
+                    min_stop = candidate if min_stop is None else max(min_stop, candidate)
+            except Exception:
+                continue
     atr_points = None
     for key in ("atr_points", "atr", "atr_m1_points"):
         if key in payload and payload[key]:
@@ -67,6 +116,16 @@ def _estimate_sl_distance_points(symbol_cfg: SymbolConfig, payload: dict[str, An
         distance = atr_points * Decimal("1.0")
     else:
         distance = (symbol_cfg.sl_points_min + symbol_cfg.sl_points_max) / Decimal("2")
+    # Broker stop level is expressed in MT5 points; translate into the symbol config unit before enforcing.
+    if min_stop_points is not None and min_stop_points > 0:
+        try:
+            stop_in_unit = min_stop_points
+            if symbol_cfg.sl_points_unit.lower() == "pips":
+                pip = _pip_size(point) or Decimal("0.0001")
+                stop_in_unit = (min_stop_points * (point or pip)) / pip
+            distance = max(distance, stop_in_unit)
+        except Exception:
+            distance = max(distance, min_stop_points)
     return max(symbol_cfg.sl_points_min, min(symbol_cfg.sl_points_max, distance))
 
 
@@ -118,18 +177,6 @@ def _build_scalper_params(
     }
 
 
-def _parse_decimal(payload: dict[str, Any], *keys: str) -> Decimal | None:
-    payload = payload or {}
-    for key in keys:
-        if payload.get(key) is None:
-            continue
-        try:
-            return Decimal(str(payload[key]))
-        except Exception:
-            continue
-    return None
-
-
 def _score_components(
     direction: str,
     bias: str | None,
@@ -141,6 +188,7 @@ def _score_components(
 ) -> Tuple[Decimal, Dict[str, float]]:
     components: Dict[str, float] = {}
     total = Decimal("0")
+    point = _parse_decimal(payload, "point")
 
     bias_detail = payload.get("htf_bias_detail") or {}
     bias_strength = Decimal("0")
@@ -179,9 +227,12 @@ def _score_components(
 
     spread_points = _parse_decimal(payload, "spread_points", "spread")
     market_weight = DEFAULT_MARKET_WEIGHT
-    if spread_points is not None and spread_points > symbol_cfg.max_spread_points:
-        market_weight *= Decimal("0.4")
-    elif spread_points is None:
+    if spread_points is not None:
+        allowed_spread = _to_price_delta(symbol_cfg.max_spread_points, symbol_cfg.max_spread_unit, point)
+        actual_spread = spread_points
+        if allowed_spread > 0 and actual_spread > allowed_spread:
+            market_weight *= Decimal("0.4")
+    else:
         market_weight *= Decimal("0.85")
     atr_points = _parse_decimal(payload, "atr_points")
     if atr_points is not None and atr_points < symbol_cfg.sl_points_min:
@@ -231,6 +282,16 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
 
     if payload.get("news_blocked"):
         return StrategyDecision(action="ignore", reason="scalper:news_blackout")
+
+    # Guard: SL must be meaningfully larger than spread in price terms.
+    point_hint = _parse_decimal(payload, "point")
+    spread_points = _parse_decimal(payload, "spread_points", "spread")
+    sl_points_hint = _parse_decimal(payload, "sl_points")
+    if spread_points is not None and sl_points_hint is not None:
+        sl_price_hint = _to_price_delta(sl_points_hint, getattr(symbol_cfg, "sl_points_unit", "points"), point_hint)
+        spread_price = _to_price_delta(spread_points, getattr(symbol_cfg, "max_spread_unit", "points"), point_hint)
+        if spread_price > 0 and sl_price_hint < spread_price * Decimal("2"):
+            return StrategyDecision(action="ignore", reason="scalper:sl_below_spread_guard")
 
     bias = _resolve_bias(payload)
     direction = (signal.direction or "").lower()

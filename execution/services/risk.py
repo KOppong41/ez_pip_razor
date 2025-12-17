@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Tuple
 
 from execution.services.scalper_config import ScalperConfig, SymbolConfig
+from execution.services.market_hours import is_crypto_symbol
 
 
 @dataclass
@@ -102,8 +103,9 @@ def _check_scalper_limits(
         return False, "scalper:daily_total_cap"
 
     reentry_rules = config.reentry
-    if ctx.reentry_count >= reentry_rules.max_trades_per_move:
-        return False, "scalper:reentry_cap"
+    if not is_crypto_symbol(ctx.symbol):
+        if ctx.reentry_count >= reentry_rules.max_trades_per_move:
+            return False, "scalper:reentry_cap"
 
     if (
         ctx.minutes_since_last_same_direction is not None

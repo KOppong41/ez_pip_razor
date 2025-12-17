@@ -4,6 +4,7 @@ from django.utils import timezone
 from decimal import Decimal
 
 from execution.models import Position, TradeLog, Order
+from execution.services.timezones import to_broker_timezone
 
 
 class Command(BaseCommand):
@@ -89,6 +90,8 @@ class Command(BaseCommand):
                         price=order.price,
                         status="filled",
                         pnl=None,
+                        broker_ticket=getattr(order, "broker_ticket", None),
+                        opened_at_broker=to_broker_timezone(getattr(order, "created_at", None), order.broker_account),
                     )
                     created += 1
                 # For positions that end flat, attribute realized PnL to the last execution's order.
@@ -100,7 +103,17 @@ class Command(BaseCommand):
                         tl.status = "loss"
                     else:
                         tl.status = "breakeven"
-                    tl.save(update_fields=["pnl", "status"])
+                    update_fields = ["pnl", "status"]
+                    if tl.opened_at_broker is None:
+                        tl.opened_at_broker = to_broker_timezone(getattr(order, "created_at", None), order.broker_account)
+                        update_fields.append("opened_at_broker")
+                    tl.closed_at_broker = to_broker_timezone(getattr(exe, "exec_time", None), order.broker_account)
+                    update_fields.append("closed_at_broker")
+                    order_ticket = getattr(order, "broker_ticket", None)
+                    if order_ticket and tl.broker_ticket != order_ticket:
+                        tl.broker_ticket = order_ticket
+                        update_fields.append("broker_ticket")
+                    tl.save(update_fields=update_fields)
                     updated += 1
 
         self.stdout.write(

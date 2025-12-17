@@ -18,7 +18,7 @@ from django.utils.safestring import mark_safe
 from .models import Asset, Bot, STRATEGY_CHOICES, STANDARD_TIMEFRAMES, DEFAULT_TRADING_DAYS, CATEGORY_CHOICES, STRATEGY_GUIDES
 from brokers.models import Broker
 from execution.models import TradeLog
-from execution.services.psychology import get_size_multiplier
+from execution.services.psychology import get_size_multiplier, reset_allocation_cycle
 from execution.services.scalper_config import build_scalper_config
 from execution.models import default_scalper_profile_config, Position, ScalperRunLog, TradeLog
 from execution.utils.symbols import canonical_symbol
@@ -158,7 +158,8 @@ def _strategy_help_text():
         if notes:
             line += f"; {notes}"
         items.append(f"<li>{line}</li>")
-    return mark_safe("<div>Recommendations:<ul>" + "".join(items) + "</ul></div>")
+    note = "<p>Manual strategy selection only applies when auto-trade is disabled.</p>"
+    return mark_safe(note + "<div>Recommendations:<ul>" + "".join(items) + "</ul></div>")
 
 
 WEEKDAY_CHOICES = [
@@ -271,9 +272,13 @@ class BotForm(forms.ModelForm):
 
     def clean_enabled_strategies(self):
         strategies = self.cleaned_data.get("enabled_strategies") or []
-        ai_mode = self.cleaned_data.get("ai_trade_enabled")
-        if ai_mode:
+        auto_mode = self.cleaned_data.get("auto_trade")
+        if auto_mode is None:
+            auto_mode = getattr(self.instance, "auto_trade", True)
+        if auto_mode:
+            # Auto-trade mode ignores manual selections, but keep whatever was provided for future manual use.
             return strategies
+
         if not strategies:
             asset = self.cleaned_data.get("asset") or self.instance.asset
             default_set: list[str] = []
@@ -286,7 +291,7 @@ class BotForm(forms.ModelForm):
                     (
                         prof.enabled_strategies
                         for prof in strategy_profiles.values()
-                        if prof.symbol and canon_symbol(prof.symbol) == canon_symbol
+                        if prof.symbol and canonical_symbol(prof.symbol) == canon_symbol
                     ),
                     None,
                 )
@@ -299,7 +304,7 @@ class BotForm(forms.ModelForm):
                 default_set = []
             strategies = default_set or strategies
         if not strategies:
-            raise forms.ValidationError("Select at least one strategy.")
+            raise forms.ValidationError("Select at least one strategy when auto-trade is disabled.")
         return strategies
 
     def clean_allowed_timeframes(self):
@@ -439,7 +444,6 @@ class BotAdmin(admin.ModelAdmin):
         "asset",
         "status",
         "auto_trade",
-        "ai_trade_enabled",
         "engine_mode",
         "broker_account",
         "default_timeframe",
@@ -451,7 +455,6 @@ class BotAdmin(admin.ModelAdmin):
     list_filter = (
         "status",
         "auto_trade",
-        "ai_trade_enabled",
         "engine_mode",
         "default_timeframe",
         "broker_account__broker",
@@ -462,7 +465,7 @@ class BotAdmin(admin.ModelAdmin):
 
     base_fieldsets = (
         ("Identity", {
-            "fields": ("name", "owner", "status", "auto_trade", "ai_trade_enabled", "engine_mode", "enabled_strategies"),
+            "fields": ("name", "owner", "status", "auto_trade", "engine_mode", "enabled_strategies"),
         }),
         ("Routing & Sizing", {
             "fields": ("asset", "default_timeframe", "allowed_timeframes", "default_qty"),
@@ -680,13 +683,18 @@ class BotAdmin(admin.ModelAdmin):
 
     # --------- Start / pause / stop single bot from details page --------
 
-    def _update_status_and_redirect(self, request, object_id, new_status, action_verb):
+    def _update_status_and_redirect(self, request, object_id, new_status, action_verb, *, reset_allocation=False):
         bot = self._get_bot_or_404(request, object_id)
         if not self.has_change_permission(request, bot):
             raise PermissionDenied
 
         bot.status = new_status
         bot.save()
+        if reset_allocation:
+            try:
+                reset_allocation_cycle(bot, reason="manual_start")
+            except Exception:
+                pass
         self.message_user(request, f"Bot '{bot.name}' {action_verb}.")
         return HttpResponseRedirect(
             reverse("admin:bots_bot_details", args=[bot.pk])
@@ -697,7 +705,13 @@ class BotAdmin(admin.ModelAdmin):
             return HttpResponseRedirect(
                 reverse("admin:bots_bot_details", args=[object_id])
             )
-        return self._update_status_and_redirect(request, object_id, "active", "started")
+        return self._update_status_and_redirect(
+            request,
+            object_id,
+            "active",
+            "started",
+            reset_allocation=True,
+        )
 
     def pause_bot_view(self, request, object_id, *args, **kwargs):
         if request.method != "POST":
@@ -785,9 +799,8 @@ class BotAdmin(admin.ModelAdmin):
             raise PermissionDenied("Only Admins may create or modify bots.")
         if not obj.owner:
             obj.owner = request.user
-        # If no strategies were provided, seed sane defaults so the engine can run,
-        # unless AI mode is enabled (AI selects dynamically and can operate with an empty list).
-        if not obj.enabled_strategies and not obj.ai_trade_enabled:
+        # If manual mode is enabled and no strategies were provided, seed sensible defaults.
+        if not obj.auto_trade and not obj.enabled_strategies:
             try:
                 cfg = build_scalper_config(obj)
                 profile = cfg.strategy_profiles.get(cfg.default_strategy_profile)

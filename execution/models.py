@@ -127,6 +127,7 @@ class Order(models.Model):
     sl = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     tp = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     status = models.CharField(max_length=50, choices=STATUS, default="new")
+    broker_ticket = models.BigIntegerField(null=True, blank=True)
     last_error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -281,6 +282,9 @@ class TradeLog(models.Model):
     pnl = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
+    opened_at_broker = models.DateTimeField(null=True, blank=True)
+    closed_at_broker = models.DateTimeField(null=True, blank=True)
+    broker_ticket = models.BigIntegerField(null=True, blank=True)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -509,18 +513,18 @@ def default_scalper_profile_config() -> dict:
                 "symbol": "BTCUSD",
                 "execution_timeframes": ["M1"],
                 "description": "BTC-specific blend favouring momentum ignition and breakout retests during high-volatility windows.",
-                "enabled_strategies": ["momentum_ignition", "breakout_retest", "trend_pullback"],
+                "enabled_strategies": ["momentum_ignition", "breakout_retest"],
                 "internal_triggers": ["price_action_pinbar"],
-                "disabled_strategies": ["range_reversion"],
+                "disabled_strategies": ["range_reversion", "trend_pullback"],
             },
             "xau_precision": {
                 "name": "Gold Precision",
                 "symbol": "XAUUSD",
                 "execution_timeframes": ["M1"],
-                "description": "Gold-focused profile emphasising pin-bar confirmations, doji breakouts, and structured pullbacks.",
-                "enabled_strategies": ["price_action_pinbar", "trend_pullback", "doji_breakout"],
-                "internal_triggers": ["breakout_retest"],
-                "disabled_strategies": ["momentum_ignition"],
+                "description": "Gold-focused profile emphasising pin-bar confirmations and disciplined breakout entries.",
+                "enabled_strategies": ["price_action_pinbar", "doji_breakout"],
+                "internal_triggers": ["trend_pullback"],
+                "disabled_strategies": ["momentum_ignition", "range_reversion"],
             },
             "eurusd_intraday": {
                 "name": "EURUSD Intraday",
@@ -637,7 +641,7 @@ def default_scalper_profile_config() -> dict:
                 "aliases": ["XAUUSDm", "GOLDm"],
                 "execution_timeframes": ["M1"],
                 "context_timeframes": ["M15", "H1"],
-                "sl_points": {"min": 50, "max": 150},
+                "sl_points": {"min": 50, "max": 150, "unit": "points"},
                 "tp_r_multiple": 1.2,
                 "be_trigger_r": 1.0,
                 "be_buffer_r": 0.2,
@@ -645,7 +649,9 @@ def default_scalper_profile_config() -> dict:
                 "trail_mode": "swing",
                 # Tighter spread/slippage guardrails for XAU scalping.
                 "max_spread_points": 30,
+                "max_spread_unit": "points",
                 "max_slippage_points": 10,
+                "max_slippage_unit": "points",
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
             },
@@ -653,14 +659,16 @@ def default_scalper_profile_config() -> dict:
                 "aliases": ["EURUSDm"],
                 "execution_timeframes": ["M1", "M5"],
                 "context_timeframes": ["M15", "H1"],
-                "sl_points": {"min": 5, "max": 8},
+                "sl_points": {"min": 5, "max": 8, "unit": "pips"},
                 "tp_r_multiple": 1.2,
                 "be_trigger_r": 1.0,
                 "be_buffer_r": 0.2,
                 "trail_trigger_r": 1.5,
                 "trail_mode": "ema",
                 "max_spread_points": 15,
+                "max_spread_unit": "pips",
                 "max_slippage_points": 5,
+                "max_slippage_unit": "pips",
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
             },
@@ -668,14 +676,16 @@ def default_scalper_profile_config() -> dict:
                 "aliases": ["GBPUSDm"],
                 "execution_timeframes": ["M1", "M5"],
                 "context_timeframes": ["M15", "H1"],
-                "sl_points": {"min": 6, "max": 10},
+                "sl_points": {"min": 6, "max": 10, "unit": "pips"},
                 "tp_r_multiple": 1.2,
                 "be_trigger_r": 1.0,
                 "be_buffer_r": 0.2,
                 "trail_trigger_r": 1.5,
                 "trail_mode": "ema",
                 "max_spread_points": 18,
+                "max_spread_unit": "pips",
                 "max_slippage_points": 6,
+                "max_slippage_unit": "pips",
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
             },
@@ -683,7 +693,7 @@ def default_scalper_profile_config() -> dict:
                 "aliases": ["BTCUSDm"],
                 "execution_timeframes": ["M1"],
                 "context_timeframes": ["M5", "M15", "H1"],
-                "sl_points": {"min": 200, "max": 600},
+                "sl_points": {"min": 200, "max": 600, "unit": "price"},
                 "tp_r_multiple": 1.3,
                 "be_trigger_r": 1.0,
                 "be_buffer_r": 0.25,
@@ -692,7 +702,27 @@ def default_scalper_profile_config() -> dict:
                 # BTC spreads/slippage expand sharply around volatility events,
                 # so cap them higher than FX while still rejecting wild fills.
                 "max_spread_points": 120,
+                "max_spread_unit": "price",
                 "max_slippage_points": 60,
+                "max_slippage_unit": "price",
+                "allow_countertrend": False,
+                "risk_pct": 0.35,
+            },
+            "ETHUSD": {
+                "aliases": ["ETHUSDm"],
+                "execution_timeframes": ["M1"],
+                "context_timeframes": ["M5", "M15", "H1"],
+                # ETH moves less per point than BTC, so keep stops tighter while still using crypto guardrails.
+                "sl_points": {"min": 80, "max": 250, "unit": "price"},
+                "tp_r_multiple": 1.25,
+                "be_trigger_r": 1.0,
+                "be_buffer_r": 0.25,
+                "trail_trigger_r": 1.6,
+                "trail_mode": "structure",
+                "max_spread_points": 60,
+                "max_spread_unit": "price",
+                "max_slippage_points": 30,
+                "max_slippage_unit": "price",
                 "allow_countertrend": False,
                 "risk_pct": 0.35,
             },

@@ -1,0 +1,280 @@
+{% extends "admin/trading_base.html" %}
+{% load i18n %}
+
+{% block title %}{% trans "Scalper Asset Profiles" %} | EzTrade{% endblock %}
+{% block page_title %}{% trans "Scalper Asset Profiles" %}{% endblock %}
+{% block page_subtitle %}{% trans "Inspect and tune every scalper preset: sessions, strategy mixes, and per-asset parameters." %}{% endblock %}
+
+{% block extra_css %}
+{{ block.super }}
+<style>
+    .execution-settings-container {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xl);
+    }
+    .back-link {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-sm);
+        margin-bottom: var(--space-lg);
+    }
+    .summary-grid,
+    .strategy-grid,
+    .profiles-grid,
+    .preset-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+        gap: var(--space-lg);
+    }
+    .summary-card,
+    .strategy-card,
+    .profile-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-lg);
+        padding: var(--space-lg);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-lg);
+    }
+    .kv-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-sm);
+        font-size: var(--text-sm);
+    }
+    .kv-list span.label {
+        font-size: var(--text-xxs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--gray-400);
+    }
+    .tag {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.15);
+        font-size: var(--text-xxs);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--gray-200);
+    }
+    .tag.highlight {
+        border-color: var(--primary);
+        color: var(--primary-light);
+    }
+    .profiles-grid {
+        grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    }
+    .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-md);
+    }
+    .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-xs);
+    }
+    .form-group label {
+        font-size: var(--text-xs);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--gray-400);
+    }
+    .form-group input {
+        width: 100%;
+    }
+    .profile-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-md);
+    }
+    .profile-symbol {
+        font-size: var(--text-xl);
+        font-weight: 700;
+        letter-spacing: 0.05em;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="execution-settings-container">
+    <a href="{{ changelist_url }}" class="back-link">
+        <i class="fas fa-arrow-left"></i> {% trans "Back to execution settings" %}
+    </a>
+
+    {% if scalper_config %}
+    <section>
+        <h2 style="margin-bottom: var(--space-md);">{% trans "Global configuration" %}</h2>
+        <div class="summary-grid">
+            <div class="summary-card">
+                <h3>{% trans "Risk Envelope" %}</h3>
+                <div class="kv-list">
+                    {% for key, value in scalper_config.risk.items %}
+                        <span class="label">{{ key|upper }}</span>
+                        <span>{{ value }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="summary-card">
+                <h3>{% trans "Sessions & Limits" %}</h3>
+                <div class="kv-list">
+                    <span class="label">{% trans "Sessions" %}</span>
+                    <span>
+                        {% for session in scalper_config.sessions %}
+                            {{ session.start }}-{{ session.end }}{% if not forloop.last %}, {% endif %}
+                        {% endfor %}
+                    </span>
+                    <span class="label">{% trans "News blackout count" %}</span>
+                    <span>{{ scalper_config.news_blackouts|length }}</span>
+                    <span class="label">{% trans "Re-entry limit" %}</span>
+                    <span>{{ scalper_config.reentry.max_trades_per_move }}</span>
+                    <span class="label">{% trans "Time in trade (min)" %}</span>
+                    <span>{{ scalper_config.time_in_trade_limit_min }}</span>
+                </div>
+            </div>
+            <div class="summary-card">
+                <h3>{% trans "Countertrend" %}</h3>
+                <div class="kv-list">
+                    {% for key, value in scalper_config.countertrend.items %}
+                        <span class="label">{{ key|upper }}</span>
+                        <span>{{ value }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2 style="margin-bottom: var(--space-md);">{% trans "Strategy profiles" %}</h2>
+        <div class="strategy-grid">
+            {% for key, profile in scalper_config.strategy_profiles.items %}
+            <div class="strategy-card">
+                <div>
+                    <strong>{{ profile.name }}</strong><br>
+                    <small style="color: var(--gray-400);">{{ key }}{% if profile.symbol %} · {{ profile.symbol }}{% endif %}</small>
+                </div>
+                <p style="color: var(--gray-300); font-size: var(--text-sm);">{{ profile.description }}</p>
+                <div class="tag-row">
+                    {% for strat in profile.enabled_strategies %}
+                        <span class="tag">{{ strat }}</span>
+                    {% endfor %}
+                </div>
+                {% if profile.disabled_strategies %}
+                <div style="font-size: var(--text-xs); color: var(--danger);">
+                    {% trans "Disabled" %}: {{ profile.disabled_strategies|join:", " }}
+                </div>
+                {% endif %}
+                {% if profile.internal_triggers %}
+                <div class="tag-row">
+                    {% for trig in profile.internal_triggers %}
+                        <span class="tag highlight">{{ trig }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section>
+        <h2 style="margin-bottom: var(--space-md);">{% trans "Presets" %}</h2>
+        <div class="preset-grid">
+            <div class="summary-card">
+                <h3>{% trans "Risk Presets" %}</h3>
+                {% for key, preset in scalper_config.risk_presets.items %}
+                <div style="margin-bottom: var(--space-sm);">
+                    <strong>{{ preset.name }}</strong>
+                    <small class="tag" style="margin-left: var(--space-xs);">{{ key }}</small>
+                    <div class="kv-list">
+                        <span class="label">TP</span><span>{{ preset.tp_pips }}</span>
+                        <span class="label">SL</span><span>{{ preset.sl_pips }}</span>
+                        <span class="label">Kill%</span><span>{{ preset.kill_switch_pct }}</span>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="summary-card">
+                <h3>{% trans "Psychology Profiles" %}</h3>
+                {% for key, preset in scalper_config.psychology_profiles.items %}
+                <div style="margin-bottom: var(--space-sm);">
+                    <strong>{{ key|title }}</strong>
+                    <div class="kv-list">
+                        <span class="label">{% trans "Autopause" %}</span><span>{{ preset.autopause }}</span>
+                        <span class="label">{% trans "Max streak" %}</span><span>{{ preset.max_loss_streak }}</span>
+                        <span class="label">{% trans "Soft DD" %}</span><span>{{ preset.soft_dd_pct }}</span>
+                        <span class="label">{% trans "Hard DD" %}</span><span>{{ preset.hard_dd_pct }}</span>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="summary-card">
+                <h3>{% trans "Score Profiles" %}</h3>
+                {% for key, preset in scalper_config.score_profiles.items %}
+                <div style="margin-bottom: var(--space-sm);">
+                    <strong>{{ preset.label }}</strong>
+                    <div class="kv-list">
+                        <span class="label">{% trans "Threshold" %}</span><span>{{ preset.threshold }}</span>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+    {% endif %}
+
+    <section>
+        <h2 style="margin-bottom: var(--space-md);">{% trans "Per-asset parameters" %}</h2>
+        <div class="profiles-grid">
+            {% for item in symbol_forms %}
+            <div class="profile-card">
+                <div class="profile-header">
+                    <div>
+                        <div class="profile-symbol">{{ item.symbol }}</div>
+                        {% if item.meta.aliases %}
+                        <small style="color: var(--gray-400);">
+                            {% trans "Aliases" %}: {{ item.meta.aliases|join:", " }}
+                        </small>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <span class="label" style="display:block; text-align:right; color: var(--gray-400);">
+                            {% trans "Risk %" %}
+                        </span>
+                        <div style="font-size: var(--text-lg); font-weight: 600; text-align:right;">
+                            {{ item.meta.risk_pct|default:"-" }}
+                        </div>
+                    </div>
+                </div>
+                <form method="post" novalidate>
+                    {% csrf_token %}
+                    <input type="hidden" name="symbol" value="{{ item.symbol }}">
+                    <div class="form-grid">
+                        {% for field in item.form %}
+                        <div class="form-group">
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                            {{ field }}
+                            {{ field.errors }}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <small style="color: var(--gray-400);">
+                            {% trans "Exec TFs" %}: {{ item.meta.execution_timeframes|join:", " }} ·
+                            {% trans "Context TFs" %}: {{ item.meta.context_timeframes|join:", " }}
+                        </small>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save"></i> {% trans "Save" %}
+                        </button>
+                    </div>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+{% endblock %}
