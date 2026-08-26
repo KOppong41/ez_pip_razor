@@ -8,6 +8,7 @@ from typing import Callable
 
 from celery import shared_task
 from django.conf import settings
+from django.db.models import Sum
 from django.utils import timezone
 
 from brokers.models import BrokerAccount
@@ -57,7 +58,8 @@ from execution.tasks_market_guard import apply_market_guard
 from execution.services.scalper_config import build_scalper_config
 from execution.services.runtime_config import get_runtime_config
 from execution.services.journal import log_journal_event
-from execution.services.orchestrator import update_order_status
+from execution.services.orchestrator import create_close_order_for_position, update_order_status
+from execution.services.portfolio import record_fill
 from execution.services.strategies.breakout_retest import (
     BreakoutRetestConfig,
     run_breakout_retest,
@@ -127,6 +129,15 @@ def _session_label(moment=None) -> str:
         if start <= hour < end:
             return label
     return "overnight"
+
+
+def _tick_timestamp_is_stale(tick_dt: datetime, *, now: datetime | None = None) -> bool:
+    """Validate freshness while tolerating bounded MT5 broker-clock skew."""
+    now = now or timezone.now()
+    age_seconds = (now - tick_dt).total_seconds()
+    max_age = int(getattr(settings, "MT5_TICK_MAX_AGE_SECONDS", 120))
+    future_tolerance = int(getattr(settings, "MT5_TICK_FUTURE_TOLERANCE_SECONDS", 7200))
+    return age_seconds > max_age or age_seconds < -future_tolerance
 
 
 def _analyze_htf_bias(candles) -> dict | None:
@@ -236,6 +247,98 @@ def _atr_like(candles, period: int = 14):
     window = candles[-period:]
     total = sum((c["high"] - c["low"] for c in window), Decimal("0"))
     return total / Decimal(str(period))
+
+
+def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosition) -> list[int]:
+    """Import broker-side SL/TP exits for one EZ Trade-owned position.
+
+    MT5 removes a position immediately after its stop or take-profit fills. The
+    open-position snapshot alone therefore cannot distinguish a legitimate
+    broker close from an unexplained disappearance. Position-scoped deal
+    history is authoritative and is not affected by broker/local clock skew.
+    """
+    if local.ownership != "ez_trade":
+        return []
+
+    deals = connector.history_deals_for_position_account(
+        local.broker_account,
+        local.broker_position_ticket,
+    )
+    exit_entries = {1, 2, 3}  # MT5 DEAL_ENTRY_OUT, INOUT, OUT_BY
+    exit_deals = [
+        deal
+        for deal in deals
+        if int(getattr(deal, "position_id", 0) or 0) == local.broker_position_ticket
+        and int(getattr(deal, "entry", -1)) in exit_entries
+    ]
+    if not exit_deals:
+        return []
+
+    close_order, _ = create_close_order_for_position(local, local.broker_account)
+    imported = []
+    for deal in sorted(
+        exit_deals,
+        key=lambda value: int(getattr(value, "time_msc", 0) or getattr(value, "time", 0) or 0),
+    ):
+        deal_ticket = int(getattr(deal, "ticket", 0) or 0)
+        if not deal_ticket or Execution.objects.filter(
+            order__broker_account=local.broker_account,
+            broker_deal_ticket=deal_ticket,
+        ).exists():
+            continue
+        qty = Decimal(str(getattr(deal, "volume", 0) or 0))
+        price = Decimal(str(getattr(deal, "price", 0) or 0))
+        if qty <= 0 or price <= 0:
+            continue
+        record_fill(
+            close_order,
+            qty,
+            price,
+            broker_order_ticket=int(getattr(deal, "order", 0) or 0) or None,
+            broker_deal_ticket=deal_ticket,
+            broker_position_ticket=local.broker_position_ticket,
+            broker_profit=Decimal(str(getattr(deal, "profit", 0) or 0)),
+            commission=Decimal(str(getattr(deal, "commission", 0) or 0)),
+            swap=Decimal(str(getattr(deal, "swap", 0) or 0)),
+            broker_metadata=(deal._asdict() if hasattr(deal, "_asdict") else {}),
+        )
+        imported.append(deal_ticket)
+
+    if not imported:
+        return []
+
+    filled = close_order.executions.aggregate(total=Sum("qty"))["total"] or Decimal("0")
+    requested_qty = Decimal(str(close_order.qty))
+    close_order.filled_qty = min(requested_qty, filled)
+    close_order.remaining_qty = max(Decimal("0"), requested_qty - close_order.filled_qty)
+    last = exit_deals[-1]
+    close_order.broker_order_ticket = int(getattr(last, "order", 0) or 0) or None
+    close_order.broker_deal_ticket = int(getattr(last, "ticket", 0) or 0) or None
+    close_order.broker_position_ticket = local.broker_position_ticket
+    close_order.mt5_retcode_description = "Reconciled broker-side position close"
+    close_order.save(
+        update_fields=[
+            "filled_qty",
+            "remaining_qty",
+            "broker_order_ticket",
+            "broker_deal_ticket",
+            "broker_position_ticket",
+            "mt5_retcode_description",
+        ]
+    )
+    target = "filled" if close_order.remaining_qty == 0 else "part_filled"
+    if close_order.status != target:
+        update_order_status(
+            close_order,
+            target,
+            price=Decimal(str(getattr(last, "price", 0) or 0)),
+        )
+    local.status = "closed" if target == "filled" else "missing"
+    local.volume = close_order.remaining_qty
+    local.closed_at = timezone.now() if target == "filled" else None
+    local.last_reconciled_at = timezone.now()
+    local.save(update_fields=["status", "volume", "closed_at", "last_reconciled_at"])
+    return imported
 
 
 @shared_task(
@@ -1279,7 +1382,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 return {"status": "skipped", "reason": "market_data_unavailable"}
             tick_dt = datetime.fromtimestamp(float(tick_seconds), tz=dt_timezone.utc)
             seconds_since_tick = (timezone.now() - tick_dt).total_seconds()
-            if seconds_since_tick < 0 or seconds_since_tick > 120:
+            if _tick_timestamp_is_stale(tick_dt):
                 _log_skip(
                     "market_data_stale",
                     {"age_seconds": int(seconds_since_tick), "strategy_profile": strategy_profile_key},
@@ -2017,6 +2120,7 @@ def reconcile_broker_positions_task(self):
     connector = MT5Connector()
     imported_owned = []
     imported_external = []
+    imported_closes = []
     missing_local = []
     errors = []
 
@@ -2067,12 +2171,25 @@ def reconcile_broker_positions_task(self):
 
         for local in acct.broker_positions.filter(status="open"):
             if local.broker_position_ticket not in broker_tickets:
-                local.status = "missing"
-                local.last_reconciled_at = timezone.now()
-                local.save(update_fields=["status", "last_reconciled_at"])
-                missing_local.append(local.broker_position_ticket)
+                try:
+                    closed_deals = _reconcile_missing_owned_position(connector, local)
+                except Exception as e:
+                    closed_deals = []
+                    errors.append((acct.id, local.broker_position_ticket, str(e)))
+                    logger.exception(
+                        "[Recon] failed to reconcile closed position acct=%s ticket=%s",
+                        acct.id,
+                        local.broker_position_ticket,
+                    )
+                if closed_deals:
+                    imported_closes.extend(closed_deals)
+                else:
+                    local.status = "missing"
+                    local.last_reconciled_at = timezone.now()
+                    local.save(update_fields=["status", "last_reconciled_at"])
+                    missing_local.append(local.broker_position_ticket)
 
-    if imported_owned or imported_external or missing_local or errors:
+    if imported_owned or imported_external or imported_closes or missing_local or errors:
         log_journal_event(
             "broker.reconcile",
             severity="info",
@@ -2080,6 +2197,7 @@ def reconcile_broker_positions_task(self):
             context={
                 "imported_owned": imported_owned,
                 "imported_external": imported_external,
+                "imported_closes": imported_closes,
                 "missing_local": missing_local,
                 "errors": errors,
             },
@@ -2087,6 +2205,7 @@ def reconcile_broker_positions_task(self):
     return {
         "imported_owned": imported_owned,
         "imported_external": imported_external,
+        "imported_closes": imported_closes,
         "missing_local": missing_local,
         "errors": errors,
     }

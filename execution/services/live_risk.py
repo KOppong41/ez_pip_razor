@@ -7,6 +7,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from execution.models import AccountSnapshot, BrokerPosition, Order, RiskPolicy
+from execution.services.scalper_config import build_scalper_config
+from execution.services.trade_constraints import distance_to_price
 
 
 class RiskRejected(ValueError):
@@ -21,6 +23,8 @@ class PreTradeRiskResult:
     risk_amount: Decimal
     loss_per_lot: Decimal
     spread_points: Decimal
+    spread_limit_points: Decimal
+    deviation_points: int
 
 
 def _decimal(value, default="0") -> Decimal:
@@ -34,6 +38,23 @@ def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
     if step <= 0:
         return value
     return (value / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+def _scalper_symbol_limit_points(order: Order, point: Decimal, value_field: str, unit_field: str):
+    """Return a scalper profile limit converted to raw MT5 points."""
+    bot = getattr(order, "bot", None)
+    if not bot or getattr(bot, "engine_mode", "") != "scalper" or point <= 0:
+        return None
+    try:
+        symbol_config = build_scalper_config(bot).resolve_symbol(order.symbol)
+        if symbol_config is None:
+            return None
+        value = _decimal(getattr(symbol_config, value_field, 0))
+        unit = getattr(symbol_config, unit_field, "points")
+        price_limit = distance_to_price(value, unit, point)
+        return price_limit / point if price_limit > 0 else None
+    except Exception:
+        return None
 
 
 @transaction.atomic
@@ -115,8 +136,23 @@ def enforce_pretrade_risk(order: Order, connector, tick, symbol_info, account_in
     if bid <= 0 or ask <= 0 or ask < bid or point <= 0:
         raise RiskRejected("Fresh broker bid/ask and point size are required")
     spread_points = (ask - bid) / point
-    if policy.max_spread_points > 0 and spread_points > policy.max_spread_points:
+    symbol_spread_limit = _scalper_symbol_limit_points(
+        locked_order,
+        point,
+        "max_spread_points",
+        "max_spread_unit",
+    )
+    spread_limit_points = symbol_spread_limit or policy.max_spread_points
+    if spread_limit_points > 0 and spread_points > spread_limit_points:
         raise RiskRejected("Spread exceeds configured limit")
+
+    symbol_deviation_limit = _scalper_symbol_limit_points(
+        locked_order,
+        point,
+        "max_slippage_points",
+        "max_slippage_unit",
+    )
+    deviation_points = int(symbol_deviation_limit or policy.deviation_points)
 
     entry = ask if locked_order.side == "buy" else bid
     if locked_order.sl is None:
@@ -186,4 +222,6 @@ def enforce_pretrade_risk(order: Order, connector, tick, symbol_info, account_in
         risk_amount=risk_amount,
         loss_per_lot=loss_per_lot,
         spread_points=spread_points,
+        spread_limit_points=spread_limit_points,
+        deviation_points=deviation_points,
     )

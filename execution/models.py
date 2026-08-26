@@ -899,11 +899,13 @@ def default_scalper_profile_config() -> dict:
                 "be_buffer_r": 0.2,
                 "trail_trigger_r": 1.5,
                 "trail_mode": "swing",
-                # Tighter spread/slippage guardrails for XAU scalping.
-                "max_spread_points": 30,
-                "max_spread_unit": "points",
-                "max_slippage_points": 10,
-                "max_slippage_unit": "points",
+                # Gold is quoted to broker-specific precision. Express these
+                # limits as price deltas so a 3-digit suffix does not turn a
+                # normal $0.20-$0.30 spread into hundreds of rejected points.
+                "max_spread_points": 0.50,
+                "max_spread_unit": "price",
+                "max_slippage_points": 0.10,
+                "max_slippage_unit": "price",
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
             },

@@ -500,6 +500,13 @@ class MT5Connector(BaseConnector):
             lambda: mt5.history_deals_get(date_from, date_to, **filters) or (),
         )
 
+    def history_deals_for_position_account(self, broker_account, broker_position_ticket: int):
+        """Load a position's complete deal chain without relying on broker clock alignment."""
+        return self._call_for_account(
+            broker_account,
+            lambda: mt5.history_deals_get(position=int(broker_position_ticket)) or (),
+        )
+
     def calc_profit_for_account(self, broker_account, side: str, symbol: str, volume, open_price, close_price):
         def operation():
             order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
@@ -1191,7 +1198,10 @@ class MT5Connector(BaseConnector):
             "symbol": order.symbol,
             "volume": volume,
             "type": order_type,
-            "deviation": int(runtime_cfg.max_slippage_points),
+            # The authoritative risk pass resolves the bot's unit-aware,
+            # symbol-specific slippage setting to raw MT5 points. This also
+            # falls back to RiskPolicy.deviation_points for non-scalper orders.
+            "deviation": int(risk_result.deviation_points),
             "magic": int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813)),
             "comment": self._order_comment(order),
             "type_filling": self._filling_mode(sinfo),
@@ -1358,6 +1368,18 @@ class MT5Connector(BaseConnector):
                     matching_deals = mt5.history_deals_get(ticket=order.broker_deal_ticket) or ()
                     if matching_deals:
                         broker_deal = matching_deals[-1]
+                        # MqlTradeResult does not consistently expose a position
+                        # field for market deals. The authoritative position id is
+                        # available on the resulting deal and must be persisted so
+                        # the position can be reconciled and closed by exact ticket.
+                        broker_position_ticket = _coerce_ticket(
+                            getattr(broker_deal, "position_id", None)
+                        )
+                        if broker_position_ticket:
+                            order.broker_position_ticket = broker_position_ticket
+                            order.save(update_fields=["broker_position_ticket"])
+                            attempt.broker_position_ticket = broker_position_ticket
+                            attempt.save(update_fields=["broker_position_ticket"])
                         broker_profit = Decimal(str(getattr(broker_deal, "profit", 0) or 0))
                         commission = Decimal(str(getattr(broker_deal, "commission", 0) or 0))
                         swap = Decimal(str(getattr(broker_deal, "swap", 0) or 0))

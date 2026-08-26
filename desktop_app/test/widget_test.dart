@@ -67,6 +67,80 @@ class FakeApiClient extends ApiClient {
         'usage': {'bots': 1, 'bot_limit': 3},
       };
     }
+    if (path == '/api/personal/history/') {
+      return {
+        'summary': {
+          'total_trades': 1,
+          'wins': 1,
+          'losses': 0,
+          'win_rate': '100.0',
+          'gross_profit': '24.50',
+          'gross_loss': '0.0',
+          'net_profit': '24.50',
+          'profit_factor': null,
+        },
+        'trades': [
+          {
+            'id': 1,
+            'symbol': 'XAUUSDm',
+            'side': 'buy',
+            'qty': '0.01',
+            'price': '3370.10',
+            'exit_price': '3372.55',
+            'pnl': '24.50',
+            'status': 'closed',
+            'broker_ticket': '90001',
+            'closed_at': '2026-08-26T12:30:00Z',
+          },
+        ],
+      };
+    }
+    if (path == '/api/personal/risk/') {
+      return {
+        'risk_per_trade_pct': '0.5',
+        'max_daily_loss_pct': '1.5',
+        'max_account_drawdown_pct': '5.0',
+        'max_positions': 1,
+        'max_positions_per_symbol': 1,
+        'max_entry_trades_per_day': 3,
+        'max_lot': '0.05',
+        'max_spread_points': '30',
+        'deviation_points': 8,
+        'stop_after_daily_profit_pct': '0',
+        'emergency_close_owned_positions': false,
+        'live_trading_confirmed': false,
+      };
+    }
+    if (path == '/api/personal/backtesting/') {
+      return [
+        {
+          'id': 13985,
+          'bot_id': 3,
+          'bot__name': 'Gold London Scalper',
+          'timeframe': '5m',
+          'session': 'london',
+          'created_at': '2026-08-26T12:30:00Z',
+          'summary': {
+            'market': {'last_close': '2851.96', 'tick': 68},
+            'volatility': {'bar_range': '1.23', 'atr_points': '3.47'},
+            'strategies': [
+              {
+                'strategy': 'trend_pullback',
+                'action': 'skip',
+                'reason': 'trend_pullback_no_trend',
+                'score': 0.0,
+              },
+              {
+                'strategy': 'breakout_retest',
+                'action': 'skip',
+                'reason': 'breakout_retest_no_break',
+                'score': 0.0,
+              },
+            ],
+          },
+        },
+      ];
+    }
     if (path == '/api/personal/markets/') {
       return [
         {
@@ -199,6 +273,66 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Bot manager'), findsOneWidget);
     expect(find.text('Gold London Scalper'), findsOneWidget);
+
+    await tester.tap(find.text('Markets'));
+    await tester.pumpAndSettle();
+    expect(find.text('Assets & markets'), findsOneWidget);
+    expect(find.text('XAUUSD'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('bot editor fits a compact desktop window', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(810, 830));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DesktopShell(client: FakeApiClient(), onLogout: () {}),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Bots'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit bot'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit bot configuration'), findsOneWidget);
+    expect(find.text('Save changes'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('renders polished trading workspaces without raw records', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 830));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DesktopShell(client: FakeApiClient(), onLogout: () {}),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Trade history'));
+    await tester.pumpAndSettle();
+    expect(find.text('PERFORMANCE LEDGER'), findsOneWidget);
+    expect(find.text('XAUUSDm'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.text('Risk'));
+    await tester.pumpAndSettle();
+    expect(find.text('ACCOUNT GUARDRAILS'), findsOneWidget);
+    expect(find.text('Capital protection'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.text('Backtesting'));
+    await tester.pumpAndSettle();
+    expect(find.text('STRATEGY LAB'), findsOneWidget);
+    expect(find.text('Strategy decisions (2)'), findsOneWidget);
+    expect(tester.takeException(), isNull);
 
     await tester.tap(find.text('Markets'));
     await tester.pumpAndSettle();

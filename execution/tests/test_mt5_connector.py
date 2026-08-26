@@ -8,7 +8,7 @@ from bots.models import Bot
 from brokers.models import BrokerAccount
 from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector
-from execution.models import Decision, ExecutionAttempt, Signal
+from execution.models import BrokerPosition, Decision, ExecutionAttempt, Signal
 from execution.services.live_risk import PreTradeRiskResult
 from execution.services.orchestrator import create_order_from_decision
 
@@ -45,16 +45,18 @@ class MT5ConnectorTest(TestCase):
             score=1,
             params={"sl": "1.0900", "tp": "1.1200"},
         )
-        self.order, _ = create_order_from_decision(decision, self.account, "0.10")
+        self.order, _ = create_order_from_decision(decision, self.account, "0.04")
 
     def _risk_result(self):
         return PreTradeRiskResult(
-            volume=Decimal("0.10"),
+            volume=Decimal("0.04"),
             entry_price=Decimal("1.1002"),
             margin_required=Decimal("100"),
-            risk_amount=Decimal("50"),
+            risk_amount=Decimal("20"),
             loss_per_lot=Decimal("500"),
             spread_points=Decimal("2"),
+            spread_limit_points=Decimal("15"),
+            deviation_points=17,
         )
 
     def _configure_api(self, api):
@@ -78,6 +80,7 @@ class MT5ConnectorTest(TestCase):
         )
         api.account_info.return_value = SimpleNamespace(balance=10000)
         api.order_check.return_value = SimpleNamespace(retcode=0, comment="ok")
+        api.history_deals_get.return_value = ()
         api.last_error.return_value = (0, "ok")
 
     @patch("execution.connectors.mt5.mt5")
@@ -88,7 +91,7 @@ class MT5ConnectorTest(TestCase):
         api.order_send.return_value = SimpleNamespace(
             retcode=10009,
             price=1.1002,
-            volume=0.10,
+            volume=0.04,
             order=111,
             deal=222,
             position=333,
@@ -106,6 +109,71 @@ class MT5ConnectorTest(TestCase):
         self.assertEqual(self.order.broker_deal_ticket, 222)
         self.assertEqual(self.order.broker_position_ticket, 333)
         self.assertEqual(ExecutionAttempt.objects.get(order=self.order).status, "accepted")
+        self.assertEqual(api.order_send.call_args.args[0]["deviation"], 17)
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_done_recovers_position_ticket_from_deal(self, risk, api):
+        self._configure_api(api)
+        risk.return_value = self._risk_result()
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            price=1.1002,
+            volume=0.04,
+            order=111,
+            deal=222,
+            comment="done",
+        )
+        api.history_deals_get.return_value = (
+            SimpleNamespace(
+                ticket=222,
+                order=111,
+                position_id=333,
+                profit=0,
+                commission=0,
+                swap=0,
+            ),
+        )
+        raw_position = SimpleNamespace(
+            ticket=333,
+            identifier=333,
+            type=0,
+            symbol="EURUSD",
+            volume=0.04,
+            price_open=1.1002,
+            price_current=1.1002,
+            sl=1.09,
+            tp=1.12,
+            profit=0,
+            swap=0,
+            magic=20250813,
+            comment="ez:test",
+            time=0,
+        )
+        api.positions_get.side_effect = lambda **kwargs: (
+            (raw_position,) if kwargs.get("ticket") == 333 else ()
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(connector, "_ensure_symbol"), patch(
+            "execution.connectors.mt5._check_ready"
+        ):
+            connector.place_order(self.order)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.broker_position_ticket, 333)
+        self.assertEqual(
+            ExecutionAttempt.objects.get(order=self.order).broker_position_ticket,
+            333,
+        )
+        self.assertTrue(
+            BrokerPosition.objects.filter(
+                originating_order=self.order,
+                broker_position_ticket=333,
+                ownership="ez_trade",
+                status="open",
+            ).exists()
+        )
 
     @patch("execution.connectors.mt5.mt5")
     @patch("execution.services.live_risk.enforce_pretrade_risk")

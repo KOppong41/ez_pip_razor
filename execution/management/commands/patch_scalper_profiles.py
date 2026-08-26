@@ -9,10 +9,10 @@ class Command(BaseCommand):
         targets = {
             "XAUUSD": {
                 "sl_points": {"min": 30, "max": 120, "unit": "points"},
-                "max_spread_points": 25,
-                "max_spread_unit": "points",
-                "max_slippage_points": 10,
-                "max_slippage_unit": "points",
+                "max_spread_points": 0.50,
+                "max_spread_unit": "price",
+                "max_slippage_points": 0.10,
+                "max_slippage_unit": "price",
                 "exit_mode": "hybrid",
                 "tp1_r": 1.2,
                 "tp1_close_pct": 70,

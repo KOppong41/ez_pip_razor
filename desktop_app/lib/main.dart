@@ -345,47 +345,37 @@ class _DesktopShellState extends State<DesktopShell> {
                       final active = selected == index;
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 3),
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: active
-                                ? const Color(0xFF11251F)
-                                : Colors.transparent,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border(
-                              left: BorderSide(
-                                color: active ? green : Colors.transparent,
-                                width: 2,
+                        child: Material(
+                          color: active
+                              ? const Color(0xFF11251F)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(8),
+                          clipBehavior: Clip.antiAlias,
+                          child: ListTile(
+                            dense: true,
+                            visualDensity: const VisualDensity(vertical: -1),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 13,
+                            ),
+                            selected: active,
+                            leading: Icon(
+                              item.icon,
+                              size: 19,
+                              color: active ? green : const Color(0xFF9AABB3),
+                            ),
+                            title: Text(
+                              item.label,
+                              style: TextStyle(
+                                color: active
+                                    ? const Color(0xFFE9F5F0)
+                                    : const Color(0xFFB6C3C8),
+                                fontSize: 13,
+                                fontWeight: active
+                                    ? FontWeight.w700
+                                    : FontWeight.w500,
                               ),
                             ),
-                          ),
-                          child: Material(
-                            color: Colors.transparent,
-                            child: ListTile(
-                              dense: true,
-                              visualDensity: const VisualDensity(vertical: -1),
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 13,
-                              ),
-                              selected: active,
-                              leading: Icon(
-                                item.icon,
-                                size: 19,
-                                color: active ? green : const Color(0xFF9AABB3),
-                              ),
-                              title: Text(
-                                item.label,
-                                style: TextStyle(
-                                  color: active
-                                      ? const Color(0xFFE9F5F0)
-                                      : const Color(0xFFB6C3C8),
-                                  fontSize: 13,
-                                  fontWeight: active
-                                      ? FontWeight.w700
-                                      : FontWeight.w500,
-                                ),
-                              ),
-                              onTap: () => setState(() => selected = index),
-                            ),
+                            onTap: () => setState(() => selected = index),
                           ),
                         ),
                       );
@@ -544,6 +534,7 @@ class _DesktopShellState extends State<DesktopShell> {
     3 => PositionsPage(client: widget.client),
     5 => HistoryPage(client: widget.client),
     6 => RiskPage(client: widget.client),
+    7 => BacktestingPage(client: widget.client),
     9 => SettingsPage(client: widget.client),
     _ => JsonPage(client: widget.client, title: item.label, path: item.path),
   };
@@ -1842,6 +1833,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   late final TextEditingController maxPositions;
   late final TextEditingController maxTrades;
   late final TextEditingController interval;
+  final editorScroll = ScrollController();
   int? assetId;
   int? accountId;
   String engineMode = 'harami';
@@ -1911,6 +1903,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
 
   @override
   void dispose() {
+    editorScroll.dispose();
     name.dispose();
     qty.dispose();
     decisionScore.dispose();
@@ -1954,45 +1947,242 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     });
   }
 
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    titlePadding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
-    contentPadding: const EdgeInsets.fromLTRB(24, 18, 24, 6),
-    title: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          widget.bot == null
-              ? 'Create automation bot'
-              : 'Edit bot configuration',
+  Widget _responsiveFields(List<Widget> fields, {List<int>? flexes}) =>
+      LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 620) {
+            return Column(
+              children: [
+                for (var index = 0; index < fields.length; index++) ...[
+                  fields[index],
+                  if (index != fields.length - 1) const SizedBox(height: 12),
+                ],
+              ],
+            );
+          }
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (var index = 0; index < fields.length; index++) ...[
+                Expanded(
+                  flex: flexes == null ? 1 : flexes[index],
+                  child: fields[index],
+                ),
+                if (index != fields.length - 1) const SizedBox(width: 12),
+              ],
+            ],
+          );
+        },
+      );
+
+  Widget _sectionHeading(String title, String description) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        title.toUpperCase(),
+        style: const TextStyle(
+          color: blue,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 1.1,
         ),
-        const SizedBox(height: 5),
-        const Text(
-          'Client-owned settings are validated against platform safety limits.',
-          style: TextStyle(
-            color: muted,
-            fontSize: 11,
-            fontWeight: FontWeight.w400,
+      ),
+      const SizedBox(height: 3),
+      Text(
+        description,
+        style: const TextStyle(color: muted, fontSize: 11, height: 1.35),
+      ),
+    ],
+  );
+
+  Widget _dropdownText(String value) => Text(
+    value,
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+    style: const TextStyle(fontWeight: FontWeight.w600),
+  );
+
+  String _strategyTitle(Map<String, dynamic> strategy) {
+    final value = '${strategy['label'] ?? label('${strategy['value']}')}';
+    final detailIndex = value.indexOf(' (');
+    return detailIndex < 0 ? value : value.substring(0, detailIndex);
+  }
+
+  Widget _strategyPicker() => Wrap(
+    spacing: 8,
+    runSpacing: 8,
+    children: [
+      for (final strategy in strategies)
+        Builder(
+          builder: (context) {
+            final value = '${strategy['value']}';
+            final fullLabel =
+                '${strategy['label'] ?? label('${strategy['value']}')}';
+            final selected = selectedStrategies.contains(value);
+            return Tooltip(
+              message: fullLabel,
+              waitDuration: const Duration(milliseconds: 450),
+              child: FilterChip(
+                label: Text(_strategyTitle(strategy)),
+                selected: selected,
+                showCheckmark: true,
+                checkmarkColor: bg,
+                selectedColor: green.withValues(alpha: 0.75),
+                backgroundColor: const Color(0xFF0A1217),
+                side: BorderSide(
+                  color: selected ? green.withValues(alpha: 0.5) : border,
+                ),
+                labelStyle: TextStyle(
+                  color: selected ? bg : const Color(0xFFD8E2E6),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+                onSelected: (enabled) => setState(() {
+                  enabled
+                      ? selectedStrategies.add(value)
+                      : selectedStrategies.remove(value);
+                }),
+              ),
+            );
+          },
+        ),
+    ],
+  );
+
+  Widget _automaticExecutionCard() => Container(
+    padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+    decoration: BoxDecoration(
+      color: const Color(0xFF0A1217),
+      borderRadius: BorderRadius.circular(11),
+      border: Border.all(
+        color: autoTrade ? green.withValues(alpha: 0.4) : border,
+      ),
+    ),
+    child: Row(
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: autoTrade ? green.withValues(alpha: 0.12) : panel2,
+            borderRadius: BorderRadius.circular(9),
           ),
+          child: Icon(
+            Icons.bolt_rounded,
+            color: autoTrade ? green : muted,
+            size: 19,
+          ),
+        ),
+        const SizedBox(width: 11),
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Automatic execution',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+              ),
+              SizedBox(height: 2),
+              Text(
+                'Place accepted orders automatically. Account risk limits always apply.',
+                style: TextStyle(color: muted, fontSize: 10, height: 1.3),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Switch(
+          value: autoTrade,
+          onChanged: (value) => setState(() => autoTrade = value),
         ),
       ],
     ),
-    content: SizedBox(
-      width: 720,
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              controller: name,
-              decoration: const InputDecoration(labelText: 'Bot name'),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final viewport = MediaQuery.sizeOf(context);
+    return AlertDialog(
+      backgroundColor: panel,
+      surfaceTintColor: Colors.transparent,
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: viewport.width < 700 ? 12 : 32,
+        vertical: 20,
+      ),
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: const BorderSide(color: border),
+      ),
+      titlePadding: const EdgeInsets.fromLTRB(24, 20, 14, 18),
+      contentPadding: const EdgeInsets.fromLTRB(24, 0, 24, 0),
+      title: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: green.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
             ),
-            const SizedBox(height: 12),
-            Row(
+            child: const Icon(Icons.smart_toy_outlined, color: green, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: DropdownButtonFormField<int>(
+                Text(
+                  widget.bot == null
+                      ? 'Create automation bot'
+                      : 'Edit bot configuration',
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                const Text(
+                  'Configure execution, strategy routing and risk limits.',
+                  style: TextStyle(color: muted, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Close',
+            onPressed: () => Navigator.pop(context),
+            icon: const Icon(Icons.close_rounded, color: muted),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 760,
+        height: viewport.height * 0.68,
+        child: Scrollbar(
+          controller: editorScroll,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: editorScroll,
+            padding: const EdgeInsets.fromLTRB(0, 18, 12, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _sectionHeading(
+                  'Execution setup',
+                  'Choose where and how this bot trades.',
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: name,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(labelText: 'Bot name'),
+                ),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  DropdownButtonFormField<int>(
                     initialValue: accountId,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Broker account',
                     ),
@@ -2000,18 +2190,16 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       for (final account in accounts)
                         DropdownMenuItem(
                           value: integerValue(account['id']),
-                          child: Text(
+                          child: _dropdownText(
                             '${account['name']} · ${account['mt5_login']}',
                           ),
                         ),
                     ],
                     onChanged: (value) => setState(() => accountId = value),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DropdownButtonFormField<int>(
+                  DropdownButtonFormField<int>(
                     initialValue: assetId,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Trading asset',
                     ),
@@ -2019,7 +2207,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       for (final asset in assets)
                         DropdownMenuItem(
                           value: integerValue(asset['id']),
-                          child: Text(
+                          child: _dropdownText(
                             '${asset['symbol']} · ${asset['display_name']}',
                           ),
                         ),
@@ -2033,198 +2221,180 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       });
                     },
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    initialValue: engineMode,
-                    decoration: const InputDecoration(labelText: 'Engine mode'),
-                    items: [
-                      for (final mode in engineModes)
-                        DropdownMenuItem(
-                          value: '${mode['value']}',
-                          child: Text('${mode['label']}'),
-                        ),
-                    ],
-                    onChanged: (value) =>
-                        setState(() => engineMode = value ?? engineMode),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    initialValue: timeframe,
-                    decoration: const InputDecoration(
-                      labelText: 'Primary timeframe',
+                ]),
+                const SizedBox(height: 12),
+                _responsiveFields(
+                  [
+                    DropdownButtonFormField<String>(
+                      initialValue: engineMode,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Engine mode',
+                      ),
+                      items: [
+                        for (final mode in engineModes)
+                          DropdownMenuItem(
+                            value: '${mode['value']}',
+                            child: _dropdownText('${mode['label']}'),
+                          ),
+                      ],
+                      onChanged: (value) =>
+                          setState(() => engineMode = value ?? engineMode),
                     ),
-                    items: [
-                      for (final value in timeframes)
-                        DropdownMenuItem(
-                          value: value,
-                          child: Text(value.toUpperCase()),
-                        ),
-                    ],
-                    onChanged: (value) =>
-                        setState(() => timeframe = value ?? timeframe),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: TextField(
-                    controller: qty,
-                    decoration: InputDecoration(
-                      labelText: 'Default lot size',
-                      helperText: selectedAsset == null
-                          ? null
-                          : 'Minimum ${selectedAsset!['min_qty']}',
+                    DropdownButtonFormField<String>(
+                      initialValue: timeframe,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Primary timeframe',
+                      ),
+                      items: [
+                        for (final value in timeframes)
+                          DropdownMenuItem(
+                            value: value,
+                            child: _dropdownText(value.toUpperCase()),
+                          ),
+                      ],
+                      onChanged: (value) =>
+                          setState(() => timeframe = value ?? timeframe),
                     ),
-                  ),
+                  ],
+                  flexes: const [2, 1],
                 ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: tradingProfile,
-              decoration: const InputDecoration(labelText: 'Trading profile'),
-              items: [
-                for (final profile in tradingProfiles)
-                  DropdownMenuItem(
-                    value: '${profile['value']}',
-                    child: Text('${profile['label']}'),
-                  ),
-              ],
-              onChanged: (value) =>
-                  setState(() => tradingProfile = value ?? tradingProfile),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0A1217),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: border),
-              ),
-              child: SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text(
-                  'Automatic execution',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
-                ),
-                subtitle: const Text(
-                  'Allow accepted signals to place broker orders. Account risk rules still apply.',
-                  style: TextStyle(color: muted, fontSize: 10),
-                ),
-                value: autoTrade,
-                onChanged: (value) => setState(() => autoTrade = value),
-              ),
-            ),
-            const SizedBox(height: 15),
-            const Text(
-              'STRATEGY ROUTING',
-              style: TextStyle(
-                color: blue,
-                fontSize: 9,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 1,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 7,
-              runSpacing: 7,
-              children: [
-                for (final strategy in strategies)
-                  FilterChip(
-                    label: Text(
-                      '${strategy['label'] ?? label('${strategy['value']}')}',
+                const SizedBox(height: 12),
+                _responsiveFields(
+                  [
+                    DropdownButtonFormField<String>(
+                      initialValue: tradingProfile,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Trading profile',
+                      ),
+                      items: [
+                        for (final profile in tradingProfiles)
+                          DropdownMenuItem(
+                            value: '${profile['value']}',
+                            child: _dropdownText('${profile['label']}'),
+                          ),
+                      ],
+                      onChanged: (value) => setState(
+                        () => tradingProfile = value ?? tradingProfile,
+                      ),
                     ),
-                    selected: selectedStrategies.contains(
-                      '${strategy['value']}',
+                    TextField(
+                      controller: qty,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: 'Default lot size',
+                        suffixText: 'lots',
+                        helperText: selectedAsset == null
+                            ? null
+                            : 'Minimum ${selectedAsset!['min_qty']}',
+                      ),
                     ),
-                    onSelected: (selected) {
-                      setState(() {
-                        final value = '${strategy['value']}';
-                        selected
-                            ? selectedStrategies.add(value)
-                            : selectedStrategies.remove(value);
-                      });
-                    },
-                  ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'RISK & CADENCE',
-              style: TextStyle(
-                color: blue,
-                fontSize: 9,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 1,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
+                  ],
+                  flexes: const [2, 1],
+                ),
+                const SizedBox(height: 16),
+                _automaticExecutionCard(),
+                const SizedBox(height: 24),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: _sectionHeading(
+                        'Strategy routing',
+                        'Select the signal models this bot may execute.',
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: selectedStrategies.length == strategies.length
+                          ? () => setState(selectedStrategies.clear)
+                          : () => setState(() {
+                              selectedStrategies
+                                ..clear()
+                                ..addAll(
+                                  strategies.map(
+                                    (strategy) => '${strategy['value']}',
+                                  ),
+                                );
+                            }),
+                      child: Text(
+                        selectedStrategies.length == strategies.length
+                            ? 'Clear all'
+                            : 'Select all',
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                _strategyPicker(),
+                const SizedBox(height: 24),
+                _sectionHeading(
+                  'Risk & cadence',
+                  'Set conservative entry thresholds and activity limits.',
+                ),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  TextField(
                     controller: decisionScore,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
                     decoration: const InputDecoration(
                       labelText: 'Minimum signal score',
+                      hintText: '0.50',
                     ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
+                  TextField(
                     controller: maxPositions,
+                    keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
-                      labelText: 'Max positions',
+                      labelText: 'Maximum open positions',
                     ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
+                ]),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  TextField(
                     controller: maxTrades,
+                    keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
-                      labelText: 'Max trades / day',
+                      labelText: 'Maximum trades per day',
                     ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
+                  TextField(
                     controller: interval,
+                    keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
-                      labelText: 'Trade interval (min)',
+                      labelText: 'Minimum trade interval',
+                      suffixText: 'min',
                     ),
                   ),
-                ),
+                ]),
               ],
             ),
-          ],
+          ),
         ),
       ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
-      ),
-      FilledButton.icon(
-        onPressed: submit,
-        icon: Icon(
-          widget.bot == null ? Icons.add_rounded : Icons.save_outlined,
-          size: 17,
+      actionsPadding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
         ),
-        label: Text(widget.bot == null ? 'Create bot' : 'Save changes'),
-      ),
-    ],
-  );
+        FilledButton.icon(
+          onPressed: submit,
+          icon: Icon(
+            widget.bot == null ? Icons.add_rounded : Icons.save_outlined,
+            size: 17,
+          ),
+          label: Text(widget.bot == null ? 'Create bot' : 'Save changes'),
+        ),
+      ],
+    );
+  }
 }
 
 class _BotCard extends StatelessWidget {
@@ -2463,41 +2633,57 @@ class _WorkspaceHeader extends StatelessWidget {
       borderRadius: BorderRadius.circular(11),
       border: Border.all(color: border),
     ),
-    child: Row(
-      children: [
-        Expanded(
-          child: Column(
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final details = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              eyebrow,
+              style: const TextStyle(
+                color: blue,
+                fontSize: 9,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.2,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              description,
+              style: const TextStyle(color: muted, fontSize: 11, height: 1.35),
+            ),
+          ],
+        );
+        final controls = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _StatusPill(text: badge, color: blue),
+            const SizedBox(width: 12),
+            action,
+          ],
+        );
+        if (constraints.maxWidth < 680) {
+          return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                eyebrow,
-                style: const TextStyle(
-                  color: blue,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 1.2,
-                ),
-              ),
-              const SizedBox(height: 5),
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 5),
-              Text(
-                description,
-                style: const TextStyle(color: muted, fontSize: 11),
-              ),
+              details,
+              const SizedBox(height: 14),
+              Align(alignment: Alignment.centerRight, child: controls),
             ],
-          ),
-        ),
-        _StatusPill(text: badge, color: blue),
-        const SizedBox(width: 12),
-        action,
-      ],
+          );
+        }
+        return Row(
+          children: [
+            Expanded(child: details),
+            controls,
+          ],
+        );
+      },
     ),
   );
 }
@@ -2630,7 +2816,7 @@ class _MarketsPageState extends State<MarketsPage> {
                           crossAxisCount: columns,
                           crossAxisSpacing: 10,
                           mainAxisSpacing: 10,
-                          childAspectRatio: columns == 1 ? 2.7 : 2.25,
+                          mainAxisExtent: 150,
                         ),
                         itemCount: markets.length,
                         itemBuilder: (_, index) => _MarketAssetCard(
@@ -2924,13 +3110,359 @@ class _PositionsPageState extends State<PositionsPage> {
   );
 }
 
-class HistoryPage extends StatelessWidget {
-  const HistoryPage({super.key, required this.client});
+class BacktestingPage extends StatefulWidget {
+  const BacktestingPage({super.key, required this.client});
   final ApiClient client;
+
+  @override
+  State<BacktestingPage> createState() => _BacktestingPageState();
+}
+
+class _BacktestingPageState extends State<BacktestingPage> {
+  late Future<dynamic> future = widget.client.get('/api/personal/backtesting/');
+
+  Future<void> reload() async {
+    final next = widget.client.get('/api/personal/backtesting/');
+    setState(() => future = next);
+    await next;
+  }
+
   @override
   Widget build(BuildContext context) => FutureBuilder(
-    future: client.get('/api/personal/history/'),
-    builder: (_, snapshot) {
+    future: future,
+    builder: (context, snapshot) {
+      if (snapshot.hasError) {
+        return Empty(icon: Icons.cloud_off, text: snapshot.error.toString());
+      }
+      if (!snapshot.hasData) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      final runs = listOfMaps(snapshot.data);
+      return RefreshIndicator(
+        onRefresh: reload,
+        child: ListView.builder(
+          padding: const EdgeInsets.fromLTRB(24, 22, 24, 30),
+          itemCount: runs.isEmpty ? 2 : runs.length + 1,
+          itemBuilder: (context, index) {
+            if (index == 0) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: _WorkspaceHeader(
+                  eyebrow: 'STRATEGY LAB',
+                  title: 'Backtest evidence',
+                  description:
+                      'Review historical engine decisions, market context and strategy outcomes.',
+                  badge: '${runs.length} RUNS',
+                  action: OutlinedButton.icon(
+                    onPressed: reload,
+                    icon: const Icon(Icons.refresh_rounded, size: 17),
+                    label: const Text('Reload results'),
+                  ),
+                ),
+              );
+            }
+            if (runs.isEmpty) {
+              return const _EmptyWorkspace(
+                icon: Icons.science_outlined,
+                title: 'No backtest evidence yet',
+                text:
+                    'Run a strategy simulation to populate market snapshots and decision results.',
+              );
+            }
+            return Padding(
+              padding: EdgeInsets.only(bottom: index == runs.length ? 0 : 10),
+              child: _BacktestRunCard(run: runs[index - 1]),
+            );
+          },
+        ),
+      );
+    },
+  );
+}
+
+class _BacktestRunCard extends StatelessWidget {
+  const _BacktestRunCard({required this.run});
+  final Map<String, dynamic> run;
+
+  @override
+  Widget build(BuildContext context) {
+    final summary = mapOf(run['summary']);
+    final market = mapOf(summary['market']);
+    final volatility = mapOf(summary['volatility']);
+    final strategies = listOfMaps(summary['strategies']);
+    final skipped = strategies.where((row) => row['action'] == 'skip').length;
+    final actionable = strategies.length - skipped;
+    final botName = '${run['bot__name'] ?? 'Bot ${run['bot_id'] ?? '—'}'}';
+    final session = label('${run['session'] ?? 'unknown'}');
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final identity = Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: blue.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: const Icon(
+                        Icons.science_outlined,
+                        color: blue,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 11),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            botName,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${'${run['timeframe'] ?? '—'}'.toUpperCase()} · $session session · Run #${run['id'] ?? '—'}',
+                            style: const TextStyle(color: muted, fontSize: 10),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                );
+                final timestamp = Text(
+                  formatDateTime(run['created_at']),
+                  style: const TextStyle(
+                    color: muted,
+                    fontFamily: 'Consolas',
+                    fontSize: 10,
+                  ),
+                );
+                if (constraints.maxWidth < 560) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [identity, const SizedBox(height: 10), timestamp],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: identity),
+                    timestamp,
+                  ],
+                );
+              },
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 13),
+              child: Divider(height: 1),
+            ),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = constraints.maxWidth >= 760 ? 6 : 3;
+                final width =
+                    (constraints.maxWidth - ((columns - 1) * 8)) / columns;
+                final metrics = [
+                  ('LAST CLOSE', compactNumber(market['last_close']), blue),
+                  ('TICK VOLUME', compactNumber(market['tick']), muted),
+                  ('BAR RANGE', compactNumber(volatility['bar_range']), amber),
+                  (
+                    'ATR POINTS',
+                    compactNumber(volatility['atr_points']),
+                    amber,
+                  ),
+                  ('ACTIONABLE', '$actionable', green),
+                  ('SKIPPED', '$skipped', muted),
+                ];
+                return Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final metric in metrics)
+                      SizedBox(
+                        width: width,
+                        child: _BacktestMetric(
+                          label: metric.$1,
+                          value: metric.$2,
+                          color: metric.$3,
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+            if (strategies.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Theme(
+                data: Theme.of(
+                  context,
+                ).copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  childrenPadding: const EdgeInsets.only(bottom: 4),
+                  title: Text(
+                    'Strategy decisions (${strategies.length})',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  subtitle: const Text(
+                    'Expand to inspect scores and rejection reasons.',
+                    style: TextStyle(color: muted, fontSize: 10),
+                  ),
+                  children: [
+                    for (final strategy in strategies)
+                      _BacktestStrategyRow(strategy: strategy),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BacktestMetric extends StatelessWidget {
+  const _BacktestMetric({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+    decoration: BoxDecoration(
+      color: const Color(0xFF091116),
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: border),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: muted,
+            fontSize: 7,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.7,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: color,
+            fontFamily: 'Consolas',
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _BacktestStrategyRow extends StatelessWidget {
+  const _BacktestStrategyRow({required this.strategy});
+  final Map<String, dynamic> strategy;
+
+  @override
+  Widget build(BuildContext context) {
+    final action = '${strategy['action'] ?? 'unknown'}'.toLowerCase();
+    final color = action == 'skip'
+        ? muted
+        : action == 'buy' || action == 'sell' || action == 'enter'
+        ? green
+        : amber;
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF091116),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        children: [
+          _StatusPill(text: action.toUpperCase(), color: color),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label('${strategy['strategy'] ?? 'strategy'}'),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  label('${strategy['reason'] ?? 'No reason recorded'}'),
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: muted, fontSize: 9),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            'Score ${compactNumber(strategy['score'])}',
+            style: const TextStyle(
+              color: muted,
+              fontFamily: 'Consolas',
+              fontSize: 9,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class HistoryPage extends StatefulWidget {
+  const HistoryPage({super.key, required this.client});
+  final ApiClient client;
+
+  @override
+  State<HistoryPage> createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  late Future<dynamic> future = widget.client.get('/api/personal/history/');
+
+  Future<void> reload() async {
+    final next = widget.client.get('/api/personal/history/');
+    setState(() => future = next);
+    await next;
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder(
+    future: future,
+    builder: (context, snapshot) {
       if (snapshot.hasError) {
         return Empty(icon: Icons.cloud_off, text: snapshot.error.toString());
       }
@@ -2938,18 +3470,284 @@ class HistoryPage extends StatelessWidget {
         return const Center(child: CircularProgressIndicator());
       }
       final root = mapOf(snapshot.data);
-      return ListView(
-        padding: const EdgeInsets.all(28),
-        children: [
-          InfoCard(title: 'Performance', values: mapOf(root['summary'])),
-          const SizedBox(height: 16),
-          SizedBox(
-            height: 520,
-            child: Records(data: root['trades'], padding: EdgeInsets.zero),
-          ),
-        ],
+      final summary = mapOf(root['summary']);
+      final trades = listOfMaps(root['trades']);
+      final metrics = [
+        ('TOTAL TRADES', '${integerValue(summary['total_trades']) ?? 0}', blue),
+        ('WINS', '${integerValue(summary['wins']) ?? 0}', green),
+        ('LOSSES', '${integerValue(summary['losses']) ?? 0}', danger),
+        ('WIN RATE', optionalPercent(summary['win_rate']), green),
+        ('GROSS PROFIT', compactNumber(summary['gross_profit']), green),
+        ('GROSS LOSS', compactNumber(summary['gross_loss']), danger),
+        (
+          'NET PROFIT',
+          compactNumber(summary['net_profit']),
+          valueColor(summary['net_profit']),
+        ),
+        ('PROFIT FACTOR', compactNumber(summary['profit_factor']), amber),
+      ];
+      return RefreshIndicator(
+        onRefresh: reload,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(24, 22, 24, 30),
+          children: [
+            _WorkspaceHeader(
+              eyebrow: 'PERFORMANCE LEDGER',
+              title: 'Trade history',
+              description:
+                  'Track closed trades, realized performance and execution outcomes.',
+              badge: '${trades.length} TRADES',
+              action: OutlinedButton.icon(
+                onPressed: reload,
+                icon: const Icon(Icons.refresh_rounded, size: 17),
+                label: const Text('Reload history'),
+              ),
+            ),
+            const SizedBox(height: 14),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = constraints.maxWidth >= 1100
+                    ? 4
+                    : constraints.maxWidth >= 560
+                    ? 2
+                    : 1;
+                return GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    crossAxisSpacing: 10,
+                    mainAxisSpacing: 10,
+                    mainAxisExtent: 74,
+                  ),
+                  itemCount: metrics.length,
+                  itemBuilder: (context, index) => _HistoryMetricCard(
+                    label: metrics[index].$1,
+                    value: metrics[index].$2,
+                    color: metrics[index].$3,
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'EXECUTION LEDGER',
+                    style: TextStyle(
+                      color: blue,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.1,
+                    ),
+                  ),
+                ),
+                Text(
+                  'Latest ${trades.length}',
+                  style: const TextStyle(color: muted, fontSize: 10),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (trades.isEmpty)
+              const _EmptyWorkspace(
+                icon: Icons.query_stats_rounded,
+                title: 'No closed trades yet',
+                text:
+                    'Completed positions will appear here with entry, exit and realized P&L.',
+              )
+            else
+              for (var index = 0; index < trades.length; index++) ...[
+                _TradeHistoryRow(trade: trades[index]),
+                if (index != trades.length - 1) const SizedBox(height: 8),
+              ],
+          ],
+        ),
       );
     },
+  );
+}
+
+class _HistoryMetricCard extends StatelessWidget {
+  const _HistoryMetricCard({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+    decoration: BoxDecoration(
+      color: panel,
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: border),
+    ),
+    child: Row(
+      children: [
+        Container(
+          width: 4,
+          height: 34,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: muted,
+                  fontSize: 8,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.7,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                value,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color,
+                  fontFamily: 'Consolas',
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _TradeHistoryRow extends StatelessWidget {
+  const _TradeHistoryRow({required this.trade});
+  final Map<String, dynamic> trade;
+
+  @override
+  Widget build(BuildContext context) {
+    final pnl = numericValue(trade['pnl']);
+    final pnlColor = valueColor(pnl);
+    final side = '${trade['side'] ?? '—'}'.toUpperCase();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
+      decoration: BoxDecoration(
+        color: panel,
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: border),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final identity = Row(
+            children: [
+              _StatusPill(text: side, color: side == 'BUY' ? green : amber),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${trade['symbol'] ?? '—'}',
+                      style: const TextStyle(
+                        fontFamily: 'Consolas',
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      formatDateTime(trade['closed_at'] ?? trade['created_at']),
+                      style: const TextStyle(color: muted, fontSize: 9),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+          final profit = Text(
+            pnl == null ? '—' : signedMoney(pnl, ''),
+            style: TextStyle(
+              color: pnlColor,
+              fontFamily: 'Consolas',
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+            ),
+          );
+          if (constraints.maxWidth < 700) {
+            return Row(
+              children: [
+                Expanded(child: identity),
+                profit,
+              ],
+            );
+          }
+          return Row(
+            children: [
+              SizedBox(width: 220, child: identity),
+              _TradeDatum(label: 'QTY', value: compactNumber(trade['qty'])),
+              _TradeDatum(label: 'ENTRY', value: compactNumber(trade['price'])),
+              _TradeDatum(
+                label: 'EXIT',
+                value: compactNumber(trade['exit_price']),
+              ),
+              _TradeDatum(
+                label: 'TICKET',
+                value: '${trade['broker_ticket'] ?? '—'}',
+              ),
+              const Spacer(),
+              profit,
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _TradeDatum extends StatelessWidget {
+  const _TradeDatum({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 100,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: muted,
+            fontSize: 7,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.7,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            fontFamily: 'Consolas',
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    ),
   );
 }
 
@@ -2977,11 +3775,20 @@ class _RiskPageState extends State<RiskPage> {
   bool closeOwned = false;
   bool liveConfirmed = false;
   bool loading = true;
+  bool saving = false;
   String? error;
   @override
   void initState() {
     super.initState();
     load();
+  }
+
+  @override
+  void dispose() {
+    for (final controller in controllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
   }
 
   Future<void> load() async {
@@ -3013,74 +3820,283 @@ class _RiskPageState extends State<RiskPage> {
       'emergency_close_owned_positions': closeOwned,
       'live_trading_confirmed': liveConfirmed,
     };
+    if (mounted) setState(() => saving = true);
     try {
       await widget.client.patch('/api/personal/risk/', body);
       if (mounted) message(context, 'Risk policy saved.');
     } catch (e) {
       if (mounted) message(context, e.toString(), isError: true);
+    } finally {
+      if (mounted) setState(() => saving = false);
     }
   }
+
+  Widget _riskInput(
+    String field,
+    String title, {
+    String? suffix,
+    String? help,
+  }) => TextField(
+    controller: controllers[field],
+    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+    decoration: InputDecoration(
+      labelText: title,
+      suffixText: suffix,
+      helperText: help,
+      helperMaxLines: 2,
+    ),
+  );
+
+  Widget _policySection({
+    required IconData icon,
+    required String title,
+    required String description,
+    required List<Widget> fields,
+  }) => Container(
+    padding: const EdgeInsets.all(18),
+    decoration: BoxDecoration(
+      color: panel,
+      borderRadius: BorderRadius.circular(11),
+      border: Border.all(color: border),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: blue.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: Icon(icon, color: blue, size: 18),
+            ),
+            const SizedBox(width: 11),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    description,
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 14),
+          child: Divider(height: 1),
+        ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final columns = constraints.maxWidth >= 1040
+                ? 4
+                : constraints.maxWidth >= 560
+                ? 2
+                : 1;
+            final fieldWidth =
+                (constraints.maxWidth - ((columns - 1) * 12)) / columns;
+            return Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final field in fields)
+                  SizedBox(width: fieldWidth, child: field),
+              ],
+            );
+          },
+        ),
+      ],
+    ),
+  );
+
+  Widget _safetyToggle({
+    required IconData icon,
+    required String title,
+    required String description,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    Color color = amber,
+  }) => Container(
+    padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+    decoration: BoxDecoration(
+      color: panel,
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: value ? color.withValues(alpha: 0.45) : border),
+    ),
+    child: Row(
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Icon(icon, color: color, size: 18),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                description,
+                style: const TextStyle(color: muted, fontSize: 9, height: 1.3),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Switch(value: value, onChanged: onChanged),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) return Empty(icon: Icons.cloud_off, text: error!);
     return ListView(
-      padding: const EdgeInsets.all(28),
+      padding: const EdgeInsets.fromLTRB(24, 22, 24, 30),
       children: [
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(22),
-            child: Wrap(
-              spacing: 16,
-              runSpacing: 16,
-              children: [
-                for (final field in fields)
-                  SizedBox(
-                    width: 260,
-                    child: TextField(
-                      controller: controllers[field],
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
-                      decoration: InputDecoration(labelText: label(field)),
-                    ),
-                  ),
-              ],
-            ),
+        _WorkspaceHeader(
+          eyebrow: 'ACCOUNT GUARDRAILS',
+          title: 'Risk policy',
+          description:
+              'Define exposure, loss and execution limits applied before every order.',
+          badge: liveConfirmed ? 'LIVE ENABLED' : 'DEMO SAFE',
+          action: FilledButton.icon(
+            onPressed: saving ? null : save,
+            icon: saving
+                ? const SizedBox.square(
+                    dimension: 15,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save_outlined, size: 17),
+            label: Text(saving ? 'Saving…' : 'Save policy'),
           ),
         ),
         const SizedBox(height: 14),
-        Card(
-          child: Column(
-            children: [
-              SwitchListTile(
-                title: const Text(
-                  'Close owned positions during emergency stop',
-                ),
-                subtitle: const Text(
-                  'Manual and external positions remain untouched.',
-                ),
-                value: closeOwned,
-                onChanged: (v) => setState(() => closeOwned = v),
-              ),
-              SwitchListTile(
-                title: const Text('I explicitly confirm live-account trading'),
-                subtitle: const Text('Keep disabled for demo-only operation.'),
-                value: liveConfirmed,
-                onChanged: (v) => setState(() => liveConfirmed = v),
-              ),
-            ],
-          ),
+        _policySection(
+          icon: Icons.account_balance_wallet_outlined,
+          title: 'Capital protection',
+          description: 'Cap loss per trade, per day and across the account.',
+          fields: [
+            _riskInput(
+              'risk_per_trade_pct',
+              'Risk per trade',
+              suffix: '%',
+              help: 'Equity at risk on one entry',
+            ),
+            _riskInput(
+              'max_daily_loss_pct',
+              'Maximum daily loss',
+              suffix: '%',
+              help: 'Stops new entries for the day',
+            ),
+            _riskInput(
+              'max_account_drawdown_pct',
+              'Maximum account drawdown',
+              suffix: '%',
+              help: 'Hard account-level guardrail',
+            ),
+            _riskInput(
+              'stop_after_daily_profit_pct',
+              'Daily profit lock',
+              suffix: '%',
+              help: '0 disables the profit lock',
+            ),
+          ],
         ),
-        const SizedBox(height: 18),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: FilledButton.icon(
-            onPressed: save,
-            icon: const Icon(Icons.save_outlined),
-            label: const Text('Save policy'),
-          ),
+        const SizedBox(height: 10),
+        _policySection(
+          icon: Icons.layers_outlined,
+          title: 'Exposure limits',
+          description: 'Control position size and trading frequency.',
+          fields: [
+            _riskInput('max_lot', 'Maximum lot size', suffix: 'lots'),
+            _riskInput('max_positions', 'Maximum open positions'),
+            _riskInput('max_positions_per_symbol', 'Positions per symbol'),
+            _riskInput('max_entry_trades_per_day', 'Entry trades per day'),
+          ],
+        ),
+        const SizedBox(height: 10),
+        _policySection(
+          icon: Icons.speed_rounded,
+          title: 'Execution quality',
+          description: 'Reject orders when broker conditions are unfavorable.',
+          fields: [
+            _riskInput('max_spread_points', 'Maximum spread', suffix: 'points'),
+            _riskInput(
+              'deviation_points',
+              'Allowed deviation',
+              suffix: 'points',
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final stacked = constraints.maxWidth < 760;
+            final toggles = [
+              _safetyToggle(
+                icon: Icons.emergency_outlined,
+                title: 'Close owned positions on emergency stop',
+                description:
+                    'Only EZ Trade-managed positions close; manual trades remain untouched.',
+                value: closeOwned,
+                onChanged: (value) => setState(() => closeOwned = value),
+                color: danger,
+              ),
+              _safetyToggle(
+                icon: Icons.verified_user_outlined,
+                title: 'Confirm live-account trading',
+                description:
+                    'Keep disabled while testing on demo accounts and simulations.',
+                value: liveConfirmed,
+                onChanged: (value) => setState(() => liveConfirmed = value),
+                color: amber,
+              ),
+            ];
+            if (stacked) {
+              return Column(
+                children: [
+                  toggles.first,
+                  const SizedBox(height: 10),
+                  toggles.last,
+                ],
+              );
+            }
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: toggles.first),
+                const SizedBox(width: 10),
+                Expanded(child: toggles.last),
+              ],
+            );
+          },
         ),
       ],
     );
@@ -3581,6 +4597,15 @@ String formatTimestamp(dynamic value) {
   final local = parsed.toLocal();
   String two(int part) => part.toString().padLeft(2, '0');
   return '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+}
+
+String formatDateTime(dynamic value) {
+  final parsed = DateTime.tryParse(value?.toString() ?? '');
+  if (parsed == null) return 'Date unavailable';
+  final local = parsed.toLocal();
+  String two(int part) => part.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)}  '
+      '${two(local.hour)}:${two(local.minute)}';
 }
 
 Map<String, dynamic> mapOf(dynamic value) =>

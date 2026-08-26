@@ -656,13 +656,14 @@ class Bot(models.Model):
 
         limit = get_bot_limit(owner)
         if owner:
-            existing = (
-                self.__class__.objects.filter(owner=owner)
-                .exclude(pk=self.pk if self.pk else None)
-                .count()
-            )
-            if existing >= limit:
-                raise ValidationError(f"Bot limit reached ({limit}). Upgrade subscription to add more.")
+            # Subscription limits gate creation only. Existing bots must remain
+            # editable so engine-maintained fields (allocation baselines,
+            # psychology state, pauses) can be persisted after a downgrade or
+            # when legacy data already exceeds the current plan.
+            if self._state.adding:
+                existing = self.__class__.objects.filter(owner=owner).count()
+                if existing >= limit:
+                    raise ValidationError(f"Bot limit reached ({limit}). Upgrade subscription to add more.")
 
             symbols = set([self.asset.symbol] if self.asset else [])
             if not symbols:
