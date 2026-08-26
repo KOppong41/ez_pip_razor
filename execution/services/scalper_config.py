@@ -93,6 +93,10 @@ class SymbolConfig:
     max_slippage_unit: str
     allow_countertrend: bool
     risk_pct: Decimal
+    exit_mode: str = "fixed_tp"
+    trail_start_r: Decimal | None = None
+    tp1_r: Decimal | None = None
+    tp1_close_pct: int | None = None
 
     def matches_symbol(self, symbol: str) -> bool:
         target = symbol.upper()
@@ -306,6 +310,10 @@ def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], D
             max_slippage_unit=slippage_unit,
             allow_countertrend=bool(settings.get("allow_countertrend", False)),
             risk_pct=Decimal(str(settings.get("risk_pct", 0.5))),
+            exit_mode=settings.get("exit_mode", "fixed_tp"),
+            trail_start_r=Decimal(str(settings.get("trail_start_r", settings.get("be_trigger_r", 1.0)))),
+            tp1_r=(Decimal(str(settings["tp1_r"])) if settings.get("tp1_r") is not None else None),
+            tp1_close_pct=(int(settings["tp1_close_pct"]) if settings.get("tp1_close_pct") is not None else None),
         )
         configs[key] = cfg
         alias_map[key] = key

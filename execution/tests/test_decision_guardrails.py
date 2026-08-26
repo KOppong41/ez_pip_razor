@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
-from bots.models import Bot
+from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.models import Signal, Decision, Position
 from execution.services.decision import make_decision_from_signal
@@ -16,15 +16,18 @@ class DecisionGuardrailTests(TestCase):
         self.account = BrokerAccount.objects.create(
             name="Paper",
             broker="paper",
+            connector="paper",
             account_ref="p1",
             owner=self.user,
         )
+        self.asset = Asset.objects.create(symbol="EURUSDm")
         self.bot = Bot.objects.create(
             name="Bot",
             owner=self.user,
             status="active",
             auto_trade=True,
             broker_account=self.account,
+            asset=self.asset,
             allowed_symbols=["EURUSDm"],
         )
         self.bot.allow_opposite_scalp = True

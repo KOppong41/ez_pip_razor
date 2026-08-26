@@ -188,13 +188,14 @@ def get_last_bot_trade(bot):
 
 def get_today_filled_trades(bot, symbol: str | None = None) -> int:
     """
-    Count today's *filled* orders for this bot (optionally per symbol).
-    This is what we use for daily trade limits.
+    Count today's broker-accepted entry orders for this bot. Exit/protection
+    orders never consume the daily entry allowance.
     """
     today = timezone.now().date()
     qs = Order.objects.filter(
         bot=bot,
-        status="filled",
+        intent="entry",
+        status__in=["part_filled", "filled"],
         created_at__date=today,
     )
     if symbol:
@@ -278,7 +279,7 @@ def _build_scalp_params(
 
     price = None
     try:
-        price = get_price(signal.symbol)
+        price = get_price(signal.bot.broker_account if signal.bot else None, signal.symbol)
     except Exception:
         price = None
 
@@ -418,6 +419,13 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
 
 @transaction.atomic
 def make_decision_from_signal(signal: Signal) -> Decision:
+    # Lock and reuse the signal's first decision so duplicated tasks cannot
+    # produce competing intents for the same completed candle/signal.
+    signal = Signal.objects.select_for_update().get(pk=signal.pk)
+    existing = Decision.objects.filter(signal=signal).order_by("decided_at", "id").first()
+    if existing:
+        return existing
+
     runtime_cfg = get_runtime_config()
 
     bot = signal.bot
@@ -425,8 +433,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     scalper_cfg = build_scalper_config(bot) if is_scalper_bot else None
 
     # 1) Strategy propose
-    # NOTE: If signal is ALREADY from scalper_engine, skip re-planning (avoid double-filtering)
-    if scalper_cfg and signal.source != "scalper_engine":
+    if scalper_cfg:
         proposed = plan_scalper_trade(signal, bot, scalper_cfg)
         if proposed.action != "open":
             _log_scalper_trace(signal, "strategy", proposed.action, proposed.reason)
@@ -596,7 +603,19 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     # Optional flip handling: create a paired close decision for the existing position.
     if flip_info:
         from execution.services.positions import prepare_flip_decisions
-        prepare_flip_decisions(decision, flip_info)
-        _record_scalper_flip(bot, flip_info.get("symbol"))
+        close_confirmed = prepare_flip_decisions(decision, flip_info)
+        if close_confirmed:
+            params = dict(decision.params or {})
+            params["flip_state"] = "close_confirmed"
+            decision.params = params
+            decision.save(update_fields=["params"])
+            _record_scalper_flip(bot, flip_info.get("symbol"))
+        else:
+            params = dict(decision.params or {})
+            params["flip_state"] = "close_unconfirmed"
+            decision.action = "ignore"
+            decision.reason = "flip_close_unconfirmed"
+            decision.params = params
+            decision.save(update_fields=["action", "reason", "params"])
 
     return decision

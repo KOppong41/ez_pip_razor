@@ -2,12 +2,15 @@ from django.test import TestCase
 from django.urls import reverse
 from bots.models import Bot
 from brokers.models import BrokerAccount
+from django.contrib.auth import get_user_model
 
 class TradingAPITest(TestCase):
     def setUp(self):
+        self.user = get_user_model().objects.create_superuser("api-admin", "api@example.com", "pw")
+        self.client.force_login(self.user)
         self.bot = Bot.objects.create(name="BotA", status="active")
         self.ba  = BrokerAccount.objects.create(
-            name="Exness Demo", broker="exness_mt5", account_ref="123456", creds={"ref":"local"}
+            name="Paper", broker="paper", connector="paper", account_ref="paper-api"
         )
 
     def test_signal_create_and_list(self):

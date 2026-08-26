@@ -35,8 +35,8 @@ class AlertWebhookSignatureTests(TestCase):
             content_type="application/json",
             HTTP_X_ALERT_SIGNATURE=sig,
         )
-        self.assertEqual(r.status_code, 410)  # still disabled externally but signature accepted
-        self.assertEqual(Signal.objects.count(), 1)
+        self.assertEqual(r.status_code, 410)
+        self.assertEqual(Signal.objects.count(), 0)
 
     @override_settings(ALERT_WEBHOOK_SECRET="topsecret", ALERT_WEBHOOK_TOKEN=None)
     def test_invalid_signature_is_rejected(self):
@@ -49,5 +49,5 @@ class AlertWebhookSignatureTests(TestCase):
             content_type="application/json",
             HTTP_X_ALERT_SIGNATURE="sha256=deadbeef",
         )
-        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.status_code, 410)
         self.assertEqual(Signal.objects.count(), 0)

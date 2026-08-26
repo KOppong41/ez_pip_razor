@@ -99,10 +99,12 @@ def _get_broker_constraints_cached(account_id, code: str, symbol: str) -> Broker
     """Cached lookup to reduce repeated symbol_info calls."""
     if code in {"mt5_local", "mt5", "exness_mt5", "icmarket_mt5"}:
         try:
-            from execution.connectors.mt5 import is_mt5_available, mt5
+            from brokers.models import BrokerAccount
+            from execution.connectors.mt5 import is_mt5_available
             if not is_mt5_available():
                 return BrokerSymbolConstraints()
-            sinfo = mt5.symbol_info(symbol)
+            account = BrokerAccount.objects.get(pk=account_id)
+            sinfo = MT5Connector().symbol_info_for_account(account, symbol)
             if not sinfo:
                 return BrokerSymbolConstraints()
             return BrokerSymbolConstraints(

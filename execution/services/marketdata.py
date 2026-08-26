@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import List, Literal, TypedDict
 
 import logging
 
 from brokers.models import BrokerAccount
-from execution.connectors.mt5 import MT5Connector, ConnectorError, is_mt5_available, mt5
+from execution.connectors.mt5 import MT5Connector, ConnectorError, is_mt5_available
 from core.metrics import mt5_errors_total
 
 
@@ -103,40 +103,22 @@ def get_candles_for_account(
     if not is_mt5_available():
         return []
 
-    tf_const = getattr(mt5, attr)
-
     try:
-        _login_mt5_for_account(broker_account)
-    except Exception as e:
-        logger.exception("[MT5] login failed for account=%s: %s", getattr(broker_account, "id", "?"), e)
-        return []
-
-    try:
-        # Ensure the symbol is selected in the terminal before requesting rates.
-        if not mt5.symbol_select(symbol, True):
-            err = mt5.last_error()
-            mt5_errors_total.labels(action="symbol_select").inc()
-            logger.error("[MT5] symbol_select failed for %s: %s", symbol, err)
-            return []
-
-        rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, n_bars)
-        if rates is None:
-            err = mt5.last_error()
-            mt5_errors_total.labels(action="copy_rates").inc()
-            logger.error(
-                "[MT5] copy_rates_from_pos failed symbol=%s tf=%s n_bars=%s err=%s",
-                symbol,
-                timeframe,
-                n_bars,
-                err,
-            )
-            return []
+        # Position zero is the forming candle. Signal engines receive completed
+        # bars only so repeated Beat cycles cannot trade an unfinished candle.
+        rates = MT5Connector().rates_for_account(
+            broker_account,
+            symbol,
+            attr,
+            start_pos=1,
+            count=n_bars,
+        )
 
         candles: List[Candle] = []
         for r in rates:
             candles.append(
                 {
-                    "time": datetime.fromtimestamp(r["time"]),
+                    "time": datetime.fromtimestamp(r["time"], tz=timezone.utc),
                     "open": Decimal(str(r["open"])),
                     "high": Decimal(str(r["high"])),
                     "low": Decimal(str(r["low"])),
@@ -145,5 +127,13 @@ def get_candles_for_account(
                 }
             )
         return candles
-    finally:
-        mt5.shutdown()
+    except ConnectorError as exc:
+        mt5_errors_total.labels(action="copy_rates").inc()
+        logger.warning(
+            "[MT5] completed-candle fetch unavailable account=%s symbol=%s tf=%s: %s",
+            getattr(broker_account, "id", None),
+            symbol,
+            timeframe,
+            exc,
+        )
+        return []

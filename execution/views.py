@@ -42,6 +42,10 @@ class SignalViewSet(mixins.CreateModelMixin, mixins.ListModelMixin, viewsets.Gen
     queryset = Signal.objects.all().order_by("-received_at")
     serializer_class = SignalSerializer
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        return queryset if self.request.user.is_superuser else queryset.filter(owner=self.request.user)
+
     @action(detail=True, methods=["post"], url_path="decide")
     def decide(self, request, pk=None):
         signal = self.get_object()
@@ -59,6 +63,10 @@ class OrderViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     
     queryset = Order.objects.all().order_by("-created_at")
     serializer_class = OrderSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        return queryset if self.request.user.is_superuser else queryset.filter(owner=self.request.user)
 
     @action(detail=False, methods=["post"], url_path="quick-create")
     def quick_create(self, request):
@@ -104,6 +112,13 @@ class OrderViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         order = self.get_object()
         if order.status != "new":
             return Response({"detail": "Only 'new' orders can be sent."}, status=status.HTTP_400_BAD_REQUEST)
+        if getattr(order.broker_account, "connector", "mt5_local") == "mt5_local":
+            from execution.mt5_tasks import execute_mt5_order_task
+
+            task = execute_mt5_order_task.apply_async(args=[order.id], queue="mt5_execution")
+            data = OrderSerializer(order).data
+            data["task_id"] = task.id
+            return Response(data, status=status.HTTP_202_ACCEPTED)
         dispatch_place_order(order)
         return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
 
@@ -118,6 +133,16 @@ class OrderViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def alert_webhook(request):
+    # Personal/internal-engine release: this must be the first executable
+    # branch so parsing, Signal creation, Decisions, and Orders have zero side
+    # effects regardless of credentials or duplicate payloads.
+    return Response(
+        {"detail": "External alerts are disabled. Bot uses the internal engine only."},
+        status=status.HTTP_410_GONE,
+    )
+    
+    # Retained legacy implementation is unreachable pending a separately
+    # reviewed external-alert release.
     
     expected = getattr(settings, "ALERT_WEBHOOK_TOKEN", None)
     if expected and request.headers.get("X-ALERT-TOKEN") != expected:
@@ -170,9 +195,11 @@ def alert_webhook(request):
 def decision_fanout(request, decision_id: int):
     # master size from request (MVP default 0.10)
     master_qty = str(request.data.get("qty", "0.10"))
-    decision = Decision.objects.get(id=decision_id)
-    qty = request.data.get("qty")
-    created = fanout_orders(decision, qty, master_qty)
+    decisions = Decision.objects.all()
+    if not request.user.is_superuser:
+        decisions = decisions.filter(owner=request.user)
+    decision = decisions.get(id=decision_id)
+    created = fanout_orders(decision, master_qty)
     return Response(
         {"count": len(created), "orders": [OrderSerializer(o).data for o, _ in created]},
         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK

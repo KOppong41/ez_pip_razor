@@ -1,36 +1,39 @@
-"""
-Desktop-friendly settings overlay.
-- Forces a local SQLite database under %APPDATA%/EzScalperBot.
-- Provides safe defaults for required env vars (tokens/hosts) so the app can boot offline.
-- Leaves the main config/settings.py untouched for server/web deployments.
-"""
+"""Local Windows settings overlay using the project's PostgreSQL database."""
 
 import os
 from pathlib import Path
+
+from .local_secrets import load_or_create_broker_creds_key
 
 # Local app data root for desktop mode (logs, DB, media)
 APPDATA = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming"))
 DESKTOP_ROOT = APPDATA / "EzScalperBot"
 DESKTOP_ROOT.mkdir(parents=True, exist_ok=True)
 
-# Allow SQLite and point DATABASE_URL before importing base settings.
-os.environ.setdefault("ALLOW_SQLITE_DESKTOP", "1")
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{DESKTOP_ROOT / 'db.sqlite3'}")
-
-# Relax host/debug for local runs.
-os.environ.setdefault("DJANGO_DEBUG", "True")
+# Safe local-only defaults. Database and secret values still come from .env.
+os.environ.setdefault("DJANGO_DEBUG", "False")
 os.environ.setdefault("ALLOWED_HOSTS", "127.0.0.1,localhost")
+os.environ.setdefault("API_ALLOW_OPEN", "False")
+os.environ.setdefault("BROKER_CREDS_KEY", load_or_create_broker_creds_key())
 
-# Provide safe defaults for required tokens to avoid startup errors in desktop mode.
-os.environ.setdefault("TOKEN", "")
-os.environ.setdefault("SECRET", "")
-os.environ.setdefault("URL", "")
+# Use a shared filesystem queue so the desktop app has no Redis dependency.
+QUEUE_ROOT = DESKTOP_ROOT / "celery"
+QUEUE_IN = QUEUE_ROOT / "queue"
+QUEUE_PROCESSED = QUEUE_ROOT / "processed"
+RESULT_ROOT = QUEUE_ROOT / "results"
+for directory in (QUEUE_IN, QUEUE_PROCESSED, RESULT_ROOT):
+    directory.mkdir(parents=True, exist_ok=True)
 
-# Optional: point Celery broker/result to local Redis if present; otherwise use in-memory.
-os.environ.setdefault("CELERY_BROKER_URL", os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"))
-os.environ.setdefault("CELERY_RESULT_BACKEND", os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"))
+os.environ.setdefault("CELERY_BROKER_URL", "filesystem://")
+os.environ.setdefault("CELERY_RESULT_BACKEND", f"file:///{RESULT_ROOT.as_posix()}")
 
 from .settings import *  # noqa: E402,F401,F403
+
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "data_folder_in": str(QUEUE_IN),
+    "data_folder_out": str(QUEUE_IN),
+    "data_folder_processed": str(QUEUE_PROCESSED),
+}
 
 # Override paths to keep desktop artifacts isolated from the repo tree.
 STATIC_ROOT = DESKTOP_ROOT / "staticfiles"

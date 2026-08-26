@@ -14,16 +14,13 @@ class SignalRoutingTest(TestCase):
         url = reverse("alert-webhook")
         payload = {"source":"tv","symbol":"EURUSD","timeframe":"5m","direction":"buy","payload":{}}
         r = self.client.post(url, data=payload, content_type="application/json")
-        self.assertEqual(r.status_code, 201)
-        sig = Signal.objects.first()
-        self.assertIsNotNone(sig.bot)
-        self.assertEqual(sig.bot_id, self.bot.id)
+        self.assertEqual(r.status_code, 410)
+        self.assertEqual(Signal.objects.count(), 0)
 
     def test_no_active_bot_means_null(self):
         self.bot.status = "stopped"; self.bot.save()
         url = reverse("alert-webhook")
         payload = {"source":"tv","symbol":"EURUSD","timeframe":"5m","direction":"buy","payload":{}}
         r = self.client.post(url, data=payload, content_type="application/json")
-        self.assertEqual(r.status_code, 201)
-        sig = Signal.objects.first()
-        self.assertIsNone(sig.bot)
+        self.assertEqual(r.status_code, 410)
+        self.assertEqual(Signal.objects.count(), 0)

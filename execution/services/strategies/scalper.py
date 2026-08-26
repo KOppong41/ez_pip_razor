@@ -7,6 +7,7 @@ from typing import Any, Dict, Tuple
 from django.utils import timezone
 
 from execution.services.prices import get_price
+from execution.services.trade_constraints import distance_to_price
 from execution.services.strategy import StrategyDecision
 from execution.services.scalper_config import ScalperConfig, SymbolConfig
 
@@ -47,6 +48,28 @@ def _to_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decimal
     if unit == "pips":
         pip = _pip_size(point) or Decimal("0.0001")
         return value * pip
+    return value
+
+
+def _from_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decimal:
+    unit = (unit or "points").lower()
+    if unit == "price":
+        return value
+    if unit == "points":
+        if point:
+            try:
+                return value / point
+            except Exception:
+                return value
+        return value
+    if unit == "pips":
+        pip = _pip_size(point) or Decimal("0.0001")
+        if pip:
+            try:
+                return value / pip
+            except Exception:
+                return value
+        return value
     return value
 
 @dataclass
@@ -129,7 +152,7 @@ def _estimate_sl_distance_points(symbol_cfg: SymbolConfig, payload: dict[str, An
     return max(symbol_cfg.sl_points_min, min(symbol_cfg.sl_points_max, distance))
 
 
-def _resolve_entry_price(symbol: str, payload: dict[str, Any]) -> Decimal | None:
+def _resolve_entry_price(broker_account, symbol: str, payload: dict[str, Any]) -> Decimal | None:
     for key in ("entry", "price", "close", "last_price"):
         if payload.get(key):
             try:
@@ -137,7 +160,7 @@ def _resolve_entry_price(symbol: str, payload: dict[str, Any]) -> Decimal | None
             except Exception:
                 continue
     try:
-        price = get_price(symbol)
+        price = get_price(broker_account, symbol)
         if price is None:
             return None
         return Decimal(str(price))
@@ -155,20 +178,28 @@ def _build_scalper_params(
     config: ScalperConfig,
 ) -> Dict[str, Any]:
     symbol_cfg = state.symbol_cfg
+    trail_trigger_r = symbol_cfg.trail_trigger_r
+    exit_mode = getattr(symbol_cfg, "exit_mode", "fixed_tp")
+    if exit_mode in ("hybrid", "trail_only") and symbol_cfg.trail_start_r is not None:
+        trail_trigger_r = symbol_cfg.trail_start_r
     return {
         "symbol": signal.symbol,
         "timeframe": signal.timeframe,
         "direction": signal.direction,
         "entry": str(entry),
         "sl": str(sl),
-        "tp": str(tp),
+        "tp": str(tp) if tp is not None else None,
         "risk_pct": str(risk_pct),
         "scalper": {
             "profile": config.profile_slug,
             "symbol": symbol_cfg.key,
+            "exit_mode": exit_mode,
+            "trail_start_r": str(symbol_cfg.trail_start_r) if symbol_cfg.trail_start_r is not None else None,
+            "tp1_r": str(symbol_cfg.tp1_r) if symbol_cfg.tp1_r is not None else None,
+            "tp1_close_pct": symbol_cfg.tp1_close_pct,
             "be_trigger_r": str(symbol_cfg.be_trigger_r),
             "be_buffer_r": str(symbol_cfg.be_buffer_r),
-            "trail_trigger_r": str(symbol_cfg.trail_trigger_r),
+            "trail_trigger_r": str(trail_trigger_r),
             "trail_mode": symbol_cfg.trail_mode,
             "time_in_trade_limit_min": config.time_in_trade_limit_min,
             "countertrend": state.countertrend,
@@ -274,7 +305,8 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     if symbol_cfg.execution_timeframes and timeframe not in symbol_cfg.execution_timeframes:
         return StrategyDecision(action="ignore", reason="scalper:timeframe_blocked")
 
-    if config.sessions and not config.is_session_open():
+    from execution.services.market_hours import is_crypto_symbol
+    if config.sessions and not is_crypto_symbol(signal.symbol) and not config.is_session_open():
         return StrategyDecision(action="ignore", reason="scalper:session_closed")
 
     if config.rollover_blackout and config.is_rollover_window():
@@ -283,39 +315,74 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     if payload.get("news_blocked"):
         return StrategyDecision(action="ignore", reason="scalper:news_blackout")
 
-    # Guard: SL must be meaningfully larger than spread in price terms.
-    point_hint = _parse_decimal(payload, "point")
-    spread_points = _parse_decimal(payload, "spread_points", "spread")
-    sl_points_hint = _parse_decimal(payload, "sl_points")
-    if spread_points is not None and sl_points_hint is not None:
-        sl_price_hint = _to_price_delta(sl_points_hint, getattr(symbol_cfg, "sl_points_unit", "points"), point_hint)
-        spread_price = _to_price_delta(spread_points, getattr(symbol_cfg, "max_spread_unit", "points"), point_hint)
-        if spread_price > 0 and sl_price_hint < spread_price * Decimal("2"):
-            return StrategyDecision(action="ignore", reason="scalper:sl_below_spread_guard")
-
     bias = _resolve_bias(payload)
     direction = (signal.direction or "").lower()
     countertrend = False
     if bias and bias in ("buy", "sell") and bias != direction:
         return StrategyDecision(action="ignore", reason="scalper:trend_only")
 
-    entry = _resolve_entry_price(signal.symbol, payload)
+    entry = _resolve_entry_price(getattr(bot, "broker_account", None), signal.symbol, payload)
     if entry is None:
         return StrategyDecision(action="ignore", reason="scalper:no_price")
 
     point = _point_size_for_symbol(symbol_cfg, signal.symbol, payload)
     sl_points = _estimate_sl_distance_points(symbol_cfg, payload)
 
-    sl_delta = sl_points * point
+    sl_unit = getattr(symbol_cfg, "sl_points_unit", "points")
+    sl_hint_price = _parse_decimal(payload, "sl")
+    if sl_hint_price is not None:
+        hint_delta_price = abs(entry - sl_hint_price)
+        hint_in_unit = _from_price_delta(hint_delta_price, sl_unit, point)
+        if hint_in_unit > symbol_cfg.sl_points_max:
+            return StrategyDecision(action="ignore", reason="scalper:sl_above_max")
+        sl_points = max(sl_points, hint_in_unit)
+    sl_points = max(symbol_cfg.sl_points_min, min(symbol_cfg.sl_points_max, sl_points))
+    sl_delta = distance_to_price(sl_points, sl_unit, point)
     if sl_delta <= 0:
         return StrategyDecision(action="ignore", reason="scalper:invalid_sl")
+    spread_price = _parse_decimal(payload, "spread_points", "spread")
+    if spread_price is not None and spread_price > 0 and sl_delta < spread_price * Decimal("2"):
+        return StrategyDecision(action="ignore", reason="scalper:sl_below_spread_guard")
+
+    # Exit policy enforcement
+    exit_mode = getattr(symbol_cfg, "exit_mode", "fixed_tp")
+    tp = None
+    tp1_r = getattr(symbol_cfg, "tp1_r", None)
+    tp1_close_pct = getattr(symbol_cfg, "tp1_close_pct", None)
+    trail_start_r = getattr(symbol_cfg, "trail_start_r", None)
+    tp_r_multiple = getattr(symbol_cfg, "tp_r_multiple", None)
+    effective_tp_r_multiple = tp_r_multiple
+
+    if exit_mode == "fixed_tp":
+        if tp_r_multiple is None:
+            return StrategyDecision(action="ignore", reason="scalper:exit_invalid_fixed")
+    elif exit_mode == "trail_only":
+        if trail_start_r is None:
+            return StrategyDecision(action="ignore", reason="scalper:exit_invalid_trail")
+        effective_tp_r_multiple = None
+    elif exit_mode == "hybrid":
+        if tp1_r is None or tp1_close_pct is None or trail_start_r is None:
+            return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
+        try:
+            tp1_close_pct = int(tp1_close_pct)
+        except Exception:
+            return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
+        if not (0 < tp1_close_pct <= 100):
+            return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
+        if trail_start_r >= tp1_r:
+            return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
+        effective_tp_r_multiple = tp1_r
+    else:
+        return StrategyDecision(action="ignore", reason="scalper:exit_mode_unknown")
 
     if direction == "buy":
         sl = entry - sl_delta
-        tp = entry + sl_delta * symbol_cfg.tp_r_multiple
+        if effective_tp_r_multiple:
+            tp = entry + sl_delta * Decimal(str(effective_tp_r_multiple))
     else:
         sl = entry + sl_delta
-        tp = entry - sl_delta * symbol_cfg.tp_r_multiple
+        if effective_tp_r_multiple:
+            tp = entry - sl_delta * Decimal(str(effective_tp_r_multiple))
 
     runtime_state = ScalpRuntimeState(
         symbol_cfg=symbol_cfg,

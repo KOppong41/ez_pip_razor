@@ -5,7 +5,6 @@ from execution.connectors.mt5 import (
     MT5Connector,
     ConnectorError,
     is_mt5_available,
-    mt5,
 )
 from execution.models import Execution
 from execution.services.runtime_config import get_runtime_config
@@ -59,13 +58,24 @@ def get_account_balances(broker_account, *, force_live: bool = False) -> dict:
 
     # If we reach here, account is active and we're allowed to login
     try:
-        MT5Connector().login_for_account(broker_account)
-        info = mt5.account_info()
+        info = MT5Connector().account_info_for_account(broker_account)
         if not info:
             return empty
         balance = Decimal(str(getattr(info, "balance", 0)))
         equity = Decimal(str(getattr(info, "equity", 0)))
         margin = Decimal(str(getattr(info, "margin", 0) or 0))
-        return {"balance": balance, "equity": equity, "margin": margin}
+        return {
+            "balance": balance,
+            "equity": equity,
+            "margin": margin,
+            "free_margin": Decimal(str(getattr(info, "margin_free", 0) or 0)),
+            "margin_level": Decimal(str(getattr(info, "margin_level", 0) or 0)),
+            "currency": str(getattr(info, "currency", "") or ""),
+            "leverage": int(getattr(info, "leverage", 0) or 0),
+            "server": str(getattr(info, "server", "") or ""),
+            "company": str(getattr(info, "company", "") or ""),
+            "login": int(getattr(info, "login", 0) or 0),
+            "trade_mode": getattr(info, "trade_mode", None),
+        }
     except Exception:
         return _cached_balance_or_empty(broker_account, empty)

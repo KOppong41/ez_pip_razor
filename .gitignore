@@ -31,7 +31,8 @@ Thumbs.db
 
 # Environment files
 .env
-*.env
+.env.*
+!.env.example
 
 # Backup and temp files
 *.bak
@@ -45,6 +46,7 @@ Thumbs.db
 htmlcov/
 .tox/
 pytest_cache/
+.pytest_cache/
 junit.xml
 
 # Migrations (optional - uncomment if you want to exclude)
@@ -55,8 +57,16 @@ node_modules/
 npm-debug.log
 yarn-error.log
 
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+desktop_app/build/
+
 # Reports / build artifacts
 dist/
 build/
 tmp.py
 map.py
+celerybeat-schedule*
+mt5_env/

@@ -5,7 +5,9 @@ django:
   settings_module: config.settings_desktop
 celery:
   worker:
-    args: "-A config worker -l info --concurrency=2"
+    args: "-A config worker -l info -Q celery --pool=solo --concurrency=1"
+  mt5_worker:
+    args: "-A config worker -l info -Q mt5_execution --pool=solo --concurrency=1"
   beat:
     args: "-A config beat -l info"
 mt5:

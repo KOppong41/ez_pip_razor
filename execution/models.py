@@ -102,15 +102,28 @@ class Decision(models.Model):
         return f"{self.action} {sym} {dirn} ({self.reason or 'no-reason'})"
 
 class Order(models.Model):
+    INTENT = [
+        ("entry", "entry"),
+        ("exit", "exit"),
+        ("modify", "modify protection"),
+    ]
     STATUS = [
         ("new", "new"),
         ("ack", "ack"),  # Order acknowledged by broker
         ("filled", "filled"),
         ("part_filled", "part_filled"),  # Partially filled
         ("canceled", "canceled"),
+        ("rejected", "rejected"),
         ("error", "error"),
     ]
     bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="orders")
+    decision = models.ForeignKey(
+        Decision,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="orders",
+    )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -120,6 +133,7 @@ class Order(models.Model):
     )
     broker_account = models.ForeignKey(BrokerAccount, on_delete=models.CASCADE, related_name="orders")
     client_order_id = models.CharField(max_length=64, unique=True)
+    intent = models.CharField(max_length=12, choices=INTENT, default="entry")
     symbol = models.CharField(max_length=32)
     side = models.CharField(max_length=4, choices=[("buy","buy"),("sell","sell")])
     qty = models.DecimalField(max_digits=20, decimal_places=8)
@@ -128,6 +142,18 @@ class Order(models.Model):
     tp = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     status = models.CharField(max_length=50, choices=STATUS, default="new")
     broker_ticket = models.BigIntegerField(null=True, blank=True)
+    broker_order_ticket = models.BigIntegerField(null=True, blank=True, db_index=True)
+    broker_deal_ticket = models.BigIntegerField(null=True, blank=True, db_index=True)
+    broker_position_ticket = models.BigIntegerField(null=True, blank=True, db_index=True)
+    filled_qty = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    remaining_qty = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    requested_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    actual_fill_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    mt5_retcode = models.BigIntegerField(null=True, blank=True)
+    mt5_retcode_description = models.CharField(max_length=255, blank=True, default="")
+    broker_response = models.JSONField(default=dict, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
     last_error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -138,7 +164,17 @@ class Order(models.Model):
                 self.owner = self.bot.owner
             elif self.broker_account and self.broker_account.owner_id:
                 self.owner_id = self.broker_account.owner_id
+        if self.remaining_qty == 0 and self.filled_qty == 0 and self.status == "new":
+            self.remaining_qty = self.qty
         super().save(*args, **kwargs)
+
+    @property
+    def is_entry(self) -> bool:
+        return self.intent == "entry"
+
+    @property
+    def is_exit(self) -> bool:
+        return self.intent == "exit"
 
     def __str__(self) -> str:
         return f"{self.symbol} {self.side} {self.qty} [{self.status}]"
@@ -155,6 +191,13 @@ class Execution(models.Model):
     qty = models.DecimalField(max_digits=20, decimal_places=8)
     price = models.DecimalField(max_digits=20, decimal_places=8)
     fee = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    broker_order_ticket = models.BigIntegerField(null=True, blank=True)
+    broker_deal_ticket = models.BigIntegerField(null=True, blank=True)
+    broker_position_ticket = models.BigIntegerField(null=True, blank=True)
+    profit = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    commission = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    swap = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    broker_metadata = models.JSONField(default=dict, blank=True)
     exec_time = models.DateTimeField(auto_now_add=True)
     account_balance = models.DecimalField(
         max_digits=20,
@@ -163,6 +206,14 @@ class Execution(models.Model):
         blank=True,
         help_text="Account balance immediately after this execution.",
     )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "broker_deal_ticket"],
+                name="execution_unique_order_deal_ticket",
+            )
+        ]
 
 
     def __str__(self) -> str:
@@ -239,6 +290,198 @@ class Position(models.Model):
         if not self.owner and self.broker_account and self.broker_account.owner_id:
             self.owner_id = self.broker_account.owner_id
         super().save(*args, **kwargs)
+
+
+class ExecutionAttempt(models.Model):
+    STATUS = [
+        ("prepared", "prepared"),
+        ("submitting", "submitting"),
+        ("ambiguous", "ambiguous"),
+        ("reconciled", "reconciled"),
+        ("accepted", "accepted"),
+        ("partial", "partial"),
+        ("rejected", "rejected"),
+        ("failed", "failed"),
+    ]
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="attempts")
+    attempt_no = models.PositiveIntegerField()
+    status = models.CharField(max_length=16, choices=STATUS, default="prepared")
+    request_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    broker_order_ticket = models.BigIntegerField(null=True, blank=True)
+    broker_deal_ticket = models.BigIntegerField(null=True, blank=True)
+    broker_position_ticket = models.BigIntegerField(null=True, blank=True)
+    mt5_retcode = models.BigIntegerField(null=True, blank=True)
+    mt5_retcode_description = models.CharField(max_length=255, blank=True, default="")
+    requested_qty = models.DecimalField(max_digits=20, decimal_places=8)
+    filled_qty = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    remaining_qty = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    requested_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    actual_fill_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    response_metadata = models.JSONField(default=dict, blank=True)
+    error = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(auto_now_add=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["order_id", "attempt_no"]
+        constraints = [
+            models.UniqueConstraint(fields=["order", "attempt_no"], name="execution_unique_attempt_no")
+        ]
+
+
+class BrokerPosition(models.Model):
+    OWNERSHIP = [
+        ("ez_trade", "EZ Trade"),
+        ("manual", "Manual"),
+        ("external", "External/unknown"),
+    ]
+    STATUS = [("open", "open"), ("closed", "closed"), ("missing", "missing")]
+
+    broker_account = models.ForeignKey(
+        BrokerAccount,
+        on_delete=models.CASCADE,
+        related_name="broker_positions",
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="broker_positions_owned",
+    )
+    bot = models.ForeignKey(Bot, null=True, blank=True, on_delete=models.SET_NULL, related_name="broker_positions")
+    originating_order = models.ForeignKey(
+        Order,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="broker_positions",
+    )
+    broker_position_ticket = models.BigIntegerField()
+    ownership = models.CharField(max_length=16, choices=OWNERSHIP, default="external")
+    symbol = models.CharField(max_length=32)
+    side = models.CharField(max_length=4, choices=[("buy", "buy"), ("sell", "sell")])
+    volume = models.DecimalField(max_digits=20, decimal_places=8)
+    open_price = models.DecimalField(max_digits=20, decimal_places=8)
+    current_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    sl = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    tp = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    profit = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    swap = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    commission = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    magic = models.BigIntegerField(null=True, blank=True)
+    comment = models.CharField(max_length=255, blank=True, default="")
+    strategy_name = models.CharField(max_length=128, blank=True, default="")
+    status = models.CharField(max_length=12, choices=STATUS, default="open")
+    opened_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    last_reconciled_at = models.DateTimeField(null=True, blank=True)
+    broker_metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["broker_account_id", "broker_position_ticket"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["broker_account", "broker_position_ticket"],
+                name="execution_unique_broker_position_ticket",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["broker_account", "status", "symbol"]),
+            models.Index(fields=["ownership", "status"]),
+        ]
+
+    @property
+    def is_manageable(self) -> bool:
+        return self.ownership == "ez_trade" and self.status == "open"
+
+    def save(self, *args, **kwargs):
+        if not self.owner_id and self.broker_account_id:
+            self.owner_id = self.broker_account.owner_id
+        super().save(*args, **kwargs)
+
+
+class AccountSnapshot(models.Model):
+    broker_account = models.ForeignKey(BrokerAccount, on_delete=models.CASCADE, related_name="account_snapshots")
+    balance = models.DecimalField(max_digits=20, decimal_places=8)
+    equity = models.DecimalField(max_digits=20, decimal_places=8)
+    margin = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    free_margin = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    margin_level = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    currency = models.CharField(max_length=12, blank=True, default="")
+    captured_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-captured_at"]
+        indexes = [models.Index(fields=["broker_account", "captured_at"])]
+
+
+class RiskPolicy(models.Model):
+    broker_account = models.OneToOneField(BrokerAccount, on_delete=models.CASCADE, related_name="risk_policy")
+    risk_per_trade_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("0.5"))
+    max_daily_loss_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("1.5"))
+    max_account_drawdown_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("5.0"))
+    max_positions = models.PositiveIntegerField(default=1)
+    max_positions_per_symbol = models.PositiveIntegerField(default=1)
+    max_entry_trades_per_day = models.PositiveIntegerField(default=3)
+    max_lot = models.DecimalField(max_digits=12, decimal_places=8, default=Decimal("0.05"))
+    max_spread_points = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("30"))
+    deviation_points = models.PositiveIntegerField(default=8)
+    stop_after_daily_profit_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("0"))
+    entries_enabled = models.BooleanField(default=False)
+    live_trading_confirmed = models.BooleanField(
+        default=False,
+        help_text="Explicit operator confirmation required when MT5 reports a live-money account.",
+    )
+    emergency_stop = models.BooleanField(default=False)
+    emergency_close_owned_positions = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Risk policy for account {self.broker_account_id}"
+
+
+class BrokerSymbolMapping(models.Model):
+    broker_account = models.ForeignKey(BrokerAccount, on_delete=models.CASCADE, related_name="symbol_mappings")
+    canonical_symbol = models.CharField(max_length=16)
+    broker_symbol = models.CharField(max_length=32, blank=True, default="")
+    enabled = models.BooleanField(default=False)
+    bid = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    ask = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    spread = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    trading_status = models.CharField(max_length=32, default="unknown")
+    last_error = models.CharField(max_length=255, blank=True, default="")
+    last_tick_at = models.DateTimeField(null=True, blank=True)
+    last_candle_at = models.DateTimeField(null=True, blank=True)
+    last_resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["canonical_symbol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["broker_account", "canonical_symbol"],
+                name="execution_unique_account_canonical_symbol",
+            )
+        ]
+
+
+class MT5ConnectionState(models.Model):
+    broker_account = models.OneToOneField(
+        BrokerAccount,
+        on_delete=models.CASCADE,
+        related_name="mt5_connection_state",
+    )
+    connected = models.BooleanField(default=False)
+    active_login = models.CharField(max_length=64, blank=True, default="")
+    active_server = models.CharField(max_length=128, blank=True, default="")
+    company = models.CharField(max_length=128, blank=True, default="")
+    currency = models.CharField(max_length=12, blank=True, default="")
+    leverage = models.PositiveIntegerField(default=0)
+    account_mode = models.CharField(max_length=16, default="unknown")
+    last_error = models.CharField(max_length=255, blank=True, default="")
+    checked_at = models.DateTimeField(auto_now=True)
 
 
 class PnLDaily(models.Model):
@@ -517,6 +760,15 @@ def default_scalper_profile_config() -> dict:
                 "internal_triggers": ["price_action_pinbar"],
                 "disabled_strategies": ["range_reversion", "trend_pullback"],
             },
+            "eth_momentum": {
+                "name": "ETH Momentum",
+                "symbol": "ETHUSD",
+                "execution_timeframes": ["M1"],
+                "description": "ETH-focused momentum profile built around ignition bursts and clean breakout retests.",
+                "enabled_strategies": ["momentum_ignition", "breakout_retest"],
+                "internal_triggers": ["price_action_pinbar"],
+                "disabled_strategies": ["range_reversion", "trend_pullback"],
+            },
             "xau_precision": {
                 "name": "Gold Precision",
                 "symbol": "XAUUSD",
@@ -712,19 +964,23 @@ def default_scalper_profile_config() -> dict:
                 "aliases": ["ETHUSDm"],
                 "execution_timeframes": ["M1"],
                 "context_timeframes": ["M5", "M15", "H1"],
-                # ETH moves less per point than BTC, so keep stops tighter while still using crypto guardrails.
-                "sl_points": {"min": 80, "max": 250, "unit": "price"},
+                # ETH: dollar-based stops with tighter spread/slippage caps and hybrid exit by default.
+                "sl_points": {"min": 8, "max": 20, "unit": "price"},
                 "tp_r_multiple": 1.25,
                 "be_trigger_r": 1.0,
                 "be_buffer_r": 0.25,
                 "trail_trigger_r": 1.6,
                 "trail_mode": "structure",
-                "max_spread_points": 60,
+                "exit_mode": "hybrid",
+                "tp1_r": 1.2,
+                "tp1_close_pct": 70,
+                "trail_start_r": 0.8,
+                "max_spread_points": 5,
                 "max_spread_unit": "price",
-                "max_slippage_points": 30,
+                "max_slippage_points": 3,
                 "max_slippage_unit": "price",
                 "allow_countertrend": False,
-                "risk_pct": 0.35,
+                "risk_pct": 0.25,
             },
         },
         "countertrend": {

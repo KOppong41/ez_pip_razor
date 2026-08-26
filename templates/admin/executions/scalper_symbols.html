@@ -254,13 +254,61 @@
                     {% csrf_token %}
                     <input type="hidden" name="symbol" value="{{ item.symbol }}">
                     <div class="form-grid">
-                        {% for field in item.form %}
-                        <div class="form-group">
-                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                            {{ field }}
-                            {{ field.errors }}
-                        </div>
-                        {% endfor %}
+                        {% with sl_unit=item.meta.sl_points_unit|default:"points" spread_unit=item.meta.max_spread_unit|default:"points" slip_unit=item.meta.max_slippage_unit|default:"points" exit_mode=item.meta.exit_mode|default:"fixed_tp" %}
+                            {% for field in item.form %}
+                            <div class="form-group">
+                                <label for="{{ field.id_for_label }}">
+                                    {% if field.name == "sl_points_min" %}{% trans "SL Min" %}
+                                    {% elif field.name == "sl_points_max" %}{% trans "SL Max" %}
+                                    {% elif field.name == "max_spread_points" %}{% trans "Max Spread" %}
+                                    {% elif field.name == "max_slippage_points" %}{% trans "Max Slippage" %}
+                                    {% elif field.name == "exit_mode" %}{% trans "Exit Mode" %}
+                                    {% else %}{{ field.label }}{% endif %}
+                                    {% if field.name in "sl_points_min sl_points_max" %} ({{ sl_unit }})
+                                    {% elif field.name == "max_spread_points" %} ({{ spread_unit }})
+                                    {% elif field.name == "max_slippage_points" %} ({{ slip_unit }})
+                                    {% endif %}
+                                </label>
+                                {{ field }}
+                                {{ field.errors }}
+                                {% if field.name == "sl_points_min" or field.name == "sl_points_max" %}
+                                    <small class="label">{% trans "Unit" %}: {{ sl_unit }}</small>
+                                {% elif field.name == "max_spread_points" %}
+                                    <small class="label">{% trans "Unit" %}: {{ spread_unit }}</small>
+                                {% elif field.name == "max_slippage_points" %}
+                                    <small class="label">{% trans "Unit" %}: {{ slip_unit }}</small>
+                                {% elif field.name == "exit_mode" %}
+                                    <small class="label">{% trans "Modes" %}: fixed_tp | trail_only | hybrid</small>
+                                {% elif field.name == "tp_r_multiple" %}
+                                    <small class="label">{% trans "Required when exit_mode = fixed_tp" %}</small>
+                                {% elif field.name == "trail_start_r" %}
+                                    <small class="label">
+                                        {% if exit_mode == "fixed_tp" %}
+                                            {% trans "Disabled in fixed_tp mode" %}
+                                        {% else %}
+                                            {% trans "Required when exit_mode = trail_only or hybrid" %}
+                                        {% endif %}
+                                    </small>
+                                {% elif field.name == "tp1_r" %}
+                                    <small class="label">
+                                        {% if exit_mode == "hybrid" %}
+                                            {% trans "Required when exit_mode = hybrid" %}
+                                        {% else %}
+                                            {% trans "Hidden unless exit_mode = hybrid" %}
+                                        {% endif %}
+                                    </small>
+                                {% elif field.name == "tp1_close_pct" %}
+                                    <small class="label">
+                                        {% if exit_mode == "hybrid" %}
+                                            {% trans "Required when exit_mode = hybrid" %}
+                                        {% else %}
+                                            {% trans "Hidden unless exit_mode = hybrid" %}
+                                        {% endif %}
+                                    </small>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        {% endwith %}
                     </div>
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         <small style="color: var(--gray-400);">
@@ -272,6 +320,69 @@
                         </button>
                     </div>
                 </form>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    <section>
+        <h2 style="margin-bottom: var(--space-md);">{% trans "Diagnostics (decisions + last run logs)" %}</h2>
+        <div class="summary-grid">
+            {% for diag in diagnostics %}
+            <div class="summary-card">
+                <strong>{{ diag.symbol }}</strong>
+                {% if diag.variants %}
+                <div style="color: var(--gray-400); font-size: var(--text-xs);">
+                    {% trans "Symbols" %}: {{ diag.variants|join:", " }}
+                </div>
+                {% endif %}
+                <div class="kv-list">
+                    <span class="label">{% trans "Exit mode" %}</span><span>{{ diag.exit_mode }}</span>
+                    <span class="label">{% trans "SL unit" %}</span><span>{{ diag.sl_unit }}</span>
+                    <span class="label">{% trans "Spread unit" %}</span><span>{{ diag.spread_unit }}</span>
+                    <span class="label">{% trans "Slippage unit" %}</span><span>{{ diag.slip_unit }}</span>
+                </div>
+                {% if diag.decisions %}
+                <div style="font-size: var(--text-xs); color: var(--gray-300);">
+                    {% for d in diag.decisions %}
+                        <div>
+                            <strong>{{ d.decided_at }}</strong> —
+                            {{ d.action }} / {{ d.reason }} / score={{ d.score }}
+                            {% if d.strategy or d.signal_source %}
+                                · {{ d.strategy }}{% if d.signal_source %} ({{ d.signal_source }}){% endif %}
+                            {% endif %}
+                            {% if d.entry or d.sl or d.tp %}
+                                · entry={{ d.entry }} sl={{ d.sl }} tp={{ d.tp }}
+                                {% if d.risk %}· risk={{ d.risk }}{% endif %}
+                                {% if d.rr %}· rr={{ d.rr }}{% endif %}
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div style="color: var(--gray-400); font-size: var(--text-xs);">
+                    {% trans "No recent decisions." %}
+                </div>
+                {% endif %}
+                {% if diag.run_logs %}
+                <div style="margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--gray-300);">
+                    <div style="margin-bottom: var(--space-xs); color: var(--gray-400);">
+                        {% trans "Last scalper runs (no-signal cycles only)" %}
+                    </div>
+                    {% for run in diag.run_logs %}
+                        <div style="margin-bottom: var(--space-xs);">
+                            <strong>{{ run.created_at }}</strong> —
+                            {{ run.bot_name }} · tf={{ run.timeframe }} · session={{ run.session }} · bias={{ run.htf_bias }}
+                        </div>
+                        {% if run.strategies %}
+                            <div style="margin-left: var(--space-sm);">
+                                {% for s in run.strategies %}
+                                    <div>{{ s.strategy }}: {{ s.action }} ({{ s.reason }})</div>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    {% endfor %}
+                </div>
+                {% endif %}
             </div>
             {% endfor %}
         </div>

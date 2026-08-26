@@ -26,4 +26,3 @@ def test_snap_quantity_enforces_max():
     constraints = LotConstraints(min_lot=Decimal("0.1"), max_lot=Decimal("0.5"), lot_step=Decimal("0.1"))
     snapped = snap_quantity(Decimal("0.83"), constraints)
     assert snapped == Decimal("0.5")
-

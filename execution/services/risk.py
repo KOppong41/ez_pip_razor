@@ -7,6 +7,7 @@ from typing import Tuple
 
 from execution.services.scalper_config import ScalperConfig, SymbolConfig
 from execution.services.market_hours import is_crypto_symbol
+from execution.services.trade_constraints import distance_to_price
 
 
 @dataclass
@@ -119,11 +120,31 @@ def _check_scalper_limits(
     ):
         return False, "scalper:loss_cooldown"
 
-    if ctx.spread_points is not None and ctx.spread_points > sym_cfg.max_spread_points:
-        return False, "scalper:spread_exceeded"
+    point = None
+    try:
+        payload = ctx.payload_snapshot or {}
+        if payload.get("point") is not None:
+            point = Decimal(str(payload.get("point")))
+    except Exception:
+        point = None
 
-    if ctx.slippage_points is not None and ctx.slippage_points > sym_cfg.max_slippage_points:
-        return False, "scalper:slippage_exceeded"
+    if ctx.spread_points is not None:
+        allowed_spread_price = distance_to_price(
+            sym_cfg.max_spread_points,
+            getattr(sym_cfg, "max_spread_unit", "points"),
+            point,
+        )
+        if allowed_spread_price > 0 and ctx.spread_points > allowed_spread_price:
+            return False, "scalper:spread_exceeded"
+
+    if ctx.slippage_points is not None:
+        allowed_slippage_price = distance_to_price(
+            sym_cfg.max_slippage_points,
+            getattr(sym_cfg, "max_slippage_unit", "points"),
+            point,
+        )
+        if allowed_slippage_price > 0 and ctx.slippage_points > allowed_slippage_price:
+            return False, "scalper:slippage_exceeded"
 
     if (
         ctx.floating_symbol_risk_pct is not None

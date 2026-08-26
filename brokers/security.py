@@ -1,19 +1,25 @@
 import base64
 import hashlib
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from cryptography.fernet import Fernet, InvalidToken
 
 
 def _get_fernet() -> Fernet:
     """
-    Derive a stable Fernet key from BROKER_CREDS_KEY or SECRET_KEY.
+    Derive a stable Fernet key from the dedicated BROKER_CREDS_KEY.
+
+    Broker passwords must not share key material with Django signing.  Failing
+    here is intentional: live credentials cannot be read or written safely
+    until the operator configures a separate key.
     """
-    secret = getattr(settings, "BROKER_CREDS_KEY", None) or settings.SECRET_KEY
+    secret = getattr(settings, "BROKER_CREDS_KEY", None)
+    if not secret:
+        raise ImproperlyConfigured(
+            "BROKER_CREDS_KEY is required to encrypt or decrypt live broker credentials"
+        )
     key = hashlib.sha256(secret.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(key))
-
-
-_FERNET = _get_fernet()
 
 
 def encrypt_secret(value: str) -> str:
@@ -24,7 +30,7 @@ def encrypt_secret(value: str) -> str:
         return ""
     if not isinstance(value, str):
         value = str(value)
-    return _FERNET.encrypt(value.encode()).decode()
+    return _get_fernet().encrypt(value.encode()).decode()
 
 
 def decrypt_secret(token: str) -> str:
@@ -34,6 +40,6 @@ def decrypt_secret(token: str) -> str:
     if not token:
         return ""
     try:
-        return _FERNET.decrypt(token.encode()).decode()
+        return _get_fernet().decrypt(token.encode()).decode()
     except (InvalidToken, ValueError, TypeError):
         return ""

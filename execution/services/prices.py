@@ -1,38 +1,43 @@
+from datetime import datetime, timezone
 from decimal import Decimal
+from django.conf import settings
 
-from execution.connectors.mt5 import MT5Connector, is_mt5_available, mt5
-
-# Fallback quotes when live MT5 pricing isn't available.
-FIXED = {
-    "EURUSD": Decimal("1.1010"),
-    "XAUUSD": Decimal("2400.00"),
-}
+from execution.connectors.base import ConnectorError
+from execution.connectors.mt5 import MT5Connector, is_mt5_available
 
 
-def get_price(symbol: str) -> Decimal:
+class MarketDataUnavailable(ConnectorError):
+    pass
+
+
+def get_price(broker_account, symbol: str) -> Decimal:
     """
-    Try live MT5 mid-price (bid+ask)/2; fallback to stub if unavailable.
+    Return an account-scoped, fresh MT5 mid-price.
+
+    There is deliberately no synthetic fallback. New entries must fail closed
+    when the connected broker cannot provide a valid current quote.
     """
+    if broker_account is None:
+        raise MarketDataUnavailable("A BrokerAccount is required for live pricing")
+    if not is_mt5_available():
+        raise MarketDataUnavailable("MetaTrader5 package is unavailable")
+
     try:
-        from brokers.models import BrokerAccount
+        tick = MT5Connector().tick_for_account(broker_account, symbol)
+    except Exception as exc:
+        raise MarketDataUnavailable(f"MT5 price unavailable for {symbol}") from exc
 
-        if is_mt5_available():
-            acct = BrokerAccount.objects.filter(
-                is_active=True, broker__in=["mt5", "exness_mt5", "icmarket_mt5"]
-            ).first()
-            if acct:
-                conn = MT5Connector()
-                conn.login_for_account(acct)
-                mt5.symbol_select(symbol, True)
-                tick = mt5.symbol_info_tick(symbol)
-                if tick:
-                    bid = Decimal(str(getattr(tick, "bid", 0) or 0))
-                    ask = Decimal(str(getattr(tick, "ask", 0) or 0))
-                    if bid > 0 and ask > 0:
-                        return (bid + ask) / Decimal("2")
-    except Exception:
-        # best-effort only; fall back to stub prices.
-        pass
+    bid = Decimal(str(getattr(tick, "bid", 0) or 0))
+    ask = Decimal(str(getattr(tick, "ask", 0) or 0))
+    if bid <= 0 or ask <= 0 or ask < bid:
+        raise MarketDataUnavailable(f"Invalid MT5 bid/ask for {symbol}")
 
-    sym_no_suffix = symbol.rstrip("m")
-    return FIXED.get(sym_no_suffix, FIXED.get(symbol, Decimal("1.0000")))
+    tick_time = getattr(tick, "time", None)
+    if tick_time:
+        observed = datetime.fromtimestamp(float(tick_time), tz=timezone.utc)
+        age = (datetime.now(timezone.utc) - observed).total_seconds()
+        max_age = int(getattr(settings, "MT5_MAX_TICK_AGE_SECONDS", 120))
+        if age < 0 or age > max_age:
+            raise MarketDataUnavailable(f"Stale MT5 price for {symbol} (age={int(age)}s)")
+
+    return (bid + ask) / Decimal("2")

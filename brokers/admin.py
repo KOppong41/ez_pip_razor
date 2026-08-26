@@ -190,15 +190,13 @@ class BrokerAccountAdmin(admin.ModelAdmin):
             return JsonResponse({"ok": False, "message": "Connection test only applies to MT5 desktop connectors."}, status=400)
         if not obj.is_active:
             return JsonResponse({"ok": False, "message": "Account is inactive. Activate before testing."}, status=400)
-        symbols = self._get_health_symbols(obj)
-        errs = []
-        for sym in symbols:
-            try:
-                MT5Connector().check_health(obj.get_creds(), symbol=sym)
-                return JsonResponse({"ok": True, "message": f"MT5 connection OK for {sym}"})
-            except Exception as e:
-                errs.append(f"{sym}: {e}")
-        return JsonResponse({"ok": False, "message": " | ".join(errs)}, status=400)
+        from execution.mt5_tasks import check_mt5_account_task
+
+        task = check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution")
+        return JsonResponse(
+            {"ok": True, "pending": True, "task_id": task.id, "message": "MT5 connection test queued."},
+            status=202,
+        )
 
     def refresh_balance_view(self, request, object_id, *args, **kwargs):
         if request.method != "POST":
@@ -213,11 +211,10 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         if not obj.is_active:
             return JsonResponse({"ok": False, "message": "Account is inactive. Activate before refresh."}, status=400)
         
-        # Now safe to call with force_live=True since we've verified account is active
-        data = get_account_balances(obj, force_live=True)
-        if data["balance"] is None and data["equity"] is None:
-            return JsonResponse({"ok": False, "message": "Unable to fetch balance/equity."}, status=400)
-        return JsonResponse({"ok": True, **data})
+        from execution.mt5_tasks import check_mt5_account_task
+
+        task = check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution")
+        return JsonResponse({"ok": True, "pending": True, "task_id": task.id}, status=202)
 
     @admin.action(description="Verify credentials for selected accounts")
     def verify_accounts(self, request, queryset):
@@ -230,16 +227,12 @@ class BrokerAccountAdmin(admin.ModelAdmin):
             if not obj.requires_mt5_connector():
                 skipped += 1
                 continue
-            creds = obj.get_creds()
-            try:
-                MT5Connector().check_health(creds, symbol="EURUSDm")
-                obj.is_verified = True
-                obj.save(update_fields=["is_verified"])
-                checked += 1
-            except Exception as e:
-                self.message_user(request, f"{obj.name}: verification failed ({e})", level="error")
+            from execution.mt5_tasks import check_mt5_account_task
+
+            check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution")
+            checked += 1
         if checked:
-            self.message_user(request, f"Verified {checked} account(s).")
+            self.message_user(request, f"Queued verification for {checked} account(s).")
         if skipped:
             self.message_user(
                 request,
@@ -295,70 +288,16 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         if not pwd and obj.pk:
             pwd = obj.get_mt5_password()
 
-        # Optional MT5 health check on save (can be slow). Default: skip and leave unverified.
-        run_healthcheck = getattr(settings, "ADMIN_MT5_HEALTHCHECK_ON_SAVE", False)
-        if run_healthcheck and obj.is_active and obj.requires_mt5_connector():
-            creds = {
-                "login": form.cleaned_data.get("mt5_login") or obj.mt5_login,
-                "server": form.cleaned_data.get("mt5_server") or obj.mt5_server,
-                "path": form.cleaned_data.get("mt5_path") or obj.mt5_path,
-                "password": pwd or "",
-            }
-            symbol_map = getattr(settings, "MT5_HEALTHCHECK_SYMBOLS_MAP", {}) or {}
-            symbols = symbol_map.get(obj.broker) or getattr(settings, "MT5_HEALTHCHECK_SYMBOLS", ["EURUSDm", "EURUSD"])
-
-            errors = []
-            for sym in symbols:
-                try:
-                    MT5Connector().check_health(creds, symbol=sym)
-                    obj.is_verified = True
-                    errors = []
-                    break
-                except Exception as e:
-                    msg = str(e)
-                    if isinstance(e, ConnectorError) and e.args:
-                        msg = e.args[0]
-                    errors.append(f"{sym}: {msg}")
-
-            if errors:
-                obj.is_verified = False
-                messages.warning(
-                    request,
-                    "MT5 health check failed; account saved as unverified. "
-                    + " | ".join(errors)
-                    + " (adjust MT5_HEALTHCHECK_SYMBOLS/_MAP or ensure symbol is visible).",
-                )
-        elif run_healthcheck and not obj.is_active and obj.requires_mt5_connector():
-            # Inactive accounts should not hit MT5; leave as unverified.
-            if change is False:
-                obj.is_verified = False
-            messages.info(
-                request,
-                "Skipped MT5 health check because account is inactive. Activate before verifying.",
-            )
-        elif run_healthcheck and not obj.requires_mt5_connector():
-            if change is False:
-                obj.is_verified = False
-            messages.info(
-                request,
-                "Skipping MT5 health check: connector does not use the desktop terminal.",
-            )
-        else:
-            # mark unverified; admins can use the Test Connection button
-            if change is False:
-                obj.is_verified = False
-            messages.info(
-                request,
-                "Skipped MT5 health check on save (ADMIN_MT5_HEALTHCHECK_ON_SAVE=False). Use Test Connection to verify.",
-            )
+        # Saving credentials never touches the global MT5 session from the web
+        # process. The Test Connection action queues serialized verification.
+        if change is False:
+            obj.is_verified = False
+        messages.info(request, "Account saved. Use Test Connection to queue MT5 verification.")
 
         # Persist password if a new one was provided
         if pwd:
             obj.set_mt5_password(pwd)
 
-        # Do not force is_verified here; it was already
-        # set to True in the loop above when a health
-        # check passes, or left False if checks failed.
         super().save_model(request, obj, form, change)
 
     def live_balance(self, obj):

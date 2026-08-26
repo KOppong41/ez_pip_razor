@@ -5,6 +5,7 @@ from execution.services.orchestrator import create_close_order_for_position
 from execution.services.brokers import dispatch_place_order
 from execution.services.fanout import fanout_orders
 from execution.services.runtime_config import RuntimeConfig, get_runtime_config
+from execution.services.journal import log_journal_event
 
 
 def _within_flip_cooldown(bot, symbol: str, runtime_cfg: RuntimeConfig | None = None) -> bool:
@@ -33,7 +34,7 @@ def _flip_count_today(bot, symbol: str) -> int:
     ).count()
 
 
-def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> None:
+def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> bool:
     """
     Given an 'open' decision that wants to flip, create and dispatch a close order
     for the existing position, honoring cooldown and daily flip caps.
@@ -41,16 +42,16 @@ def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> None:
     bot = open_decision.bot
     symbol = flip_info.get("symbol")
     if not bot or not symbol or not bot.broker_account_id:
-        return
+        return False
 
     runtime_cfg = get_runtime_config()
 
     # Cooldown/daily cap check
     if _within_flip_cooldown(bot, symbol, runtime_cfg=runtime_cfg):
-        return
+        return False
     max_flips = int(runtime_cfg.decision_max_flips_per_day)
     if max_flips > 0 and _flip_count_today(bot, symbol) >= max_flips:
-        return
+        return False
 
     try:
         pos = Position.objects.get(
@@ -59,7 +60,7 @@ def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> None:
             status="open",
         )
     except Position.DoesNotExist:
-        return
+        return False
 
     # Create a synthetic "close" decision tied to the open decision's signal
     close_decision = Decision.objects.create(
@@ -73,9 +74,59 @@ def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> None:
 
     # Create close order idempotently and dispatch
     orders = fanout_orders(close_decision, master_qty=None)
+    if not orders:
+        log_journal_event(
+            "position.flip_failed",
+            severity="warning",
+            bot=bot,
+            decision=open_decision,
+            symbol=symbol,
+            message="Flip close order could not be created",
+            context={"state": "close_requested"},
+        )
+        return False
     for order, created in orders:
         try:
             dispatch_place_order(order)
-        except Exception:
-            # fail-soft; leave decision/order recorded
-            pass
+        except Exception as exc:
+            log_journal_event(
+                "position.flip_failed",
+                severity="error",
+                bot=bot,
+                decision=open_decision,
+                order=order,
+                symbol=symbol,
+                message="Flip close failed; reverse entry blocked",
+                context={"state": "close_failed", "error": str(exc)},
+            )
+            return False
+        order.refresh_from_db()
+        if order.status != "filled":
+            log_journal_event(
+                "position.flip_pending",
+                severity="warning",
+                bot=bot,
+                decision=open_decision,
+                order=order,
+                symbol=symbol,
+                message="Flip close is not broker-confirmed; reverse entry blocked",
+                context={"state": "close_submitted", "order_status": order.status},
+            )
+            return False
+
+    still_open = bot.broker_account.broker_positions.filter(
+        symbol=symbol,
+        ownership="ez_trade",
+        status="open",
+    ).exists()
+    if still_open:
+        return False
+    log_journal_event(
+        "position.flip_close_confirmed",
+        bot=bot,
+        decision=open_decision,
+        symbol=symbol,
+        message="Original position closed; reverse entry permitted",
+        context={"state": "close_confirmed"},
+    )
+    return True

@@ -19,7 +19,14 @@ from .models import (
     ExecutionSetting,
     JournalEntry,
     ScalperProfile,
+    AccountSnapshot,
+    BrokerPosition,
+    BrokerSymbolMapping,
+    ExecutionAttempt,
+    MT5ConnectionState,
+    RiskPolicy,
 )
+from django.utils import timezone
 
 class OwnedAdmin(admin.ModelAdmin):
     """
@@ -54,15 +61,38 @@ class SymbolProfileForm(forms.Form):
         label=_("Context TFs"),
         help_text=_("Comma separated context timeframes (e.g. M15,H1)."),
     )
-    sl_min = forms.DecimalField(label=_("SL min pts"), max_digits=10, decimal_places=2)
-    sl_max = forms.DecimalField(label=_("SL max pts"), max_digits=10, decimal_places=2)
-    tp_r_multiple = forms.DecimalField(label=_("TP R multiple"), max_digits=5, decimal_places=2)
+    sl_min = forms.DecimalField(label=_("SL min"), max_digits=10, decimal_places=2)
+    sl_max = forms.DecimalField(label=_("SL max"), max_digits=10, decimal_places=2)
+    sl_unit = forms.ChoiceField(
+        label=_("SL unit"),
+        choices=[("points", "points"), ("pips", "pips"), ("price", "price")],
+        initial="points",
+    )
+    tp_r_multiple = forms.DecimalField(label=_("TP R multiple"), max_digits=5, decimal_places=2, required=False)
     be_trigger_r = forms.DecimalField(label=_("BE trigger R"), max_digits=5, decimal_places=2)
     be_buffer_r = forms.DecimalField(label=_("BE buffer R"), max_digits=5, decimal_places=2)
     trail_trigger_r = forms.DecimalField(label=_("Trail trigger R"), max_digits=5, decimal_places=2)
     trail_mode = forms.CharField(label=_("Trail mode"))
-    max_spread_points = forms.DecimalField(label=_("Max spread pts"), max_digits=10, decimal_places=2)
-    max_slippage_points = forms.DecimalField(label=_("Max slippage pts"), max_digits=10, decimal_places=2)
+    exit_mode = forms.ChoiceField(
+        label=_("Exit mode"),
+        choices=[("fixed_tp", "fixed_tp"), ("trail_only", "trail_only"), ("hybrid", "hybrid")],
+        initial="fixed_tp",
+    )
+    trail_start_r = forms.DecimalField(label=_("Trail start R"), max_digits=5, decimal_places=2, required=False)
+    tp1_r = forms.DecimalField(label=_("TP1 R (hybrid)"), max_digits=5, decimal_places=2, required=False)
+    tp1_close_pct = forms.IntegerField(label=_("TP1 close % (hybrid)"), required=False, min_value=1, max_value=100)
+    max_spread_points = forms.DecimalField(label=_("Max spread"), max_digits=10, decimal_places=2)
+    max_spread_unit = forms.ChoiceField(
+        label=_("Spread unit"),
+        choices=[("points", "points"), ("pips", "pips"), ("price", "price")],
+        initial="points",
+    )
+    max_slippage_points = forms.DecimalField(label=_("Max slippage"), max_digits=10, decimal_places=2)
+    max_slippage_unit = forms.ChoiceField(
+        label=_("Slippage unit"),
+        choices=[("points", "points"), ("pips", "pips"), ("price", "price")],
+        initial="points",
+    )
     allow_countertrend = forms.BooleanField(label=_("Allow countertrend"), required=False)
     risk_pct = forms.DecimalField(label=_("Risk %"), max_digits=6, decimal_places=3)
 
@@ -71,6 +101,30 @@ class SymbolProfileForm(forms.Form):
         for field in self.fields.values():
             css = field.widget.attrs.get("class", "")
             field.widget.attrs["class"] = f"{css} form-control".strip()
+
+    def clean(self):
+        cleaned = super().clean()
+        mode = cleaned.get("exit_mode") or "fixed_tp"
+        tp_r = cleaned.get("tp_r_multiple")
+        trail_start = cleaned.get("trail_start_r")
+        tp1_r = cleaned.get("tp1_r")
+        tp1_pct = cleaned.get("tp1_close_pct")
+        if mode == "fixed_tp" and tp_r is None:
+            self.add_error("tp_r_multiple", _("Required when exit_mode = fixed_tp"))
+        if mode == "trail_only":
+            if trail_start is None:
+                self.add_error("trail_start_r", _("Required when exit_mode = trail_only"))
+            cleaned["tp_r_multiple"] = None
+        if mode == "hybrid":
+            if tp1_r is None:
+                self.add_error("tp1_r", _("Required when exit_mode = hybrid"))
+            if tp1_pct is None:
+                self.add_error("tp1_close_pct", _("Required when exit_mode = hybrid"))
+            if trail_start is None:
+                self.add_error("trail_start_r", _("Required when exit_mode = hybrid"))
+            if tp1_r is not None and trail_start is not None and trail_start >= tp1_r:
+                self.add_error("trail_start_r", _("trail_start_r must be less than tp1_r"))
+        return cleaned
 
 
 def _csv_list(value: str, upper: bool = False) -> list[str]:
@@ -91,6 +145,101 @@ def _to_float(value):
         return float(value)
     except Exception:
         return value
+
+
+def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
+    """
+    Return per-symbol diagnostics with last few decisions to help operators see why trades were skipped/placed.
+    """
+    data = []
+    for sym, meta in symbols_cfg.items():
+        variants = {sym.upper()}
+        for alias in meta.get("aliases", []) or []:
+            if alias:
+                variants.add(str(alias).upper())
+        decisions_data = []
+        for decision in (
+            Decision.objects.filter(signal__symbol__in=variants)
+            .select_related("signal", "bot")
+            .order_by("-id")[:3]
+        ):
+            payload = (decision.signal.payload or {}) if decision.signal else {}
+            strategy_name = payload.get("strategy") or payload.get("engine")
+            params = decision.params or {}
+            entry = params.get("entry")
+            sl = params.get("sl")
+            tp = params.get("tp")
+            risk = None
+            rr = None
+            try:
+                if entry is not None and sl is not None:
+                    risk_val = abs(Decimal(str(entry)) - Decimal(str(sl)))
+                    risk = str(risk_val)
+                    if tp is not None and risk_val > 0:
+                        rr = str(abs(Decimal(str(tp)) - Decimal(str(entry))) / risk_val)
+            except Exception:
+                risk = None
+                rr = None
+            decisions_data.append(
+                {
+                    "decided_at": decision.decided_at,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "score": decision.score,
+                    "strategy": strategy_name,
+                    "signal_source": getattr(decision.signal, "source", None) if decision.signal else None,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp": tp,
+                    "risk": risk,
+                    "rr": rr,
+                }
+            )
+        run_logs = []
+        try:
+            from bots.models import Bot
+            from execution.models import ScalperRunLog
+
+            bots = (
+                Bot.objects.select_related("asset")
+                .filter(engine_mode="scalper", asset__symbol__in=variants)
+                .order_by("id")
+            )
+            for bot in bots:
+                last_run = (
+                    ScalperRunLog.objects.filter(bot=bot).order_by("-created_at").first()
+                )
+                if not last_run:
+                    continue
+                summary = last_run.summary or {}
+                strategies = summary.get("strategies") or []
+                run_logs.append(
+                    {
+                        "bot_id": bot.id,
+                        "bot_name": bot.name,
+                        "asset_symbol": getattr(bot.asset, "symbol", None) if bot.asset else None,
+                        "created_at": last_run.created_at,
+                        "session": last_run.session,
+                        "timeframe": last_run.timeframe,
+                        "strategies": strategies[:6],
+                        "htf_bias": summary.get("htf_bias"),
+                    }
+                )
+        except Exception:
+            run_logs = []
+        data.append(
+            {
+                "symbol": sym,
+                "variants": sorted(variants),
+                "exit_mode": meta.get("exit_mode", "fixed_tp"),
+                "sl_unit": (meta.get("sl_points") or {}).get("unit") or meta.get("sl_points_unit") or "points",
+                "spread_unit": meta.get("max_spread_unit") or "points",
+                "slip_unit": meta.get("max_slippage_unit") or "points",
+                "decisions": decisions_data,
+                "run_logs": run_logs,
+            }
+        )
+    return data
 
 @admin.register(Order)
 class OrderAdmin(OwnedAdmin):
@@ -134,6 +283,43 @@ class OrderAdmin(OwnedAdmin):
             }
         )
         return super().changelist_view(request, extra_context=extra_context)
+
+
+@admin.register(ExecutionAttempt)
+class ExecutionAttemptAdmin(admin.ModelAdmin):
+    list_display = ("order", "attempt_no", "status", "mt5_retcode", "filled_qty", "remaining_qty", "started_at")
+    list_filter = ("status",)
+    readonly_fields = tuple(field.name for field in ExecutionAttempt._meta.fields)
+
+
+@admin.register(BrokerPosition)
+class BrokerPositionAdmin(OwnedAdmin):
+    list_display = ("broker_position_ticket", "broker_account", "ownership", "symbol", "side", "volume", "profit", "status")
+    list_filter = ("ownership", "status", "symbol")
+    search_fields = ("broker_position_ticket", "symbol", "comment")
+
+
+@admin.register(AccountSnapshot)
+class AccountSnapshotAdmin(admin.ModelAdmin):
+    list_display = ("broker_account", "balance", "equity", "free_margin", "currency", "captured_at")
+    readonly_fields = tuple(field.name for field in AccountSnapshot._meta.fields)
+
+
+@admin.register(RiskPolicy)
+class RiskPolicyAdmin(admin.ModelAdmin):
+    list_display = ("broker_account", "risk_per_trade_pct", "max_daily_loss_pct", "max_account_drawdown_pct", "entries_enabled", "emergency_stop")
+
+
+@admin.register(BrokerSymbolMapping)
+class BrokerSymbolMappingAdmin(admin.ModelAdmin):
+    list_display = ("broker_account", "canonical_symbol", "broker_symbol", "enabled", "trading_status", "last_tick_at")
+    list_filter = ("enabled", "trading_status")
+
+
+@admin.register(MT5ConnectionState)
+class MT5ConnectionStateAdmin(admin.ModelAdmin):
+    list_display = ("broker_account", "connected", "account_mode", "active_login", "active_server", "checked_at")
+    readonly_fields = ("checked_at",)
 
 @admin.register(Execution)
 class ExecutionAdmin(OwnedAdmin):
@@ -475,14 +661,21 @@ class ExecutionSettingAdmin(admin.ModelAdmin):
                     base_entry["sl_points"] = {
                         "min": _to_float(cleaned.get("sl_min")),
                         "max": _to_float(cleaned.get("sl_max")),
+                        "unit": cleaned.get("sl_unit") or "points",
                     }
                     base_entry["tp_r_multiple"] = _to_float(cleaned.get("tp_r_multiple"))
                     base_entry["be_trigger_r"] = _to_float(cleaned.get("be_trigger_r"))
                     base_entry["be_buffer_r"] = _to_float(cleaned.get("be_buffer_r"))
                     base_entry["trail_trigger_r"] = _to_float(cleaned.get("trail_trigger_r"))
                     base_entry["trail_mode"] = cleaned.get("trail_mode")
+                    base_entry["exit_mode"] = cleaned.get("exit_mode") or "fixed_tp"
+                    base_entry["trail_start_r"] = _to_float(cleaned.get("trail_start_r"))
+                    base_entry["tp1_r"] = _to_float(cleaned.get("tp1_r"))
+                    base_entry["tp1_close_pct"] = cleaned.get("tp1_close_pct")
                     base_entry["max_spread_points"] = _to_float(cleaned.get("max_spread_points"))
+                    base_entry["max_spread_unit"] = cleaned.get("max_spread_unit") or "points"
                     base_entry["max_slippage_points"] = _to_float(cleaned.get("max_slippage_points"))
+                    base_entry["max_slippage_unit"] = cleaned.get("max_slippage_unit") or "points"
                     base_entry["allow_countertrend"] = bool(cleaned.get("allow_countertrend"))
                     base_entry["risk_pct"] = _to_float(cleaned.get("risk_pct"))
 
@@ -503,13 +696,20 @@ class ExecutionSettingAdmin(admin.ModelAdmin):
                 "context_timeframes": _csv_display(entry.get("context_timeframes", [])),
                 "sl_min": sl_points.get("min"),
                 "sl_max": sl_points.get("max"),
+                "sl_unit": sl_points.get("unit") or entry.get("sl_points_unit") or "points",
                 "tp_r_multiple": entry.get("tp_r_multiple"),
                 "be_trigger_r": entry.get("be_trigger_r"),
                 "be_buffer_r": entry.get("be_buffer_r"),
                 "trail_trigger_r": entry.get("trail_trigger_r"),
                 "trail_mode": entry.get("trail_mode"),
+                "exit_mode": entry.get("exit_mode") or "fixed_tp",
+                "trail_start_r": entry.get("trail_start_r"),
+                "tp1_r": entry.get("tp1_r"),
+                "tp1_close_pct": entry.get("tp1_close_pct"),
                 "max_spread_points": entry.get("max_spread_points"),
+                "max_spread_unit": entry.get("max_spread_unit") or "points",
                 "max_slippage_points": entry.get("max_slippage_points"),
+                "max_slippage_unit": entry.get("max_slippage_unit") or "points",
                 "allow_countertrend": entry.get("allow_countertrend", False),
                 "risk_pct": entry.get("risk_pct"),
             }
@@ -533,6 +733,7 @@ class ExecutionSettingAdmin(admin.ModelAdmin):
             "profile": profile,
             "scalper_config": effective_cfg,
             "changelist_url": reverse("admin:execution_executionsetting_changelist"),
+            "diagnostics": _diagnostics_for_symbols(symbols_cfg),
         }
         return TemplateResponse(request, "admin/executions/scalper_symbols.html", context)
     

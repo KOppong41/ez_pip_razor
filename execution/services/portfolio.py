@@ -48,16 +48,38 @@ def record_fill(
     fee: Decimal = Decimal("0"),
     account_balance: Decimal | None = None,
     contract_size: Decimal | None = None,
+    broker_order_ticket: int | None = None,
+    broker_deal_ticket: int | None = None,
+    broker_position_ticket: int | None = None,
+    broker_profit: Decimal | None = None,
+    commission: Decimal = Decimal("0"),
+    swap: Decimal = Decimal("0"),
+    broker_metadata: dict | None = None,
 ) -> Execution:
     """
     Record a single fill for an order, update the running Position,
     and optionally store the account balance after this fill.
     """
+    if broker_deal_ticket is not None:
+        existing = Execution.objects.filter(
+            order=order,
+            broker_deal_ticket=broker_deal_ticket,
+        ).first()
+        if existing:
+            return existing
+
     exe = Execution.objects.create(
         order=order,
         qty=qty,
         price=price,
         fee=fee,
+        broker_order_ticket=broker_order_ticket,
+        broker_deal_ticket=broker_deal_ticket,
+        broker_position_ticket=broker_position_ticket,
+        profit=broker_profit,
+        commission=commission,
+        swap=swap,
+        broker_metadata=broker_metadata or {},
         account_balance=account_balance,
         owner=getattr(order, "owner", None),
     )
@@ -73,11 +95,14 @@ def record_fill(
             "price": str(price),
             "fee": str(fee),
             "account_balance": str(account_balance) if account_balance is not None else None,
+            "broker_order_ticket": broker_order_ticket,
+            "broker_deal_ticket": broker_deal_ticket,
+            "broker_position_ticket": broker_position_ticket,
         },
     )
 
     # --- existing position logic, keep as-is ---
-    pos, _ = Position.objects.get_or_create(
+    pos, _ = Position.objects.select_for_update().get_or_create(
         broker_account=order.broker_account,
         symbol=order.symbol,
         defaults={"qty": Decimal("0"), "avg_price": Decimal("0"), "owner": getattr(order, "owner", None)},
@@ -91,14 +116,20 @@ def record_fill(
     delta = qty if order.side == "buy" else -qty
     new_qty = pos.qty + delta
 
-    # If adding in same direction, use weighted average; if crossing zero, reset avg_price to entry price
-    if pos.qty == 0:
+    # Same-direction additions change the weighted average. Reductions retain
+    # the original entry; only excess volume that crosses zero opens at the
+    # new fill price.
+    if old_qty == 0:
         pos.avg_price = price
-    elif (pos.qty > 0 and new_qty > 0) or (pos.qty < 0 and new_qty < 0):
-        total = abs(pos.qty) + abs(delta)
-        pos.avg_price = (pos.avg_price * abs(pos.qty) + price * abs(delta)) / total
+    elif (old_qty > 0 and delta > 0) or (old_qty < 0 and delta < 0):
+        total = abs(old_qty) + abs(delta)
+        pos.avg_price = (old_avg * abs(old_qty) + price * abs(delta)) / total
+    elif new_qty == 0:
+        pos.avg_price = Decimal("0")
+    elif (old_qty > 0 and new_qty > 0) or (old_qty < 0 and new_qty < 0):
+        pos.avg_price = old_avg
     else:
-        # crossing/flattening then flipping; new entry price becomes avg
+        # Cross-zero: the excess quantity is a new opposite position.
         pos.avg_price = price
 
     pos.qty = new_qty
@@ -122,9 +153,20 @@ def record_fill(
             # This fill is reducing/closing a position in the opposite direction.
             closing_qty = min(abs(old_qty), abs(delta))
             if closing_qty > 0:
-                # For longs, profit when price increases; for shorts, opposite.
-                direction = Decimal("1") if old_qty > 0 else Decimal("-1")
-                realized_pnl = ((Decimal(str(price)) - Decimal(str(old_avg))) * closing_qty * direction * eff_contract)
+                if broker_profit is not None:
+                    realized_pnl = (
+                        Decimal(str(broker_profit))
+                        + Decimal(str(commission or 0))
+                        + Decimal(str(swap or 0))
+                    )
+                elif getattr(order.broker_account, "broker", "") == "paper":
+                    direction = Decimal("1") if old_qty > 0 else Decimal("-1")
+                    realized_pnl = (
+                        (Decimal(str(price)) - Decimal(str(old_avg)))
+                        * closing_qty
+                        * direction
+                        * eff_contract
+                    ) - Decimal(str(fee or 0))
 
     pos.save()
     log_journal_event(

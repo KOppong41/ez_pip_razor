@@ -1,23 +1,42 @@
 ﻿from pathlib import Path
 import environ
+import os
 from decimal import Decimal
 import sys
 from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+TESTING = "test" in sys.argv
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
     ALLOW_SQLITE_DESKTOP=(bool, False),
 )
-environ.Env.read_env(BASE_DIR / ".env")
+env_path = Path(os.environ.get("ENV_FILE", BASE_DIR / ".env"))
+if not env_path.exists():
+    env_path = BASE_DIR / ".env"
+environ.Env.read_env(env_path)
 
-SECRET_KEY = env("DJANGO_SECRET_KEY", default="dev-key")
 DEBUG = env("DJANGO_DEBUG")
-ALLOWED_HOSTS = [h.strip() for h in env("ALLOWED_HOSTS", default="*").split(",")]
+SECRET_KEY = env("DJANGO_SECRET_KEY", default="")
+if not SECRET_KEY:
+    if TESTING:
+        SECRET_KEY = "test-only-not-for-runtime"
+    else:
+        raise RuntimeError("DJANGO_SECRET_KEY must be configured")
 
-API_ALLOW_OPEN = env.bool("API_ALLOW_OPEN", default=bool(env("DJANGO_DEBUG", default=False)))
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in env("ALLOWED_HOSTS", default="127.0.0.1,localhost").split(",")
+    if host.strip()
+]
+
+API_ALLOW_OPEN = env.bool("API_ALLOW_OPEN", default=False)
 BROKER_CREDS_KEY = env("BROKER_CREDS_KEY", default=None)
+if not BROKER_CREDS_KEY and DEBUG and not TESTING:
+    from .local_secrets import load_or_create_broker_creds_key
+
+    BROKER_CREDS_KEY = load_or_create_broker_creds_key()
 
 # Optional HMAC for dedupe hashing
 EXECUTION_ALERT_SECRET = env("EXECUTION_ALERT_SECRET", default=None)
@@ -26,13 +45,7 @@ EXECUTION_ALERT_SECRET = env("EXECUTION_ALERT_SECRET", default=None)
 # Optional Sentry DSN (future)
 SENTRY_DSN = env("SENTRY_DSN", default=None)
 
-ALLOWED_HOSTS += ["localhost", "127.0.0.1", "ecologic-noncontemporaneously-phillip.ngrok-free.dev"]
-# add your ngrok subdomain **after you see it**
-CSRF_TRUSTED_ORIGINS = [
-    "https://localhost",
-    "https://127.0.0.1",
-    "https://ecologic-noncontemporaneously-phillip.ngrok-free.dev",
-]
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
 
 
@@ -148,6 +161,23 @@ CELERY_BROKER_URL = env("CELERY_BROKER_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://localhost:6379/1")
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ALWAYS_EAGER = False  # For development/testing, run tasks immediately
+CELERY_TASK_DEFAULT_QUEUE = "celery"
+CELERY_TASK_ROUTES = {
+    # Every task that can touch the process-global MetaTrader session is pinned
+    # to the dedicated worker started with --pool=solo --concurrency=1.
+    "execution.tasks.monitor_positions_task": {"queue": "mt5_execution"},
+    "execution.tasks.trail_positions_task": {"queue": "mt5_execution"},
+    "execution.tasks.reconcile_daily_task": {"queue": "mt5_execution"},
+    "execution.tasks.scan_harami_for_bot": {"queue": "mt5_execution"},
+    "execution.tasks.trade_harami_for_bot": {"queue": "mt5_execution"},
+    "execution.tasks.check_broker_health_task": {"queue": "mt5_execution"},
+    "execution.tasks.run_scalper_engine_for_all_bots": {"queue": "mt5_execution"},
+    "execution.tasks.trade_scalper_strategies_for_bot": {"queue": "mt5_execution"},
+    "execution.tasks.kill_switch_monitor_task": {"queue": "mt5_execution"},
+    "execution.tasks.cancel_stale_orders_task": {"queue": "mt5_execution"},
+    "execution.tasks.reconcile_broker_positions_task": {"queue": "mt5_execution"},
+    "execution.mt5_tasks.*": {"queue": "mt5_execution"},
+}
 CELERY_BEAT_SCHEDULE = {
     "monitor-positions-every-60s": {
         "task": "execution.tasks.monitor_positions_task",
@@ -208,13 +238,15 @@ PAPER_START_BALANCE = Decimal(str(env("PAPER_START_BALANCE", default="100000")))
 
 # MT5 defaults / health checks
 MT5_DEFAULT_CONTRACT_SIZE = int(env("MT5_DEFAULT_CONTRACT_SIZE", default=100000))
+MT5_MAGIC_NUMBER = int(env("MT5_MAGIC_NUMBER", default=20250813))
+MT5_MAX_TICK_AGE_SECONDS = int(env("MT5_MAX_TICK_AGE_SECONDS", default=120))
 MT5_HEALTHCHECK_SYMBOLS = env.list("MT5_HEALTHCHECK_SYMBOLS", default=["EURUSDm", "EURUSD"])
 # Per-broker overrides, e.g. {"fbs": ["EURUSD", "XAUUSD"], "exness_mt5": ["EURUSDm", "XAUUSDm"]}
 MT5_HEALTHCHECK_SYMBOLS_MAP = env.json(
     "MT5_HEALTHCHECK_SYMBOLS_MAP",
     default={"fbs": ["EURUSD", "XAUUSD"], "exness_mt5": ["EURUSDm", "XAUUSDm"]},
 )
-ADMIN_DISABLE_MT5_LOGIN = env.bool("ADMIN_DISABLE_MT5_LOGIN", default=False)
+ADMIN_DISABLE_MT5_LOGIN = env.bool("ADMIN_DISABLE_MT5_LOGIN", default=True)
 
 # Decision guardrails
 DECISION_MIN_SCORE = float(env("DECISION_MIN_SCORE", default=0.5))
@@ -232,9 +264,6 @@ TRAILING_TRIGGER = Decimal(str(env("TRAILING_TRIGGER", default="0.0005")))
 TRAILING_DISTANCE = Decimal(str(env("TRAILING_DISTANCE", default="0.0003")))
 MAX_ORDER_LOT = Decimal(str(env("MAX_ORDER_LOT", default="0.05")))
 MAX_ORDER_NOTIONAL = Decimal(str(env("MAX_ORDER_NOTIONAL", default="5000")))
-
-# Test mode flag
-TESTING = "test" in sys.argv
 
 # Allow paper broker accounts in non-test envs
 ALLOW_PAPER_BROKERS = env.bool("ALLOW_PAPER_BROKERS", default=False)
@@ -256,9 +285,9 @@ TV_SUBJECT_CONTAINS = env("TV_SUBJECT_CONTAINS", default="TradingView")
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default=None)
 TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET", default=None)
 
-TELEGRAM_TOKEN = env("TOKEN")
-TELEGRAM_SECRET = env("SECRET")
-TELEGRAM_WEBHOOK_URL = env("URL")
+TELEGRAM_TOKEN = env("TOKEN", default=None)
+TELEGRAM_SECRET = env("SECRET", default=None)
+TELEGRAM_WEBHOOK_URL = env("URL", default=None)
 
 # Do not print secrets to stdout in production. Use secure logging if needed.
 

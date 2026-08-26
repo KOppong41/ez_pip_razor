@@ -7,8 +7,7 @@ from typing import Optional
 
 from django.utils import timezone
 
-from execution.connectors.mt5 import is_mt5_available, mt5
-from execution.services.marketdata import _login_mt5_for_account
+from execution.connectors.mt5 import MT5Connector, is_mt5_available
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +95,8 @@ def _probe_mt5_market(symbol: str, broker_account, now: datetime) -> Optional[Ma
         return None
 
     try:
-        _login_mt5_for_account(broker_account)
-
-        info = mt5.symbol_info(symbol)
+        connector = MT5Connector()
+        info = connector.symbol_info_for_account(broker_account, symbol)
         if info is None:
             return MarketStatus(
                 is_open=False,
@@ -109,8 +107,7 @@ def _probe_mt5_market(symbol: str, broker_account, now: datetime) -> Optional[Ma
             )
 
         if not info.visible:
-            mt5.symbol_select(symbol, True)
-            info = mt5.symbol_info(symbol)
+            info = connector.symbol_info_for_account(broker_account, symbol)
             if info is None or not info.visible:
                 return MarketStatus(
                     is_open=False,
@@ -120,13 +117,9 @@ def _probe_mt5_market(symbol: str, broker_account, now: datetime) -> Optional[Ma
                     source="mt5",
                 )
 
-        disabled_modes = {mt5.SYMBOL_TRADE_MODE_DISABLED}
-        close_only = getattr(mt5, "SYMBOL_TRADE_MODE_CLOSEONLY", None)
-        if close_only is not None:
-            disabled_modes.add(close_only)
-
         trade_mode = getattr(info, "trade_mode", None)
-        if trade_mode in disabled_modes:
+        # MetaTrader defines DISABLED as zero and CLOSEONLY as one.
+        if trade_mode in {0, 1}:
             return MarketStatus(
                 is_open=False,
                 reason="trade_mode_closed",
@@ -138,7 +131,7 @@ def _probe_mt5_market(symbol: str, broker_account, now: datetime) -> Optional[Ma
 
         # Treat very stale ticks as closed/illiquid.
         try:
-            tick = mt5.symbol_info_tick(symbol)
+            tick = connector.tick_for_account(broker_account, symbol)
         except Exception:
             tick = None
 
@@ -166,19 +159,19 @@ def _probe_mt5_market(symbol: str, broker_account, now: datetime) -> Optional[Ma
         return MarketStatus(is_open=True, reason="mt5_session_open", checked_at=now, source="mt5")
 
     except Exception as e:
-        # Don't block trading if the probe fails; just log.
+        # A requested broker probe is authoritative for new-entry validation.
         logger.warning(
             "[MarketHours] MT5 probe failed for symbol=%s broker_account=%s: %s",
             symbol,
             getattr(broker_account, "id", None),
             e,
         )
-        return None
-    finally:
-        try:
-            mt5.shutdown()
-        except Exception:
-            pass
+        return MarketStatus(
+            is_open=False,
+            reason="mt5_probe_failed",
+            checked_at=now,
+            source="mt5",
+        )
 
 
 def get_market_status(

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Literal, Tuple
 from django.db import transaction
 from django.utils import timezone
-from execution.models import Decision, Order, BrokerAccount, Bot
+from execution.models import BrokerPosition, Decision, Order, BrokerAccount, Bot
 from execution.services.journal import log_journal_event
 import hashlib
 from core.metrics import orders_created_total, order_status_total
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 VALID_STATUSES = {s for (s, _) in Order.STATUS}
 
 # Canonical statuses used everywhere
-OrderStatus = Literal["new", "ack", "filled", "part_filled", "canceled", "error"]
+OrderStatus = Literal["new", "ack", "filled", "part_filled", "canceled", "rejected", "error"]
 
 def make_client_order_id(decision: Decision, broker_account: BrokerAccount) -> str:
     base = f"{decision.id}|{broker_account.id}|{decision.signal.symbol}|{decision.action}"
@@ -23,7 +23,8 @@ def make_client_order_id(decision: Decision, broker_account: BrokerAccount) -> s
 
 
 def make_close_order_id(position, broker_account: BrokerAccount) -> str:
-    base = f"close|{position.id}|{broker_account.id}|{position.symbol}"
+    ticket = getattr(position, "broker_position_ticket", None)
+    base = f"close|{ticket}|{broker_account.id}|{position.symbol}"
     # Prefix with "close|" so downstream validation can recognize close orders
     return "close|" + hashlib.sha1(base.encode()).hexdigest()[:20]
 
@@ -37,11 +38,12 @@ class OrderSpec:
 
 # Allowed transitions (kept permissive for immediate fills from 'new')
 ALLOWED_TRANSITIONS = {
-    "new": {"ack", "filled", "error", "canceled"},
-    "ack": {"filled", "part_filled", "error", "canceled"},
-    "part_filled": {"filled", "error", "canceled"},
+    "new": {"ack", "filled", "part_filled", "rejected", "error", "canceled"},
+    "ack": {"filled", "part_filled", "rejected", "error", "canceled"},
+    "part_filled": {"filled", "part_filled", "rejected", "error", "canceled"},
     "filled": set(),        # position mgmt/state is separate from order state
     "error": set(),
+    "rejected": set(),
     "canceled": set(),
 }
 
@@ -129,24 +131,50 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
     """
     Idempotently create a close order sized to flatten the given position.
     """
-    side = "buy" if position.qty < 0 else "sell"  # opposite side to close
-    client_id = make_close_order_id(position, broker_account)
+    broker_position = position if isinstance(position, BrokerPosition) else None
+    if broker_position is None:
+        candidates = BrokerPosition.objects.filter(
+            broker_account=broker_account,
+            symbol=position.symbol,
+            status="open",
+            ownership="ez_trade",
+        )
+        if candidates.count() != 1:
+            raise ValueError(
+                "A close requires exactly one EZ Trade-owned broker position ticket"
+            )
+        broker_position = candidates.get()
+
+    if not broker_position.is_manageable:
+        raise ValueError("Manual or unknown MT5 positions cannot be managed automatically")
+
+    side = "sell" if broker_position.side == "buy" else "buy"
+    client_id = make_close_order_id(broker_position, broker_account)
 
     # Prefer a bot on this broker account that actually trades the position's symbol
     bot = None
     try:
-        bot = Bot.objects.filter(broker_account=broker_account, asset__symbol=position.symbol).first()
+        bot = broker_position.bot or Bot.objects.filter(
+            broker_account=broker_account,
+            asset__symbol=broker_position.symbol,
+        ).first()
         if not bot:
             bot = broker_account.bots.first() if hasattr(broker_account, "bots") else None
     except Exception:
         bot = None
 
+    if bot is None:
+        raise ValueError("Cannot close a broker position without its originating bot")
+
     defaults = {
         "bot": bot,
         "broker_account": broker_account,
-        "symbol": position.symbol,
+        "symbol": broker_position.symbol,
         "side": side,
-        "qty": str(abs(position.qty)),
+        "qty": str(broker_position.volume),
+        "remaining_qty": broker_position.volume,
+        "intent": "exit",
+        "broker_position_ticket": broker_position.broker_position_ticket,
         "status": "new",
     }
 
@@ -155,10 +183,10 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
         defaults=defaults,
     )
 
-    # If the position size changed or the prior close attempt already filled/errored,
-    # refresh the order so it can be dispatched again with the correct quantity.
-    if not created:
-        desired_qty = abs(position.qty)
+    # Never recycle a resolved close order into a fresh submission. Ambiguous
+    # retries must reconcile this deterministic order before another send.
+    if not created and order.status not in {"filled", "canceled", "rejected", "error"}:
+        desired_qty = broker_position.volume
         updates = []
         if order.qty != desired_qty:
             order.qty = desired_qty
@@ -166,10 +194,9 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
         if order.side != side:
             order.side = side
             updates.append("side")
-        if order.status in ("filled", "error", "canceled"):
-            order.status = "new"
-            order.last_error = ""
-            updates.extend(["status", "last_error"])
+        if order.broker_position_ticket != broker_position.broker_position_ticket:
+            order.broker_position_ticket = broker_position.broker_position_ticket
+            updates.append("broker_position_ticket")
         if order.bot_id != (bot.id if bot else None):
             order.bot = bot
             updates.append("bot")
@@ -178,17 +205,19 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
 
     if created:
         orders_created_total.labels(
-            broker=broker_account.broker, symbol=position.symbol, side=side
+            broker=broker_account.broker, symbol=broker_position.symbol, side=side
         ).inc()
         log_journal_event(
             "order.close_created",
             bot=bot,
             broker_account=broker_account,
             order=order,
-            position=position,
-            symbol=position.symbol,
-            message=f"Close {position.symbol} {side} qty {order.qty}",
-            context={"qty": str(order.qty), "position_qty": str(position.qty)},
+            symbol=broker_position.symbol,
+            message=f"Close ticket {broker_position.broker_position_ticket} {broker_position.symbol}",
+            context={
+                "qty": str(order.qty),
+                "broker_position_ticket": broker_position.broker_position_ticket,
+            },
         )
 
     return order, created
@@ -212,13 +241,22 @@ def create_order_from_decision(
     qty_decimal = Decimal(str(qty))
     qty = str(qty_decimal)
 
+    params = decision.params or {}
+    sl = params.get("sl")
+    tp = params.get("tp")
+    if sl is None or tp is None:
+        raise ValueError("Automated entry decisions must provide both SL and TP")
+
     # Base defaults for a new order
     defaults = {
         "bot": decision.bot,
+        "decision": decision,
         "broker_account": broker_account,
         "symbol": symbol,
         "side": side,
         "qty": qty,
+        "remaining_qty": qty_decimal,
+        "intent": "entry" if decision.action == "open" else "exit",
         "status": "new",
         "owner": getattr(decision, "owner", None) or getattr(decision.bot, "owner", None),
     }
@@ -229,65 +267,26 @@ def create_order_from_decision(
         defaults=defaults,
     )
 
-    # Apply SL/TP from decision params; if missing, add fallbacks so orders don't get rejected.
-    params = decision.params or {}
-    sl = params.get("sl")
-    tp = params.get("tp")
-
+    # The strategy/decision must define protection. Order creation never fetches
+    # MT5 data or invents fallback stops from an API/view process.
     dirty_fields: list[str] = []
 
-    try:
-        from execution.services.prices import get_price
-
-        px = Decimal(str(get_price(symbol)))
-    except Exception:
-        px = None
-
-    # Optional: derive ATR from recent candles for smarter SL/TP fallbacks.
-    atr_val = None
-    try:
-        if atr is not None:
-            atr_val = Decimal(str(atr))
-        else:
-            from execution.services.marketdata import get_candles_for_account
-            from execution.services.indicators import atr as calc_atr
-
-            tf = getattr(decision.signal, "timeframe", "5m")
-            candles = get_candles_for_account(
-                broker_account=broker_account,
-                symbol=symbol,
-                timeframe=tf,
-                n_bars=50,
-            )
-            atr_val = calc_atr(candles, period=14)
-    except Exception:
-        atr_val = None
+    px = None
+    for key in ("entry", "price", "close", "last_price"):
+        if params.get(key) is not None:
+            try:
+                px = Decimal(str(params[key]))
+            except Exception:
+                px = None
+            break
 
     if sl is not None:
         order.sl = Decimal(str(sl))
         dirty_fields.append("sl")
-    elif order.sl is None and px is not None:
-        # Use ATR-based distance when available; otherwise percent offset.
-        if atr_val and atr_val > 0:
-            offset = atr_val * Decimal("1.2")
-        else:
-            offset = px * Decimal("0.0025")
-        order.sl = px - offset if side == "buy" else px + offset
-        dirty_fields.append("sl")
-        logger.warning(f"Order {order.id} missing SL; applied fallback at {order.sl}")
 
     if tp is not None:
         order.tp = Decimal(str(tp))
         dirty_fields.append("tp")
-    elif order.tp is None and px is not None:
-        # TP slightly further than SL
-        if atr_val and atr_val > 0:
-            offset = atr_val * Decimal("1.8")
-        else:
-            offset = px * Decimal("0.0035")
-        order.tp = px + offset if side == "buy" else px - offset
-        dirty_fields.append("tp")
-        logger.warning(f"Order {order.id} missing TP; applied fallback at {order.tp}")
 
     # ⚠️ CRITICAL: Validate SL/TP distance to prevent "Invalid stops" broker rejections
     if order.sl and order.tp and px:
@@ -306,9 +305,9 @@ def create_order_from_decision(
     if dirty_fields:
         order.save(update_fields=dirty_fields)
     
-    # Enforce: both SL and TP should be set for risk management
+    # Enforce broker-side protection before a new live entry can exist.
     if not (order.sl and order.tp):
-        logger.error(f"Order {order.id} missing SL or TP - risk management disabled!")
+        raise ValueError(f"Order {order.id} missing required SL/TP protection")
 
     if created:
         orders_created_total.labels(
@@ -337,7 +336,7 @@ def update_order_status(
     new_status: str,
     price: Decimal | None = None,
     error_msg: str | None = None,
-) -> None:
+) -> Order:
     """
     Central place to update order status.
 
@@ -347,31 +346,51 @@ def update_order_status(
     if new_status not in VALID_STATUSES:
         raise ValueError(f"Unsupported order status: {new_status}")
 
-    previous_status = order.status
-    was_filled = previous_status == "filled"
-    order.status = new_status
+    with transaction.atomic():
+        locked = Order.objects.select_for_update().get(pk=order.pk)
+        previous_status = locked.status
+        if previous_status == new_status:
+            return locked
+        if not can_transition(previous_status, new_status):
+            raise ValueError(f"Invalid order transition: {previous_status} -> {new_status}")
+        locked.status = new_status
 
-    if price is not None:
-        order.price = price
+        if price is not None:
+            locked.price = price
+            locked.actual_fill_price = price
 
-    if error_msg:
-        # append to any existing error info
-        if order.last_error:
-            order.last_error = f"{order.last_error}\n{error_msg}"
-        else:
-            order.last_error = error_msg
+        if error_msg:
+            if locked.last_error:
+                locked.last_error = f"{locked.last_error}\n{error_msg}"
+            else:
+                locked.last_error = error_msg
 
-    order.updated_at = timezone.now()
-    order.save(update_fields=["status", "price", "last_error", "updated_at"])
+        now = timezone.now()
+        locked.updated_at = now
+        if new_status == "ack" and locked.submitted_at is None:
+            locked.submitted_at = now
+        if new_status in {"filled", "canceled", "rejected", "error"}:
+            locked.resolved_at = now
+        locked.save(
+            update_fields=[
+                "status",
+                "price",
+                "actual_fill_price",
+                "last_error",
+                "submitted_at",
+                "resolved_at",
+                "updated_at",
+            ]
+        )
 
     log_journal_event(
         "order.status_changed",
         severity="error" if new_status in {"error", "canceled"} else "info",
-        order=order,
-        bot=order.bot,
-        broker_account=order.broker_account,
-        symbol=order.symbol,
-        message=f"{order.symbol} {order.side} {previous_status} -> {new_status}",
+        order=locked,
+        bot=locked.bot,
+        broker_account=locked.broker_account,
+        symbol=locked.symbol,
+        message=f"{locked.symbol} {locked.side} {previous_status} -> {new_status}",
         context={
             "from": previous_status,
             "to": new_status,
@@ -379,3 +398,4 @@ def update_order_status(
             "error": error_msg,
         },
     )
+    return locked

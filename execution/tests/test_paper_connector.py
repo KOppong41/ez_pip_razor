@@ -5,14 +5,17 @@ from bots.models import Bot
 from brokers.models import BrokerAccount
 from execution.models import Signal, Decision, Order, Execution, Position
 from time import sleep
+from django.contrib.auth import get_user_model
 
 class PaperConnectorFlowTest(TestCase):
     def setUp(self):
+        self.user = get_user_model().objects.create_superuser("paper-admin", "paper@example.com", "pw")
+        self.client.force_login(self.user)
         self.bot = Bot.objects.create(name="BotP", status="active")
-        self.ba = BrokerAccount.objects.create(name="Paper", broker="paper", account_ref="p1")
+        self.ba = BrokerAccount.objects.create(name="Paper", broker="paper", connector="paper", account_ref="p1")
         self.sig = Signal.objects.create(source="test", symbol="EURUSD", timeframe="5m",
                                          direction="buy", payload={}, dedupe_key="dedupe-xyz")
-        self.dec = Decision.objects.create(bot=self.bot, signal=self.sig, action="open", reason="ok", score=0.1, params={})
+        self.dec = Decision.objects.create(bot=self.bot, signal=self.sig, action="open", reason="ok", score=0.1, params={"sl": "1.0", "tp": "1.2"})
         # create order
         r = self.client.post("/api/orders/from-decision/", data={
             "decision_id": self.dec.id, "broker_account_id": self.ba.id, "qty": "0.05"

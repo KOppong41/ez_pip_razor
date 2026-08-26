@@ -37,7 +37,9 @@ django:
   settings_module: config.settings_desktop
 celery:
   worker:
-    args: "-A config worker -l info --concurrency=2"
+    args: "-A config worker -l info -Q celery --pool=solo --concurrency=1"
+  mt5_worker:
+    args: "-A config worker -l info -Q mt5_execution --pool=solo --concurrency=1"
   beat:
     args: "-A config beat -l info"
 mt5:
@@ -149,11 +151,23 @@ def main():
 
         # Start Celery worker
         worker_args = cfg["celery"]["worker"]["args"].split()
-        procs.append(("celery-worker", start_process(["celery", *worker_args], cwd=project_root, env=env)))
+        procs.append(("celery-worker", start_process([sys.executable, "-m", "celery", *worker_args], cwd=project_root, env=env)))
+
+        # MetaTrader5 owns process-global state, so its queue is consumed by
+        # exactly one dedicated solo worker.
+        mt5_worker_config = cfg["celery"].get(
+            "mt5_worker",
+            {
+                "args": "-A config worker -l info -Q mt5_execution "
+                "--pool=solo --concurrency=1"
+            },
+        )
+        mt5_worker_args = mt5_worker_config["args"].split()
+        procs.append(("mt5-worker", start_process([sys.executable, "-m", "celery", *mt5_worker_args], cwd=project_root, env=env)))
 
         # Start Celery beat
         beat_args = cfg["celery"]["beat"]["args"].split()
-        procs.append(("celery-beat", start_process(["celery", *beat_args], cwd=project_root, env=env)))
+        procs.append(("celery-beat", start_process([sys.executable, "-m", "celery", *beat_args], cwd=project_root, env=env)))
 
         # Give the server a moment to start
         if not wait_for_http(base_url, timeout=30):

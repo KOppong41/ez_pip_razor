@@ -30,5 +30,4 @@ class AuthRBAC(TestCase):
 
     def test_public_webhook_allowed(self):
         r = self.client.post("/api/alerts/webhook/", data={"source":"x","symbol":"EURUSD","timeframe":"5m","direction":"buy","payload":{}}, content_type="application/json")
-        # token check may forbid if you set ALERT_WEBHOOK_TOKEN. If set, expect 403 here.
-        self.assertIn(r.status_code, (201, 403))
+        self.assertEqual(r.status_code, 410)
