@@ -32,7 +32,6 @@ Thumbs.db
 # Environment files
 .env
 .env.*
-!.env.example
 
 # Backup and temp files
 *.bak
@@ -66,6 +65,7 @@ desktop_app/build/
 # Reports / build artifacts
 dist/
 build/
+delete/
 tmp.py
 map.py
 celerybeat-schedule*
