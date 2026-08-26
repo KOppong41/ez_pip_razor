@@ -13,6 +13,8 @@ from .personal_api import (
     personal_position_action,
     personal_positions,
     personal_risk,
+    personal_runtime_session,
+    personal_runtime_stop,
     personal_strategies,
 )
 
@@ -26,6 +28,8 @@ urlpatterns = [
     path("alerts/webhook/", alert_webhook, name="alert-webhook"),
     path("personal/dashboard/", personal_dashboard, name="personal-dashboard"),
     path("personal/control/", personal_control, name="personal-control"),
+    path("personal/runtime/session/", personal_runtime_session, name="personal-runtime-session"),
+    path("personal/runtime/stop/", personal_runtime_stop, name="personal-runtime-stop"),
     path("personal/markets/", personal_markets, name="personal-markets"),
     path("personal/strategies/", personal_strategies, name="personal-strategies"),
     path("personal/positions/", personal_positions, name="personal-positions"),

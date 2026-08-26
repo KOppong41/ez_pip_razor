@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 
@@ -25,11 +26,53 @@ class EzTradeApp extends StatefulWidget {
   State<EzTradeApp> createState() => _EzTradeAppState();
 }
 
-class _EzTradeAppState extends State<EzTradeApp> {
+class _EzTradeAppState extends State<EzTradeApp> with WidgetsBindingObserver {
   ApiClient? client;
   String? loginNotice;
+  final List<ApiClient> runtimeClients = [];
+  final GlobalKey<ScaffoldMessengerState> messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+  bool exitInProgress = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    if (exitInProgress) return AppExitResponse.cancel;
+    exitInProgress = true;
+    try {
+      await Future.wait(
+        runtimeClients.map((value) => value.stopRuntimeOnExit()),
+      ).timeout(const Duration(seconds: 8));
+      return AppExitResponse.exit;
+    } catch (_) {
+      exitInProgress = false;
+      messengerKey.currentState?.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Could not confirm that bots stopped. The app will remain open.',
+          ),
+          backgroundColor: danger,
+        ),
+      );
+      return AppExitResponse.cancel;
+    }
+  }
 
   void acceptClient(ApiClient value) {
+    if (value.runtimeStopToken != null && !runtimeClients.contains(value)) {
+      runtimeClients.add(value);
+    }
     value.onSessionExpired = () {
       if (!mounted || client != value) return;
       setState(() {
@@ -55,6 +98,7 @@ class _EzTradeAppState extends State<EzTradeApp> {
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'EZ Trade',
+    scaffoldMessengerKey: messengerKey,
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       brightness: Brightness.dark,
@@ -131,6 +175,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final api = ApiClient(server.text.trim());
     try {
       await api.login(username.text.trim(), password.text);
+      await api.openRuntimeSession();
       widget.onLogin(api);
     } catch (e) {
       if (mounted) setState(() => error = e.toString());

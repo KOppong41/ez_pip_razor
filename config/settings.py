@@ -37,6 +37,9 @@ if not BROKER_CREDS_KEY and DEBUG and not TESTING:
     from .local_secrets import load_or_create_broker_creds_key
 
     BROKER_CREDS_KEY = load_or_create_broker_creds_key()
+RUNTIME_STOP_TOKEN_MAX_AGE_SECONDS = int(
+    env("RUNTIME_STOP_TOKEN_MAX_AGE_SECONDS", default=2592000)
+)
 
 # Optional HMAC for dedupe hashing
 EXECUTION_ALERT_SECRET = env("EXECUTION_ALERT_SECRET", default=None)
@@ -162,6 +165,7 @@ CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default="redis://localhost:
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ALWAYS_EAGER = False  # For development/testing, run tasks immediately
 CELERY_TASK_DEFAULT_QUEUE = "celery"
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TASK_ROUTES = {
     # Every task that can touch the process-global MetaTrader session is pinned
     # to the dedicated worker started with --pool=solo --concurrency=1.
@@ -238,6 +242,10 @@ PAPER_START_BALANCE = Decimal(str(env("PAPER_START_BALANCE", default="100000")))
 
 # MT5 defaults / health checks
 MT5_DEFAULT_CONTRACT_SIZE = int(env("MT5_DEFAULT_CONTRACT_SIZE", default=100000))
+MT5_CONNECT_TIMEOUT_MS = int(env("MT5_CONNECT_TIMEOUT_MS", default=15000))
+MT5_AUTO_ENABLE_ALGO_TRADING = env.bool(
+    "MT5_AUTO_ENABLE_ALGO_TRADING", default=False
+)
 MT5_MAGIC_NUMBER = int(env("MT5_MAGIC_NUMBER", default=20250813))
 MT5_MAX_TICK_AGE_SECONDS = int(env("MT5_MAX_TICK_AGE_SECONDS", default=120))
 MT5_HEALTHCHECK_SYMBOLS = env.list("MT5_HEALTHCHECK_SYMBOLS", default=["EURUSDm", "EURUSD"])

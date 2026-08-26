@@ -142,6 +142,16 @@ def refresh_mt5_markets_task(self, broker_account_id: int):
 
 
 @shared_task(bind=True, queue="mt5_execution")
+def test_mt5_account_task(self, broker_account_id: int):
+    """Test one account, then refresh markets only after a valid connection."""
+    health = check_mt5_account_task.run(broker_account_id)
+    if not health.get("connected"):
+        return {"health": health, "markets": None}
+    markets = refresh_mt5_markets_task.run(broker_account_id)
+    return {"health": health, "markets": markets}
+
+
+@shared_task(bind=True, queue="mt5_execution")
 def reconcile_mt5_order_task(self, order_id: int):
     order = Order.objects.select_related("broker_account", "bot").get(pk=order_id)
     found = MT5Connector().reconcile_order(order)

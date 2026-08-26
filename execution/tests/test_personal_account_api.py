@@ -33,11 +33,9 @@ class PersonalAccountApiTest(TestCase):
         self.assertIn("enter the password again", response.json()["detail"])
 
     @override_settings(BROKER_CREDS_KEY="test-broker-credential-key")
-    @patch("execution.personal_api.refresh_mt5_markets_task.apply_async")
-    @patch("execution.personal_api.check_mt5_account_task.apply_async")
-    def test_connection_queues_health_and_market_tasks(self, health, markets):
-        health.return_value.id = "health-task"
-        markets.return_value.id = "markets-task"
+    @patch("execution.personal_api.test_mt5_account_task.apply_async")
+    def test_connection_queues_serial_account_test(self, account_test):
+        account_test.return_value.id = "account-test-task"
         self.account.set_mt5_password("not-returned")
         self.account.save(update_fields=["mt5_password_enc"])
 
@@ -48,11 +46,8 @@ class PersonalAccountApiTest(TestCase):
         )
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["health_task_id"], "health-task")
+        self.assertEqual(response.json()["task_id"], "account-test-task")
         self.assertIn("queued_at", response.json())
-        health.assert_called_once_with(
-            args=[self.account.id], queue="mt5_execution"
-        )
-        markets.assert_called_once_with(
+        account_test.assert_called_once_with(
             args=[self.account.id], queue="mt5_execution"
         )

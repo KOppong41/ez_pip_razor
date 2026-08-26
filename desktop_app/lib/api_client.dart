@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -15,8 +16,10 @@ class ApiClient {
   final HttpClient _http = HttpClient();
   String? accessToken;
   String? refreshToken;
+  String? runtimeStopToken;
   void Function()? onSessionExpired;
   bool _sessionExpired = false;
+  Timer? _expiryTimer;
 
   Future<void> login(String username, String password) async {
     final value = await request(
@@ -31,9 +34,34 @@ class ApiClient {
     accessToken = value['access'].toString();
     refreshToken = value['refresh']?.toString();
     _sessionExpired = false;
+    _scheduleSessionExpiry();
+  }
+
+  Future<void> openRuntimeSession() async {
+    final value = await post('/api/personal/runtime/session/');
+    if (value is! Map || value['stop_token'] == null) {
+      throw const ApiException(
+        'The server did not create an app-close safety session.',
+      );
+    }
+    runtimeStopToken = value['stop_token'].toString();
+  }
+
+  Future<void> stopRuntimeOnExit() async {
+    final token = runtimeStopToken;
+    if (token == null || token.isEmpty) return;
+    await request(
+      'POST',
+      '/api/personal/runtime/stop/',
+      body: {'stop_token': token},
+      authenticated: false,
+      retry: false,
+    );
+    runtimeStopToken = null;
   }
 
   void logout() {
+    _expiryTimer?.cancel();
     accessToken = null;
     refreshToken = null;
     _sessionExpired = false;
@@ -118,14 +146,51 @@ class ApiClient {
       throw const ApiException('Your session expired. Please sign in again.');
     }
     accessToken = value['access'].toString();
+    if (value['refresh'] != null) {
+      refreshToken = value['refresh'].toString();
+    }
+    _scheduleSessionExpiry();
   }
 
   void _expireSession() {
+    _expiryTimer?.cancel();
     accessToken = null;
     refreshToken = null;
     if (_sessionExpired) return;
     _sessionExpired = true;
     onSessionExpired?.call();
+  }
+
+  void _scheduleSessionExpiry() {
+    _expiryTimer?.cancel();
+    final expiresAt = _jwtExpiry(refreshToken) ?? _jwtExpiry(accessToken);
+    if (expiresAt == null) return;
+    final delay = expiresAt.difference(DateTime.now().toUtc());
+    if (delay <= Duration.zero) {
+      scheduleMicrotask(_expireSession);
+      return;
+    }
+    _expiryTimer = Timer(delay, _expireSession);
+  }
+}
+
+DateTime? _jwtExpiry(String? token) {
+  if (token == null) return null;
+  final parts = token.split('.');
+  if (parts.length != 3) return null;
+  try {
+    final payload = jsonDecode(
+      utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+    );
+    final expiry = payload is Map ? payload['exp'] : null;
+    final seconds = expiry is int ? expiry : int.tryParse('$expiry');
+    if (seconds == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(
+      seconds * Duration.millisecondsPerSecond,
+      isUtc: true,
+    );
+  } catch (_) {
+    return null;
   }
 }
 

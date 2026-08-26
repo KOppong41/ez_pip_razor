@@ -5,6 +5,7 @@
 pywebview==4.4.1
 pyinstaller==6.3.0
 pyyaml==6.0.1
+pywin32==312; sys_platform == "win32"
 # pkg_resources runtime deps to avoid missing jaraco errors in frozen build
 jaraco.functools==3.7.0
 jaraco.context==4.3.0

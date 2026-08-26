@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from django.contrib.auth import get_user_model
+from django.core import signing
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from bots.models import Asset, Bot, Strategy
@@ -25,12 +27,16 @@ from execution.models import (
     TradeLog,
 )
 from execution.mt5_tasks import (
-    check_mt5_account_task,
     execute_mt5_order_task,
     modify_mt5_position_task,
-    refresh_mt5_markets_task,
+    test_mt5_account_task,
 )
 from execution.services.orchestrator import create_close_order_for_position
+from execution.services.runtime_control import (
+    create_runtime_stop_token,
+    runtime_stop_user_id,
+    stop_user_automation,
+)
 from execution.utils.symbols import canonical_symbol
 
 
@@ -235,6 +241,27 @@ def personal_control(request):
     else:
         return Response({"detail": "action must be start, stop, or emergency_stop"}, status=400)
     return Response({"action": action, "entries_enabled": policy.entries_enabled, "emergency_stop": policy.emergency_stop})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def personal_runtime_session(request):
+    return Response({"stop_token": create_runtime_stop_token(request.user)})
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def personal_runtime_stop(request):
+    token = str(request.data.get("stop_token", ""))
+    user_model = get_user_model()
+    try:
+        user_id = runtime_stop_user_id(token)
+        user = user_model.objects.get(pk=user_id, is_active=True)
+    except (signing.BadSignature, signing.SignatureExpired, KeyError, TypeError, ValueError):
+        return Response({"detail": "Invalid or expired runtime stop token"}, status=400)
+    except user_model.DoesNotExist:
+        return Response({"detail": "Runtime user is unavailable"}, status=404)
+    return Response(stop_user_automation(user))
 
 
 @api_view(["GET", "PATCH"])
@@ -482,12 +509,12 @@ def personal_account_test(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     queued_at = timezone.now()
-    health = check_mt5_account_task.apply_async(args=[account.id], queue="mt5_execution")
-    markets = refresh_mt5_markets_task.apply_async(args=[account.id], queue="mt5_execution")
+    task = test_mt5_account_task.apply_async(
+        args=[account.id], queue="mt5_execution"
+    )
     return Response(
         {
-            "health_task_id": health.id,
-            "markets_task_id": markets.id,
+            "task_id": task.id,
             "queued_at": queued_at,
         },
         status=status.HTTP_202_ACCEPTED,

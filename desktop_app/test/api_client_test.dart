@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -13,6 +14,16 @@ Future<void> respondJson(
   request.response.headers.contentType = ContentType.json;
   request.response.write(jsonEncode(body));
   await request.response.close();
+}
+
+String jwtExpiringAt(DateTime expiry) {
+  final header = base64Url.encode(utf8.encode(jsonEncode({'alg': 'none'})));
+  final payload = base64Url.encode(
+    utf8.encode(
+      jsonEncode({'exp': expiry.toUtc().millisecondsSinceEpoch ~/ 1000}),
+    ),
+  );
+  return '$header.$payload.signature';
 }
 
 void main() {
@@ -87,4 +98,52 @@ void main() {
       expect(expiryNotifications, 1);
     },
   );
+
+  test('expires the UI session when the refresh JWT reaches exp', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final expiresAt = DateTime.now().toUtc().add(const Duration(seconds: 1));
+
+    server.listen((request) async {
+      await respondJson(request, HttpStatus.ok, {
+        'access': jwtExpiringAt(expiresAt),
+        'refresh': jwtExpiringAt(expiresAt),
+      });
+    });
+
+    final expired = Completer<void>();
+    final client = ApiClient('http://${server.address.address}:${server.port}')
+      ..onSessionExpired = () => expired.complete();
+    addTearDown(client.logout);
+
+    await client.login('user', 'password');
+    await expired.future.timeout(const Duration(seconds: 3));
+
+    expect(client.accessToken, isNull);
+    expect(client.refreshToken, isNull);
+  });
+
+  test('uses a stop-only token when the app exits after logout', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    Map<String, dynamic>? stopBody;
+
+    server.listen((request) async {
+      if (request.uri.path == '/api/personal/runtime/session/') {
+        await respondJson(request, HttpStatus.ok, {'stop_token': 'stop-only'});
+        return;
+      }
+      stopBody = jsonDecode(await utf8.decoder.bind(request).join());
+      await respondJson(request, HttpStatus.ok, {'bots_stopped': 1});
+    });
+
+    final client = ApiClient('http://${server.address.address}:${server.port}')
+      ..accessToken = 'access';
+    await client.openRuntimeSession();
+    client.logout();
+    await client.stopRuntimeOnExit();
+
+    expect(stopBody, {'stop_token': 'stop-only'});
+    expect(client.runtimeStopToken, isNull);
+  });
 }

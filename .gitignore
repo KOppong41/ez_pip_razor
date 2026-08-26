@@ -69,4 +69,5 @@ build/
 tmp.py
 map.py
 celerybeat-schedule*
+control/*.exchange
 mt5_env/

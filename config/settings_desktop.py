@@ -15,6 +15,7 @@ os.environ.setdefault("DJANGO_DEBUG", "False")
 os.environ.setdefault("ALLOWED_HOSTS", "127.0.0.1,localhost")
 os.environ.setdefault("API_ALLOW_OPEN", "False")
 os.environ.setdefault("BROKER_CREDS_KEY", load_or_create_broker_creds_key())
+os.environ.setdefault("MT5_AUTO_ENABLE_ALGO_TRADING", "True")
 
 # Use a shared filesystem queue so the desktop app has no Redis dependency.
 QUEUE_ROOT = DESKTOP_ROOT / "celery"
