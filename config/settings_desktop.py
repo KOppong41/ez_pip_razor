@@ -1,6 +1,7 @@
-"""Local Windows settings overlay using the project's PostgreSQL database."""
+"""Self-contained local Windows settings for the Flutter desktop app."""
 
 import os
+import secrets
 from pathlib import Path
 
 import environ
@@ -22,10 +23,24 @@ if not ENV_PATH.exists():
 if ENV_PATH.exists():
     environ.Env.read_env(ENV_PATH, overwrite=False)
 
-# Safe local-only defaults. Database and secret values still come from .env.
+# A packaged first run has no project .env. Generate a stable per-user Django
+# secret and use a local SQLite database unless the user explicitly configured
+# a database in their own %APPDATA%/EzScalperBot/.env.
+SECRET_PATH = DESKTOP_ROOT / "django_secret.key"
+if not os.environ.get("DJANGO_SECRET_KEY"):
+    if not SECRET_PATH.exists():
+        SECRET_PATH.write_text(secrets.token_urlsafe(64), encoding="utf-8")
+    os.environ["DJANGO_SECRET_KEY"] = SECRET_PATH.read_text(encoding="utf-8").strip()
+
+if not os.environ.get("DATABASE_URL") and not os.environ.get("DB_NAME"):
+    database_path = (DESKTOP_ROOT / "db.sqlite3").resolve()
+    os.environ["DATABASE_URL"] = f"sqlite:///{database_path.as_posix()}"
+
+# Safe local-only defaults.
 os.environ.setdefault("DJANGO_DEBUG", "False")
 os.environ.setdefault("ALLOWED_HOSTS", "127.0.0.1,localhost")
 os.environ.setdefault("API_ALLOW_OPEN", "False")
+os.environ.setdefault("ALLOW_SQLITE_DESKTOP", "True")
 os.environ.setdefault("BROKER_CREDS_KEY", load_or_create_broker_creds_key())
 os.environ.setdefault("MT5_AUTO_ENABLE_ALGO_TRADING", "True")
 
@@ -43,6 +58,11 @@ os.environ["CELERY_BROKER_URL"] = "filesystem://"
 os.environ["CELERY_RESULT_BACKEND"] = f"file:///{RESULT_ROOT.as_posix()}"
 
 from .settings import *  # noqa: E402,F401,F403
+
+DESKTOP_MODE = True
+
+if "sqlite" in DATABASES["default"]["ENGINE"]:
+    DATABASES["default"].setdefault("OPTIONS", {})["timeout"] = 30
 
 CELERY_BROKER_TRANSPORT_OPTIONS = {
     "data_folder_in": str(QUEUE_IN),

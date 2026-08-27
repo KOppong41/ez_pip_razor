@@ -139,9 +139,13 @@ USE_TZ = True
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        # JWT must be first so an invalid/expired Bearer token keeps its 401
+        # status. If SessionAuthentication is first, DRF converts the same
+        # authentication failure to 403 and desktop clients cannot reliably
+        # distinguish session expiry from a real permission denial.
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
         "rest_framework.authentication.BasicAuthentication",
-         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.AllowAny"

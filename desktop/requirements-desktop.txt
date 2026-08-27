@@ -1,12 +1,12 @@
 # Reuse the main project requirements plus desktop-only helpers.
 -r ../requirements.txt
 
-# Desktop shell
-pywebview==4.4.1
-pyinstaller==6.3.0
+# Local Windows API server and packager
+waitress==3.0.2
+pyinstaller==6.22.2
 pyyaml==6.0.1
 pywin32==312; sys_platform == "win32"
-# pkg_resources runtime deps to avoid missing jaraco errors in frozen build
-jaraco.functools==3.7.0
-jaraco.context==4.3.0
-jaraco.text==3.11.1
+# Setuptools runtime helpers used by PyInstaller hooks.
+jaraco.functools==4.6.0
+jaraco.context==6.1.2
+jaraco.text==4.3.0

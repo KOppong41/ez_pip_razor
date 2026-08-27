@@ -20,6 +20,27 @@ class ApiClient {
   void Function()? onSessionExpired;
   bool _sessionExpired = false;
   Timer? _expiryTimer;
+  Future<void>? _refreshInFlight;
+
+  Future<bool> needsDesktopSetup() async {
+    final value = await request(
+      'GET',
+      '/api/desktop/bootstrap/',
+      authenticated: false,
+      retry: false,
+    );
+    return value is Map && value['needs_setup'] == true;
+  }
+
+  Future<void> createDesktopAccount(String username, String password) async {
+    await request(
+      'POST',
+      '/api/desktop/bootstrap/',
+      body: {'username': username, 'password': password},
+      authenticated: false,
+      retry: false,
+    );
+  }
 
   Future<void> login(String username, String password) async {
     final value = await request(
@@ -106,10 +127,10 @@ class ApiClient {
         decoded = raw;
       }
     }
-    if (response.statusCode == HttpStatus.unauthorized && authenticated) {
+    if (authenticated && _isSessionRejection(response.statusCode, decoded)) {
       if (retry && refreshToken != null) {
         try {
-          await _refresh();
+          await _refreshOnce();
           return request(method, path, body: body, retry: false);
         } on ApiException {
           _expireSession();
@@ -132,6 +153,19 @@ class ApiClient {
       );
     }
     return decoded;
+  }
+
+  Future<void> _refreshOnce() async {
+    final activeRefresh = _refreshInFlight;
+    if (activeRefresh != null) return activeRefresh;
+
+    final refresh = _refresh();
+    _refreshInFlight = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (identical(_refreshInFlight, refresh)) _refreshInFlight = null;
+    }
   }
 
   Future<void> _refresh() async {
@@ -205,4 +239,20 @@ String? _errorMessage(dynamic decoded) {
     messages.add('${entry.key}: $text');
   }
   return messages.isEmpty ? null : messages.join('\n');
+}
+
+bool _isSessionRejection(int statusCode, dynamic decoded) {
+  if (statusCode == HttpStatus.unauthorized) return true;
+  if (statusCode != HttpStatus.forbidden || decoded is! Map) return false;
+
+  final code = decoded['code']?.toString().toLowerCase();
+  if (code == 'token_not_valid' || code == 'token_expired') return true;
+
+  // Older backend builds can report SimpleJWT authentication failures as 403
+  // because SessionAuthentication was ordered before JWTAuthentication.
+  final detail = decoded['detail']?.toString().toLowerCase() ?? '';
+  return detail.contains('token') &&
+      (detail.contains('not valid') ||
+          detail.contains('invalid') ||
+          detail.contains('expired'));
 }

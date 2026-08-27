@@ -1,25 +1,16 @@
 # Desktop mode configuration (copied to %APPDATA%/EzScalperBot/config.yml on first run)
 django:
   host: 127.0.0.1
-  port: 4000
+  port: 8000
   settings_module: config.settings_desktop
 celery:
   worker:
-    args: "-A config worker -l info -Q celery --pool=solo --concurrency=1"
+    args: "worker -l info -Q celery --pool=solo --concurrency=1 --hostname=general@%h"
   mt5_worker:
-    args: "-A config worker -l info -Q mt5_execution --pool=solo --concurrency=1"
+    args: "worker -l info -Q mt5_execution --pool=solo --concurrency=1 --hostname=mt5@%h"
   beat:
-    args: "-A config beat -l info"
-mt5:
-  terminal_path: "C:/Program Files/MetaTrader 5/terminal64.exe"  # set to your terminal path
-  login: ""   # optional: can be left blank to use existing creds in DB
-  password: ""
-  server: ""
+    args: "beat -l info"
 logging:
   root_dir: "%APPDATA%/EzScalperBot/logs"
   max_bytes: 10485760
   backup_count: 5
-ui:
-  width: 1280
-  height: 800
-  title: "EzScalperBot Desktop"

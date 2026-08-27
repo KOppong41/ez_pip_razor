@@ -1,17 +1,14 @@
-# ez_trade_desktop
+# EZ Trade Flutter desktop UI
 
-A new Flutter project.
+Run from this directory with `flutter run -d windows`. The production entry
+point automatically starts the local backend supervisor and waits for the API.
+Widget tests use `const EzTradeApp()` without a supervisor so they remain
+isolated.
 
-## Getting Started
+Source runs use `http://127.0.0.1:8001` by default so they cannot silently
+attach to an installed desktop backend and its separate local database. Set
+`EZTRADE_BACKEND_PORT` to override the development port when needed.
 
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Do not distribute the raw Flutter `Release` directory by itself. Use
+`../desktop/build_desktop.ps1`, which bundles the Python backend and creates the
+complete `dist/EzTradeDesktop.zip` package.

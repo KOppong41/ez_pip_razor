@@ -99,6 +99,83 @@ void main() {
     },
   );
 
+  test(
+    'treats the legacy 403 invalid-token response as session expiry',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+
+      server.listen((request) async {
+        await respondJson(request, HttpStatus.forbidden, {
+          'detail': 'Given token not valid for any token type',
+          'code': 'token_not_valid',
+        });
+      });
+
+      var expiryNotifications = 0;
+      final client =
+          ApiClient('http://${server.address.address}:${server.port}')
+            ..accessToken = 'expired-access'
+            ..refreshToken = 'expired-refresh'
+            ..onSessionExpired = () => expiryNotifications++;
+
+      await expectLater(
+        client.get('/protected/'),
+        throwsA(
+          isA<ApiException>()
+              .having((error) => error.statusCode, 'statusCode', 401)
+              .having(
+                (error) => error.message,
+                'message',
+                'Your session expired. Please sign in again.',
+              ),
+        ),
+      );
+
+      expect(client.accessToken, isNull);
+      expect(client.refreshToken, isNull);
+      expect(expiryNotifications, 1);
+    },
+  );
+
+  test(
+    'does not turn an ordinary permission denial into session expiry',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+
+      server.listen((request) async {
+        await respondJson(request, HttpStatus.forbidden, {
+          'detail': 'You do not have permission to perform this action.',
+        });
+      });
+
+      var expiryNotifications = 0;
+      final client =
+          ApiClient('http://${server.address.address}:${server.port}')
+            ..accessToken = 'valid-access'
+            ..refreshToken = 'valid-refresh'
+            ..onSessionExpired = () => expiryNotifications++;
+
+      await expectLater(
+        client.get('/protected/'),
+        throwsA(
+          isA<ApiException>()
+              .having((error) => error.statusCode, 'statusCode', 403)
+              .having(
+                (error) => error.message,
+                'message',
+                'You do not have permission to perform this action.',
+              ),
+        ),
+      );
+
+      expect(client.accessToken, 'valid-access');
+      expect(client.refreshToken, 'valid-refresh');
+      expect(expiryNotifications, 0);
+    },
+  );
+
   test('expires the UI session when the refresh JWT reaches exp', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(() => server.close(force: true));

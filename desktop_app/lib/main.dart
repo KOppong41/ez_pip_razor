@@ -5,8 +5,9 @@ import 'dart:ui' show AppExitResponse;
 import 'package:flutter/material.dart';
 
 import 'api_client.dart';
+import 'backend_manager.dart';
 
-void main() => runApp(const EzTradeApp());
+void main() => runApp(EzTradeApp(backendManager: BackendManager()));
 
 const bg = Color(0xFF050A0E);
 const sidebar = Color(0xFF080F14);
@@ -20,7 +21,9 @@ const muted = Color(0xFF82949E);
 const danger = Color(0xFFFF6070);
 
 class EzTradeApp extends StatefulWidget {
-  const EzTradeApp({super.key});
+  const EzTradeApp({super.key, this.backendManager});
+
+  final BackendManager? backendManager;
 
   @override
   State<EzTradeApp> createState() => _EzTradeAppState();
@@ -33,17 +36,35 @@ class _EzTradeAppState extends State<EzTradeApp> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldMessengerState> messengerKey =
       GlobalKey<ScaffoldMessengerState>();
   bool exitInProgress = false;
+  bool backendReady = false;
+  String? backendError;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    backendReady = widget.backendManager == null;
+    if (widget.backendManager != null) unawaited(startBackend());
   }
 
   @override
   void dispose() {
+    widget.backendManager?.requestStop();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  Future<void> startBackend() async {
+    setState(() {
+      backendReady = false;
+      backendError = null;
+    });
+    try {
+      await widget.backendManager!.start();
+      if (mounted) setState(() => backendReady = true);
+    } catch (error) {
+      if (mounted) setState(() => backendError = error.toString());
+    }
   }
 
   @override
@@ -54,6 +75,7 @@ class _EzTradeAppState extends State<EzTradeApp> with WidgetsBindingObserver {
       await Future.wait(
         runtimeClients.map((value) => value.stopRuntimeOnExit()),
       ).timeout(const Duration(seconds: 8));
+      await widget.backendManager?.stop();
       return AppExitResponse.exit;
     } catch (_) {
       exitInProgress = false;
@@ -145,27 +167,133 @@ class _EzTradeAppState extends State<EzTradeApp> with WidgetsBindingObserver {
         ),
       ),
     ),
-    home: client == null
-        ? LoginScreen(onLogin: acceptClient, notice: loginNotice)
+    home: !backendReady
+        ? BackendStartupScreen(error: backendError, onRetry: startBackend)
+        : client == null
+        ? LoginScreen(
+            onLogin: acceptClient,
+            notice: loginNotice,
+            initialServer:
+                widget.backendManager?.baseUrl ?? 'http://127.0.0.1:8000',
+          )
         : DesktopShell(client: client!, onLogout: logout),
   );
 }
 
+class BackendStartupScreen extends StatelessWidget {
+  const BackendStartupScreen({super.key, this.error, required this.onRetry});
+
+  final String? error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: SizedBox(
+        width: 520,
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(36),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Brand(centered: true),
+                const SizedBox(height: 28),
+                if (error == null) ...[
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Starting your secure local trading services…',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'The first launch can take longer while the database is prepared.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: muted, fontSize: 12),
+                  ),
+                ] else ...[
+                  const Icon(Icons.error_outline, color: danger, size: 42),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Local services could not start',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 12),
+                  SelectableText(
+                    error!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: muted),
+                  ),
+                  const SizedBox(height: 22),
+                  FilledButton.icon(
+                    onPressed: onRetry,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retry startup'),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key, required this.onLogin, this.notice});
+  const LoginScreen({
+    super.key,
+    required this.onLogin,
+    this.notice,
+    this.initialServer = 'http://127.0.0.1:8000',
+  });
   final ValueChanged<ApiClient> onLogin;
   final String? notice;
+  final String initialServer;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final server = TextEditingController(text: 'http://127.0.0.1:8000');
+  late final TextEditingController server;
   final username = TextEditingController();
   final password = TextEditingController();
+  final passwordConfirmation = TextEditingController();
   bool busy = false;
+  bool checkingSetup = true;
+  bool setupMode = false;
   String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    server = TextEditingController(text: widget.initialServer);
+    unawaited(checkSetup());
+  }
+
+  @override
+  void dispose() {
+    server.dispose();
+    username.dispose();
+    password.dispose();
+    passwordConfirmation.dispose();
+    super.dispose();
+  }
+
+  Future<void> checkSetup() async {
+    try {
+      final needsSetup = await ApiClient(
+        server.text.trim(),
+      ).needsDesktopSetup();
+      if (mounted) setState(() => setupMode = needsSetup);
+    } catch (_) {
+      if (mounted) setState(() => setupMode = false);
+    } finally {
+      if (mounted) setState(() => checkingSetup = false);
+    }
+  }
 
   Future<void> login() async {
     setState(() {
@@ -174,6 +302,14 @@ class _LoginScreenState extends State<LoginScreen> {
     });
     final api = ApiClient(server.text.trim());
     try {
+      final creatingAccount = setupMode;
+      if (creatingAccount) {
+        if (password.text != passwordConfirmation.text) {
+          throw const ApiException('The passwords do not match.');
+        }
+        await api.createDesktopAccount(username.text.trim(), password.text);
+        if (mounted) setState(() => setupMode = false);
+      }
       await api.login(username.text.trim(), password.text);
       await api.openRuntimeSession();
       widget.onLogin(api);
@@ -204,6 +340,15 @@ class _LoginScreenState extends State<LoginScreen> {
                     textAlign: TextAlign.center,
                     style: TextStyle(color: muted),
                   ),
+                  if (setupMode) ...[
+                    const SizedBox(height: 16),
+                    const _InlineNotice(
+                      icon: Icons.person_add_alt_1,
+                      text:
+                          'First launch: create the local account that will own this installation.',
+                      color: blue,
+                    ),
+                  ],
                   if (widget.notice != null) ...[
                     const SizedBox(height: 18),
                     _InlineNotice(
@@ -215,6 +360,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   const SizedBox(height: 30),
                   TextField(
                     controller: server,
+                    onSubmitted: (_) => checkSetup(),
                     decoration: const InputDecoration(labelText: 'Backend URL'),
                   ),
                   const SizedBox(height: 12),
@@ -228,25 +374,41 @@ class _LoginScreenState extends State<LoginScreen> {
                     controller: password,
                     obscureText: true,
                     autofillHints: const [AutofillHints.password],
-                    onSubmitted: (_) => login(),
+                    onSubmitted: setupMode ? null : (_) => login(),
                     decoration: const InputDecoration(labelText: 'Password'),
                   ),
+                  if (setupMode) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: passwordConfirmation,
+                      obscureText: true,
+                      autofillHints: const [AutofillHints.newPassword],
+                      onSubmitted: (_) => login(),
+                      decoration: const InputDecoration(
+                        labelText: 'Confirm password',
+                      ),
+                    ),
+                  ],
                   if (error != null) ...[
                     const SizedBox(height: 12),
                     Text(error!, style: const TextStyle(color: danger)),
                   ],
                   const SizedBox(height: 22),
                   FilledButton.icon(
-                    onPressed: busy ? null : login,
+                    onPressed: busy || checkingSetup ? null : login,
                     icon: busy
                         ? const SizedBox.square(
                             dimension: 16,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.lock_open_rounded),
-                    label: const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 13),
-                      child: Text('Sign in securely'),
+                    label: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      child: Text(
+                        setupMode
+                            ? 'Create account & sign in'
+                            : 'Sign in securely',
+                      ),
                     ),
                   ),
                   const SizedBox(height: 14),

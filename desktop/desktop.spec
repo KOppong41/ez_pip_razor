@@ -1,65 +1,115 @@
-# PyInstaller spec template for EzScalperBot desktop build.
-# Run from repo root: pyinstaller desktop/desktop.spec
+"""PyInstaller onedir build for the backend bundled beside the Flutter app."""
 
-import os
 from pathlib import Path
 
-# When PyInstaller executes a spec, __file__ is not set. Use CWD (repo root) instead.
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+
 project_root = Path.cwd()
 desktop_dir = project_root / "desktop"
 
+project_packages = [
+    "config",
+    "core",
+    "bots",
+    "brokers",
+    "execution",
+    "copytrade",
+    "subscription",
+    "tenant",
+    "payments",
+    "telegrambot",
+    "notifications",
+]
+
+dynamic_runtime_packages = [
+    "celery",
+    "kombu",
+    "billiard",
+    "amqp",
+    "corsheaders",
+    "rest_framework",
+    "rest_framework_simplejwt",
+]
+
+
 def gather_datas():
-    datas_local = []
-    templates_dir = project_root / "templates"
-    static_dir = project_root / "static"
-    if templates_dir.exists():
-        for f in templates_dir.rglob("*"):
-            if f.is_file():
-                datas_local.append((str(f), str(f.relative_to(project_root))))
-    if static_dir.exists():
-        for f in static_dir.rglob("*"):
-            if f.is_file():
-                datas_local.append((str(f), str(f.relative_to(project_root))))
-    # Include desktop config sample
-    datas_local.append((str(desktop_dir / "config.sample.yml"), "desktop"))
-    return datas_local
+    collected = []
+    for directory_name in ("templates", "static"):
+        directory = project_root / directory_name
+        if directory.exists():
+            for file_path in directory.rglob("*"):
+                if file_path.is_file():
+                    collected.append(
+                        (str(file_path), str(file_path.parent.relative_to(project_root)))
+                    )
+    collected.append((str(desktop_dir / "config.sample.yml"), "desktop"))
+    for package in project_packages:
+        collected.extend(collect_data_files(package, include_py_files=False))
+    return collected
 
-datas = gather_datas()
 
-block_cipher = None
+def is_runtime_module(module_name):
+    parts = module_name.split(".")
+    return not any(part == "tests" or part.startswith("test_") for part in parts)
 
-a = Analysis(
-    [str(desktop_dir / "launcher.py")],
-    pathex=[str(project_root)],
-    binaries=[],
-    datas=datas,
-hiddenimports=[
+
+hiddenimports = [
     "MetaTrader5",
     "celery",
     "django",
+    "rest_framework",
+    "rest_framework_simplejwt",
+    "waitress",
     "jaraco.functools",
     "jaraco.context",
     "jaraco.text",
-],
+]
+for package in project_packages:
+    hiddenimports.extend(collect_submodules(package, filter=is_runtime_module))
+for package in dynamic_runtime_packages:
+    hiddenimports.extend(collect_submodules(package, filter=is_runtime_module))
+
+
+a = Analysis(
+    [str(desktop_dir / "backend_launcher.py")],
+    pathex=[str(project_root)],
+    binaries=[],
+    datas=gather_datas(),
+    hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
+    excludes=[
+        "IPython",
+        "jedi",
+        "nbformat",
+        "notebook",
+        "parso",
+        "pytest",
+        "tkinter",
+        "webview",
+        "django.db.backends.mysql",
+        "django.db.backends.oracle",
+    ],
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    name="EzScalperBot",
+    [],
+    exclude_binaries=True,
+    name="eztrade_backend",
     debug=False,
     strip=False,
     upx=True,
     console=False,
-    icon=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    name="backend",
 )

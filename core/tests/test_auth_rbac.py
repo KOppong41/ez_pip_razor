@@ -31,3 +31,12 @@ class AuthRBAC(TestCase):
     def test_public_webhook_allowed(self):
         r = self.client.post("/api/alerts/webhook/", data={"source":"x","symbol":"EURUSD","timeframe":"5m","direction":"buy","payload":{}}, content_type="application/json")
         self.assertEqual(r.status_code, 410)
+
+    def test_invalid_bearer_token_returns_unauthorized_not_forbidden(self):
+        r = self.client.get(
+            "/api/bots/",
+            HTTP_AUTHORIZATION="Bearer invalid-token",
+        )
+
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.json()["code"], "token_not_valid")
