@@ -13,10 +13,12 @@ from execution.models import (
     BrokerSymbolMapping,
     MT5ConnectionState,
     Order,
+    RiskPolicy,
 )
 from execution.services.brokers import dispatch_place_order
 from execution.utils.symbols import canonical_symbol
 from bots.models import Asset
+from execution.services.equity import update_equity_high_water
 
 
 @shared_task(
@@ -72,7 +74,7 @@ def check_mt5_account_task(self, broker_account_id: int):
                 "last_error": "",
             },
         )
-        AccountSnapshot.objects.create(
+        snapshot = AccountSnapshot.objects.create(
             broker_account=account,
             balance=Decimal(str(getattr(info, "balance", 0) or 0)),
             equity=Decimal(str(getattr(info, "equity", 0) or 0)),
@@ -80,6 +82,12 @@ def check_mt5_account_task(self, broker_account_id: int):
             free_margin=Decimal(str(getattr(info, "margin_free", 0) or 0)),
             margin_level=Decimal(str(getattr(info, "margin_level", 0) or 0)),
             currency=str(getattr(info, "currency", "") or ""),
+        )
+        policy, _ = RiskPolicy.objects.get_or_create(broker_account=account)
+        update_equity_high_water(
+            policy,
+            snapshot.equity,
+            observed_at=snapshot.captured_at,
         )
         if not account.is_verified:
             account.is_verified = True

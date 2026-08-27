@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, time
@@ -277,6 +278,132 @@ class ScalperConfig:
         if not self.rollover_blackout:
             return False
         return any(window.contains(moment) for window in self.rollover_blackout)
+
+
+_TIMEFRAME_SUFFIX_RE = re.compile(r"^(?P<count>\d+)(?P<unit>mo|[smhdw])$", re.IGNORECASE)
+_TIMEFRAME_PREFIX_RE = re.compile(r"^(?P<unit>mn|[smhdw])(?P<count>\d+)$", re.IGNORECASE)
+
+
+def normalize_execution_timeframe(value: str | None) -> str | None:
+    """Normalize UI/Celery and MT5 timeframe spellings to one form."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+
+    suffix_match = _TIMEFRAME_SUFFIX_RE.fullmatch(raw)
+    if suffix_match:
+        return f"{int(suffix_match.group('count'))}{suffix_match.group('unit').lower()}"
+
+    prefix_match = _TIMEFRAME_PREFIX_RE.fullmatch(raw)
+    if prefix_match:
+        unit = prefix_match.group("unit").lower()
+        if unit == "mn":
+            unit = "mo"
+        return f"{int(prefix_match.group('count'))}{unit}"
+
+    return raw
+
+
+def _strategy_profile_for_symbol(
+    config: ScalperConfig,
+    bot: Bot,
+    symbol: str,
+) -> StrategyProfile | None:
+    profiles = getattr(config, "strategy_profiles", {}) or {}
+    params = getattr(bot, "scalper_params", {}) or {}
+    profile_key = params.get("strategy_profile") or getattr(
+        config,
+        "default_strategy_profile",
+        None,
+    )
+    profile_key = {
+        "xauusd_standard": "core_standard",
+        "xauusd_aggressive": "core_aggressive",
+    }.get(profile_key, profile_key)
+
+    if getattr(bot, "auto_trade", False):
+        target = canonical_symbol(symbol)
+        for profile in profiles.values():
+            if profile.symbol and canonical_symbol(profile.symbol) == target:
+                return profile
+    return profiles.get(profile_key)
+
+
+def resolve_scalper_execution_timeframe(
+    bot: Bot,
+    symbol: str,
+    requested_timeframe: str | None = None,
+    *,
+    config: ScalperConfig | None = None,
+) -> str | None:
+    """
+    Select a timeframe accepted by the bot, symbol config, and strategy profile.
+
+    Bot defaults are preferences, not permission to bypass a stricter scalper
+    profile. This prevents a generic ``5m`` bot default from producing signals
+    that an M1-only decision profile will reject later.
+    """
+    config = config or build_scalper_config(bot)
+    restrictions: list[list[str]] = []
+
+    bot_timeframes = [
+        tf
+        for tf in (
+            normalize_execution_timeframe(value)
+            for value in (getattr(bot, "allowed_timeframes", None) or [])
+        )
+        if tf
+    ]
+    if bot_timeframes:
+        restrictions.append(bot_timeframes)
+
+    resolve_symbol = getattr(config, "resolve_symbol", None)
+    symbol_config = resolve_symbol(symbol) if callable(resolve_symbol) else None
+    symbol_timeframes = [
+        tf
+        for tf in (
+            normalize_execution_timeframe(value)
+            for value in (getattr(symbol_config, "execution_timeframes", None) or [])
+        )
+        if tf
+    ]
+    if symbol_timeframes:
+        restrictions.append(symbol_timeframes)
+
+    strategy_profile = _strategy_profile_for_symbol(config, bot, symbol)
+    profile_timeframes = [
+        tf
+        for tf in (
+            normalize_execution_timeframe(value)
+            for value in (getattr(strategy_profile, "execution_timeframes", None) or [])
+        )
+        if tf
+    ]
+    if profile_timeframes:
+        restrictions.append(profile_timeframes)
+
+    allowed: set[str] | None = None
+    for values in restrictions:
+        values_set = set(values)
+        allowed = values_set if allowed is None else allowed.intersection(values_set)
+    if allowed is not None and not allowed:
+        return None
+
+    candidates: list[str] = []
+    for value in (
+        getattr(bot, "default_timeframe", None),
+        requested_timeframe,
+        *profile_timeframes,
+        *symbol_timeframes,
+        *bot_timeframes,
+    ):
+        normalized = normalize_execution_timeframe(value)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    if allowed is None:
+        return candidates[0] if candidates else None
+    return next((candidate for candidate in candidates if candidate in allowed), None)
 
 
 def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], Dict[str, str]]:

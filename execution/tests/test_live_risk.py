@@ -6,6 +6,7 @@ from django.test import TestCase
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.models import Order, RiskPolicy
+from execution.services.equity import update_equity_high_water
 from execution.services.live_risk import RiskRejected, enforce_pretrade_risk
 
 
@@ -97,3 +98,41 @@ class LiveRiskSymbolLimitsTest(TestCase):
                 self.symbol_info,
                 self.account_info,
             )
+
+    def test_account_drawdown_uses_persistent_high_water(self):
+        self.policy.max_daily_loss_pct = Decimal("100")
+        self.policy.max_account_drawdown_pct = Decimal("5")
+        self.policy.equity_high_water = Decimal("1000")
+        self.policy.save(
+            update_fields=[
+                "max_daily_loss_pct",
+                "max_account_drawdown_pct",
+                "equity_high_water",
+            ]
+        )
+        self.account_info.equity = Decimal("949")
+        self.account_info.balance = Decimal("949")
+
+        with self.assertRaisesRegex(RiskRejected, "Maximum account drawdown reached"):
+            enforce_pretrade_risk(
+                self._order(suffix="persistent-drawdown"),
+                self.connector,
+                self.tick,
+                self.symbol_info,
+                self.account_info,
+            )
+
+        self.policy.refresh_from_db()
+        self.assertEqual(self.policy.equity_high_water, Decimal("1000"))
+
+    def test_stale_writer_cannot_lower_equity_high_water(self):
+        self.policy.equity_high_water = Decimal("1000")
+        self.policy.save(update_fields=["equity_high_water"])
+        stale_policy = RiskPolicy.objects.get(pk=self.policy.pk)
+
+        update_equity_high_water(self.policy, Decimal("1200"))
+        drawdown = update_equity_high_water(stale_policy, Decimal("1100"))
+
+        self.policy.refresh_from_db()
+        self.assertEqual(self.policy.equity_high_water, Decimal("1200"))
+        self.assertEqual(drawdown.quantize(Decimal("0.01")), Decimal("8.33"))

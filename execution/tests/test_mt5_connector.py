@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
+from django.utils import timezone
 
 from bots.models import Bot
 from brokers.models import BrokerAccount
@@ -66,6 +67,7 @@ class MT5ConnectorTest(TestCase):
         api.ORDER_TYPE_BUY = 0
         api.ORDER_TYPE_SELL = 1
         api.TRADE_ACTION_DEAL = 1
+        api.TRADE_ACTION_REMOVE = 8
         api.ORDER_TIME_GTC = 0
         api.ORDER_FILLING_FOK = 0
         api.positions_get.return_value = ()
@@ -193,3 +195,92 @@ class MT5ConnectorTest(TestCase):
 
         self.assertEqual(api.order_send.call_count, 1)
         self.assertEqual(ExecutionAttempt.objects.get(order=self.order).status, "ambiguous")
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_partial_fill_without_reported_volume_requires_reconciliation(self, risk, api):
+        self._configure_api(api)
+        risk.return_value = self._risk_result()
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10010,
+            price=1.1002,
+            volume=0,
+            order=111,
+            deal=222,
+            position=333,
+            comment="partial",
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            with self.assertRaisesRegex(ConnectorError, "partial fill without filled volume"):
+                connector.place_order(self.order)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "ack")
+        self.assertEqual(self.order.filled_qty, Decimal("0"))
+        self.assertEqual(self.order.executions.count(), 0)
+        self.assertEqual(
+            ExecutionAttempt.objects.get(order=self.order).status,
+            "ambiguous",
+        )
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_acknowledged_order_is_canceled_only_after_broker_confirmation(self, api):
+        self._configure_api(api)
+        self.order.status = "ack"
+        self.order.submitted_at = timezone.now()
+        self.order.broker_order_ticket = 555
+        self.order.save(
+            update_fields=["status", "submitted_at", "broker_order_ticket"]
+        )
+        api.orders_get.side_effect = [
+            (SimpleNamespace(ticket=555),),
+            (),
+        ]
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            comment="removed",
+            order=555,
+            deal=0,
+            position=0,
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"):
+            connector.cancel_order(self.order)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "canceled")
+        self.assertEqual(api.order_send.call_args.args[0]["action"], 8)
+        self.assertEqual(api.order_send.call_args.args[0]["order"], 555)
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_unverified_acknowledged_order_is_not_locally_canceled(self, api):
+        self._configure_api(api)
+        self.order.status = "ack"
+        self.order.submitted_at = timezone.now()
+        self.order.save(update_fields=["status", "submitted_at"])
+        connector = MT5Connector()
+
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "reconcile_order", return_value=False
+        ):
+            with self.assertRaisesRegex(ConnectorError, "cancellation is unverified"):
+                connector.cancel_order(self.order)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "ack")
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_never_submitted_order_can_be_canceled_locally(self, api):
+        self._configure_api(api)
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order") as login:
+            connector.cancel_order(self.order)
+
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "canceled")
+        login.assert_not_called()

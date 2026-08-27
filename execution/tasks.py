@@ -55,11 +55,17 @@ from execution.services.market_hours import (
     is_crypto_symbol,
 )
 from execution.tasks_market_guard import apply_market_guard
-from execution.services.scalper_config import build_scalper_config
+from execution.services.scalper_config import (
+    build_scalper_config,
+    normalize_execution_timeframe,
+    resolve_scalper_execution_timeframe,
+)
 from execution.services.runtime_config import get_runtime_config
 from execution.services.journal import log_journal_event
 from execution.services.orchestrator import create_close_order_for_position, update_order_status
 from execution.services.portfolio import record_fill
+from execution.services.equity import update_equity_high_water
+from execution.services.trade_constraints import distance_to_price
 from execution.services.strategies.breakout_retest import (
     BreakoutRetestConfig,
     run_breakout_retest,
@@ -416,14 +422,10 @@ def monitor_positions_task(self):
 )
 def trail_positions_task(self):
     """
-    Applies a simple trailing stop to profitable positions.
+    Applies symbol-normalized trailing stops to profitable positions.
     """
     try:
         runtime_cfg = get_runtime_config()
-        tcfg = TrailingConfig(
-            trigger=runtime_cfg.trailing_trigger,
-            distance=runtime_cfg.trailing_distance,
-        )
         moved_ids = []
         connector = MT5Connector()
         for pos in BrokerPosition.objects.filter(
@@ -435,6 +437,51 @@ def trail_positions_task(self):
             ask = Decimal(str(getattr(tick, "ask", 0) or 0))
             market = bid if pos.side == "buy" else ask
             if market <= 0:
+                continue
+
+            info = connector.symbol_info_for_account(pos.broker_account, pos.symbol)
+            point = Decimal(str(getattr(info, "point", 0) or 0)) or None
+            digits = getattr(info, "digits", None)
+            configured_units = {
+                runtime_cfg.trailing_trigger_unit,
+                runtime_cfg.trailing_distance_unit,
+            }
+            if configured_units.intersection({"points", "pips"}) and point is None:
+                logger.warning(
+                    "Skipping trailing stop for position=%s symbol=%s: broker point unavailable",
+                    pos.id,
+                    pos.symbol,
+                )
+                continue
+            atr = None
+            if "atr" in configured_units:
+                candles = get_candles_for_account(
+                    broker_account=pos.broker_account,
+                    symbol=pos.symbol,
+                    timeframe="5m",
+                    n_bars=30,
+                )
+                atr = _atr_like(candles, period=14)
+
+            tcfg = TrailingConfig(
+                trigger=distance_to_price(
+                    runtime_cfg.trailing_trigger,
+                    runtime_cfg.trailing_trigger_unit,
+                    point,
+                    market_price=market,
+                    atr=atr,
+                    digits=digits,
+                ),
+                distance=distance_to_price(
+                    runtime_cfg.trailing_distance,
+                    runtime_cfg.trailing_distance_unit,
+                    point,
+                    market_price=market,
+                    atr=atr,
+                    digits=digits,
+                ),
+            )
+            if tcfg.trigger <= 0 or tcfg.distance <= 0:
                 continue
             gain = market - pos.open_price if pos.side == "buy" else pos.open_price - market
             if gain < tcfg.trigger:
@@ -1165,17 +1212,35 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             skipped_no_strategies += 1
             continue
         
-        # Prefer bot-specific default timeframe when provided, otherwise fall back to the global default.
-        tf = (bot.default_timeframe or timeframe or "1m").lower()
-        fallback_tf = (timeframe or "1m").lower()
+        scalper_cfg = build_scalper_config(bot)
+        tf = resolve_scalper_execution_timeframe(
+            bot,
+            symbol,
+            timeframe,
+            config=scalper_cfg,
+        )
+        if not tf or not bot.accepts(symbol, tf):
+            skipped_not_accepted += 1
+            logger.warning(
+                "[ScalperRunner] bot=%s symbol=%s has no compatible execution timeframe "
+                "(default=%s requested=%s allowed=%s)",
+                bot.id,
+                symbol,
+                bot.default_timeframe,
+                timeframe,
+                bot.allowed_timeframes,
+            )
+            continue
 
-        if not bot.accepts(symbol, tf):
-            # If the bot default is not accepted, attempt the fallback; otherwise skip.
-            if tf != fallback_tf and bot.accepts(symbol, fallback_tf):
-                tf = fallback_tf
-            else:
-                skipped_not_accepted += 1
-                continue
+        configured_tf = normalize_execution_timeframe(bot.default_timeframe)
+        if configured_tf and configured_tf != tf:
+            logger.info(
+                "[ScalperRunner] bot=%s symbol=%s adjusted incompatible timeframe %s -> %s",
+                bot.id,
+                symbol,
+                configured_tf,
+                tf,
+            )
         
         # Run inline to guarantee scalper cycles execute even if a nested Celery worker is unavailable.
         trade_scalper_strategies_for_bot.apply(
@@ -1230,6 +1295,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     bot = Bot.objects.select_related("broker_account", "asset").get(id=bot_id)
     session_label = _session_label()
     symbol = getattr(getattr(bot, "asset", None), "symbol", None)
+    scalper_cfg = build_scalper_config(bot)
 
     def _log_skip(reason: str, extra_context: dict | None = None):
         log_journal_event(
@@ -1283,12 +1349,42 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         _log_skip("no_symbol")
         return {"status": "skipped", "reason": "no_symbol"}
 
+    requested_timeframe = normalize_execution_timeframe(timeframe)
+    effective_timeframe = resolve_scalper_execution_timeframe(
+        bot,
+        bot.asset.symbol,
+        requested_timeframe,
+        config=scalper_cfg,
+    )
+    if not effective_timeframe:
+        logger.warning(
+            "[ScalperTrade] bot=%s symbol=%s has no compatible execution timeframe",
+            bot.id,
+            bot.asset.symbol,
+        )
+        _log_skip(
+            "timeframe_not_configured",
+            {
+                "requested_timeframe": requested_timeframe,
+                "allowed_timeframes": bot.allowed_timeframes,
+            },
+        )
+        return {"status": "skipped", "reason": "timeframe_not_configured"}
+    if effective_timeframe != requested_timeframe:
+        logger.info(
+            "[ScalperTrade] bot=%s symbol=%s adjusted incompatible timeframe %s -> %s",
+            bot.id,
+            bot.asset.symbol,
+            requested_timeframe,
+            effective_timeframe,
+        )
+    timeframe = effective_timeframe
+
     broker_constraints = get_broker_symbol_constraints(broker_account, getattr(bot.asset, "symbol", None))
     broker_min_stop_points = broker_constraints.stops_level_points or Decimal("0")
     broker_point = broker_constraints.point
     broker_lot_step = broker_constraints.lot_step
 
-    scalper_cfg = build_scalper_config(bot)
     scalper_params = bot.scalper_params or {}
     strategy_profile_key = (
         scalper_params.get("strategy_profile") or scalper_cfg.default_strategy_profile
@@ -1502,7 +1598,16 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
 
     # If we cannot establish HTF bias, skip this cycle to avoid trading blind.
     if htf_bias is None:
-        logger.warning("[ScalperTrade] bot=%s symbol=%s proceeding without HTF bias", bot.id, symbol)
+        _log_skip(
+            "htf_bias_unavailable",
+            {"timeframe": "15m", "symbol": symbol},
+        )
+        logger.warning(
+            "[ScalperTrade] bot=%s symbol=%s skipped: HTF bias unavailable",
+            bot.id,
+            symbol,
+        )
+        return {"status": "skipped", "reason": "htf_bias_unavailable"}
 
     # Cache latest bias for reuse
     try:
@@ -1857,6 +1962,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     
     if not signals_created:
         summary = {
+            "outcome": "no_signals",
             "strategies": strategy_events,
             "market": market_snapshot,
             "htf_bias": htf_bias,
@@ -1996,9 +2102,12 @@ def kill_switch_monitor_task(self):
             ).order_by("captured_at").values_list("equity", flat=True)
         )
         start = today_values[0] if today_values else snapshot.equity
-        peak = max(today_values) if today_values else snapshot.equity
         daily_loss = ((start - snapshot.equity) / start * 100) if start > 0 else Decimal("0")
-        drawdown = ((peak - snapshot.equity) / peak * 100) if peak > 0 else Decimal("0")
+        drawdown = update_equity_high_water(
+            policy,
+            snapshot.equity,
+            observed_at=snapshot.captured_at,
+        )
         reason = None
         if policy.emergency_stop:
             reason = "explicit_emergency_stop"

@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -84,17 +85,37 @@ def build_env(cfg):
     return env
 
 
-def start_process(cmd, cwd, env):
-    return subprocess.Popen(
-        cmd,
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
-        text=True,
-        bufsize=1,
+def start_process(cmd, cwd, env, label):
+    """Start a managed child with output drained directly to a per-service log."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_stream = (LOG_DIR / f"{label}.log").open(
+        "a",
+        encoding="utf-8",
+        buffering=1,
     )
+    log_stream.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] starting {' '.join(cmd)}\n")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+            text=True,
+            bufsize=1,
+        )
+    except Exception:
+        log_stream.close()
+        raise
+    proc._eztrade_log_stream = log_stream
+    return proc
+
+
+def close_process_log(proc):
+    stream = getattr(proc, "_eztrade_log_stream", None)
+    if stream and not stream.closed:
+        stream.close()
 
 
 def wait_for_http(url, timeout=30):
@@ -111,11 +132,6 @@ def wait_for_http(url, timeout=30):
     return False
 
 
-def tail_output(proc, label):
-    for line in proc.stdout or []:
-        print(f"[{label}] {line.rstrip()}")
-
-
 def main():
     cfg = load_config()
     project_root = Path(__file__).resolve().parents[1]
@@ -126,32 +142,72 @@ def main():
     base_url = f"http://{django_host}:{django_port}"
 
     procs = []
+    procs_lock = threading.RLock()
+    stopping = threading.Event()
+
+    def add_process(label, cmd):
+        proc = start_process(cmd, cwd=project_root, env=env, label=label)
+        with procs_lock:
+            procs.append((label, proc, cmd))
+        return proc
 
     def stop_procs():
-        for _label, proc in procs:
+        if stopping.is_set():
+            return
+        stopping.set()
+        with procs_lock:
+            snapshot = list(procs)
+        for _label, proc, _cmd in snapshot:
             try:
+                if proc.poll() is not None:
+                    continue
                 if os.name == "nt":
                     proc.send_signal(signal.CTRL_BREAK_EVENT)
                 else:
                     proc.terminate()
             except Exception:
                 pass
-        time.sleep(2)
-        for _label, proc in procs:
+        deadline = time.time() + 5
+        while time.time() < deadline and any(proc.poll() is None for _, proc, _ in snapshot):
+            time.sleep(0.1)
+        for _label, proc, _cmd in snapshot:
             if proc.poll() is None:
                 try:
                     proc.kill()
                 except Exception:
                     pass
+            close_process_log(proc)
 
+    def supervise_procs():
+        while not stopping.wait(2):
+            with procs_lock:
+                for index, (label, proc, cmd) in enumerate(list(procs)):
+                    return_code = proc.poll()
+                    if return_code is None:
+                        continue
+                    close_process_log(proc)
+                    print(f"[{label}] exited with code {return_code}; restarting")
+                    try:
+                        replacement = start_process(
+                            cmd,
+                            cwd=project_root,
+                            env=env,
+                            label=label,
+                        )
+                    except Exception as exc:
+                        print(f"[{label}] restart failed: {exc}")
+                        continue
+                    procs[index] = (label, replacement, cmd)
+
+    supervisor = None
     try:
         # Start Django
         dj_cmd = [sys.executable, "manage.py", "runserver", f"{django_host}:{django_port}"]
-        procs.append(("django", start_process(dj_cmd, cwd=project_root, env=env)))
+        add_process("django", dj_cmd)
 
         # Start Celery worker
         worker_args = cfg["celery"]["worker"]["args"].split()
-        procs.append(("celery-worker", start_process([sys.executable, "-m", "celery", *worker_args], cwd=project_root, env=env)))
+        add_process("celery-worker", [sys.executable, "-m", "celery", *worker_args])
 
         # MetaTrader5 owns process-global state, so its queue is consumed by
         # exactly one dedicated solo worker.
@@ -163,11 +219,18 @@ def main():
             },
         )
         mt5_worker_args = mt5_worker_config["args"].split()
-        procs.append(("mt5-worker", start_process([sys.executable, "-m", "celery", *mt5_worker_args], cwd=project_root, env=env)))
+        add_process("mt5-worker", [sys.executable, "-m", "celery", *mt5_worker_args])
 
         # Start Celery beat
         beat_args = cfg["celery"]["beat"]["args"].split()
-        procs.append(("celery-beat", start_process([sys.executable, "-m", "celery", *beat_args], cwd=project_root, env=env)))
+        add_process("celery-beat", [sys.executable, "-m", "celery", *beat_args])
+
+        supervisor = threading.Thread(
+            target=supervise_procs,
+            name="eztrade-process-supervisor",
+            daemon=True,
+        )
+        supervisor.start()
 
         # Give the server a moment to start
         if not wait_for_http(base_url, timeout=30):
@@ -190,6 +253,8 @@ def main():
         webview.start()
     finally:
         stop_procs()
+        if supervisor:
+            supervisor.join(timeout=3)
 
 
 if __name__ == "__main__":

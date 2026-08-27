@@ -159,6 +159,36 @@ class FakeApiClient extends ApiClient {
         },
       ];
     }
+    if (path == '/api/personal/logs/') {
+      return [
+        {
+          'id': 101,
+          'created_at': '2026-08-26T23:48:08Z',
+          'event_type': 'scalper_engine_run',
+          'severity': 'info',
+          'message':
+              'Scalper run tf=5m signals=0 decisions=0 orders=0 profile=eth_momentum',
+          'symbol': 'ETHUSDm',
+          'context': {
+            'outcome': 'no_signals',
+            'session': 'overnight',
+            'timeframe': '5m',
+            'signals': 0,
+            'decisions': 0,
+            'orders': 0,
+          },
+        },
+        {
+          'id': 102,
+          'created_at': '2026-08-26T23:47:08Z',
+          'event_type': 'risk.rejection',
+          'severity': 'warning',
+          'message': 'Spread exceeds configured limit',
+          'symbol': 'XAUUSDm',
+          'context': {'reason': 'spread_limit', 'spread_points': '52'},
+        },
+      ];
+    }
     return {
       'bot': {
         'running': false,
@@ -278,6 +308,35 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Assets & markets'), findsOneWidget);
     expect(find.text('XAUUSD'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('renders a compact searchable operations journal', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 830));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DesktopShell(client: FakeApiClient(), onLogout: () {}),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Logs'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('OPERATIONS JOURNAL'), findsOneWidget);
+    expect(find.text('Automation activity'), findsOneWidget);
+    expect(find.text('Scalper Engine Run'), findsOneWidget);
+    expect(find.text('ETHUSDm'), findsOneWidget);
+    expect(find.text('Context {'), findsNothing);
+
+    await tester.tap(find.text('Warnings'));
+    await tester.pumpAndSettle();
+    expect(find.text('Risk Rejection'), findsOneWidget);
+    expect(find.text('Scalper Engine Run'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 

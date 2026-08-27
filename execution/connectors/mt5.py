@@ -977,7 +977,31 @@ class MT5Connector(BaseConnector):
                 update_order_status(order, "rejected", error_msg=msg)
                 raise ConnectorError(msg)
 
-            filled = Decimal(str(getattr(result, "volume", requested) or requested))
+            reported_close_qty = Decimal(str(getattr(result, "volume", 0) or 0))
+            if retcode == mt5.TRADE_RETCODE_DONE_PARTIAL and reported_close_qty <= 0:
+                msg = (
+                    "MT5 reported a partial close without filled volume; "
+                    "broker reconciliation is required"
+                )
+                attempt.status = "ambiguous"
+                attempt.error = msg
+                attempt.save(
+                    update_fields=[
+                        "mt5_retcode",
+                        "mt5_retcode_description",
+                        "broker_order_ticket",
+                        "broker_deal_ticket",
+                        "broker_position_ticket",
+                        "response_metadata",
+                        "status",
+                        "error",
+                    ]
+                )
+                order.last_error = msg
+                order.save(update_fields=["last_error"])
+                raise ConnectorError(msg)
+
+            filled = reported_close_qty if reported_close_qty > 0 else requested
             fill_price = Decimal(str(getattr(result, "price", 0) or 0))
             order.filled_qty += filled
             order.remaining_qty = max(Decimal("0"), order.qty - order.filled_qty)
@@ -1325,6 +1349,38 @@ class MT5Connector(BaseConnector):
         # 4) Handle retcodes
         if ret in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
             reported_qty = Decimal(str(getattr(result, "volume", 0) or 0))
+            if ret == mt5.TRADE_RETCODE_DONE_PARTIAL and reported_qty <= 0:
+                msg = (
+                    "MT5 reported a partial fill without filled volume; "
+                    "broker reconciliation is required"
+                )
+                attempt.status = "ambiguous"
+                attempt.error = msg
+                attempt.save(
+                    update_fields=[
+                        "mt5_retcode",
+                        "mt5_retcode_description",
+                        "broker_order_ticket",
+                        "broker_deal_ticket",
+                        "broker_position_ticket",
+                        "response_metadata",
+                        "status",
+                        "error",
+                    ]
+                )
+                order.last_error = msg
+                order.save(update_fields=["last_error"])
+                log_journal_event(
+                    "order.reconciliation_required",
+                    severity="warning",
+                    order=order,
+                    bot=order.bot,
+                    broker_account=order.broker_account,
+                    symbol=order.symbol,
+                    message=msg,
+                    context={"retcode": ret},
+                )
+                raise ConnectorError(msg)
             fill_qty = reported_qty if reported_qty > 0 else qty_dec
             fill_qty = min(fill_qty, Decimal(str(order.remaining_qty or qty_dec)))
             order.filled_qty = min(order.qty, order.filled_qty + fill_qty)
@@ -1473,5 +1529,94 @@ class MT5Connector(BaseConnector):
 
 
     def cancel_order(self, order: Order) -> None:
-        # For market orders there’s nothing to cancel post‑fill.
-        update_order_status(order, "canceled")
+        """Cancel only after broker state is known or broker removal is confirmed."""
+        with _MT5Session.serialized():
+            order.refresh_from_db()
+            if order.status == "canceled":
+                return
+            if order.status in {"filled", "rejected", "error"}:
+                raise ConnectorError(
+                    f"Order {order.id} is terminal ({order.status}) and cannot be canceled"
+                )
+
+            has_submission = bool(
+                order.submitted_at
+                or order.broker_order_ticket
+                or order.attempts.filter(
+                    status__in=["submitting", "ambiguous", "accepted", "partial"]
+                ).exists()
+            )
+            if order.status == "new" and not has_submission:
+                update_order_status(order, "canceled")
+                return
+
+            self._login_from_order(order)
+            if not order.broker_order_ticket:
+                self.reconcile_order(order)
+                order.refresh_from_db()
+                if order.status == "filled":
+                    raise ConnectorError(
+                        f"Order {order.id} filled before cancellation could be confirmed"
+                    )
+                if not order.broker_order_ticket:
+                    raise ConnectorError(
+                        f"Order {order.id} cancellation is unverified; "
+                        "broker reconciliation is required"
+                    )
+
+            active = mt5.orders_get(ticket=int(order.broker_order_ticket))
+            if active is None:
+                raise ConnectorError(
+                    f"MT5 orders_get failed during cancellation: {mt5.last_error()}"
+                )
+            if not active:
+                if self.reconcile_order(order):
+                    order.refresh_from_db()
+                    if order.status in {"filled", "part_filled"}:
+                        raise ConnectorError(
+                            f"Order {order.id} has broker fills and cannot be locally canceled"
+                        )
+                raise ConnectorError(
+                    f"Order {order.id} is absent from active broker orders; "
+                    "cancellation remains unverified"
+                )
+
+            request = {
+                "action": mt5.TRADE_ACTION_REMOVE,
+                "order": int(order.broker_order_ticket),
+                "symbol": order.symbol,
+                "magic": int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813)),
+                "comment": self._order_comment(order)[:31],
+            }
+            result = mt5.order_send(request)
+            if result is None:
+                raise ConnectorError(
+                    f"MT5 cancellation outcome is ambiguous: {mt5.last_error()}"
+                )
+            retcode = getattr(result, "retcode", None)
+            if retcode != mt5.TRADE_RETCODE_DONE:
+                raise ConnectorError(
+                    f"MT5 cancellation rejected: retcode={retcode} "
+                    f"{getattr(result, 'comment', '')}".strip()
+                )
+            remaining = mt5.orders_get(ticket=int(order.broker_order_ticket))
+            if remaining is None:
+                raise ConnectorError(
+                    "MT5 cancellation could not be verified after broker acknowledgement"
+                )
+            if remaining:
+                raise ConnectorError(
+                    "MT5 order remains active after cancellation acknowledgement"
+                )
+
+            order.mt5_retcode = retcode
+            order.mt5_retcode_description = str(getattr(result, "comment", "") or "")
+            order.broker_response = _safe_mt5_metadata(result)
+            order.save(
+                update_fields=[
+                    "mt5_retcode",
+                    "mt5_retcode_description",
+                    "broker_response",
+                ]
+            )
+            update_order_status(order, "canceled")

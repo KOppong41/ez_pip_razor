@@ -9,6 +9,7 @@ from django.utils import timezone
 from execution.models import AccountSnapshot, BrokerPosition, Order, RiskPolicy
 from execution.services.scalper_config import build_scalper_config
 from execution.services.trade_constraints import distance_to_price
+from execution.services.equity import update_equity_high_water
 
 
 class RiskRejected(ValueError):
@@ -104,9 +105,12 @@ def enforce_pretrade_risk(order: Order, connector, tick, symbol_info, account_in
         captured_at__date=today,
     ).order_by("captured_at")
     start_equity = day_snapshots.first().equity
-    peak_equity = max(day_snapshots.values_list("equity", flat=True), default=equity)
     daily_loss_pct = ((start_equity - equity) / start_equity * 100) if start_equity > 0 else Decimal("0")
-    drawdown_pct = ((peak_equity - equity) / peak_equity * 100) if peak_equity > 0 else Decimal("0")
+    drawdown_pct = update_equity_high_water(
+        policy,
+        equity,
+        observed_at=snapshot.captured_at,
+    )
     daily_profit_pct = ((equity - start_equity) / start_equity * 100) if start_equity > 0 else Decimal("0")
     if daily_loss_pct >= policy.max_daily_loss_pct:
         raise RiskRejected("Maximum daily loss reached")

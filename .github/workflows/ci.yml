@@ -1,0 +1,52 @@
+name: Safety CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-safety:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:///ci.sqlite3
+      ALLOW_SQLITE_DESKTOP: "true"
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_SECRET_KEY: ci-only-not-for-production
+      BROKER_CREDS_KEY: 6jTJHhC0XqsIbvdcq9uC4GRxGWQN52RuWW4jrnTvH60=
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python manage.py check
+      - run: python manage.py makemigrations --check --dry-run
+      - name: Run execution and risk regression tests
+        run: >-
+          python manage.py test
+          execution.tests.test_mt5_connector
+          execution.tests.test_live_risk
+          execution.tests.test_trade_constraints
+          execution.tests.test_backtest_engine
+          execution.tests.test_scalper_htf_safety
+          --verbosity 2
+
+  desktop-client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test

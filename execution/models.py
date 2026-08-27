@@ -423,6 +423,13 @@ class RiskPolicy(models.Model):
     risk_per_trade_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("0.5"))
     max_daily_loss_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("1.5"))
     max_account_drawdown_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("5.0"))
+    equity_high_water = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        default=Decimal("0"),
+        help_text="Persistent highest observed broker equity used for account drawdown protection.",
+    )
+    equity_high_water_at = models.DateTimeField(null=True, blank=True)
     max_positions = models.PositiveIntegerField(default=1)
     max_positions_per_symbol = models.PositiveIntegerField(default=1)
     max_entry_trades_per_day = models.PositiveIntegerField(default=3)
@@ -1236,17 +1243,34 @@ class ExecutionSetting(models.Model):
         default=Decimal("0.02"),
         help_text="Kill positions when unrealized loss exceeds this fraction of notional (monitor task).",
     )
+    TRAILING_DISTANCE_UNITS = [
+        ("points", "Broker points"),
+        ("pips", "Pips"),
+        ("price", "Raw price"),
+        ("percent", "Percent of market price"),
+        ("atr", "ATR multiple"),
+    ]
     trailing_trigger = models.DecimalField(
-        max_digits=10,
+        max_digits=12,
         decimal_places=6,
-        default=Decimal("0.0005"),
-        help_text="Profit trigger (price units) before trailing stops start.",
+        default=Decimal("50"),
+        help_text="Profit trigger expressed in trailing_trigger_unit before trailing starts.",
+    )
+    trailing_trigger_unit = models.CharField(
+        max_length=16,
+        choices=TRAILING_DISTANCE_UNITS,
+        default="points",
     )
     trailing_distance = models.DecimalField(
-        max_digits=10,
+        max_digits=12,
         decimal_places=6,
-        default=Decimal("0.0003"),
-        help_text="Distance (price units) to trail behind peak once trigger hit (ATR-adjusted if provided).",
+        default=Decimal("30"),
+        help_text="Trail distance expressed in trailing_distance_unit.",
+    )
+    trailing_distance_unit = models.CharField(
+        max_length=16,
+        choices=TRAILING_DISTANCE_UNITS,
+        default="points",
     )
 
     # Account sizing defaults
@@ -1368,8 +1392,10 @@ class ExecutionSetting(models.Model):
             "decision_scalp_qty_multiplier": getattr(settings, "DECISION_SCALP_QTY_MULTIPLIER", Decimal("0.3")),
             "order_ack_timeout_seconds": getattr(settings, "ORDER_ACK_TIMEOUT_SECONDS", 180),
             "early_exit_max_unrealized_pct": getattr(settings, "EARLY_EXIT_MAX_UNREALIZED_PCT", Decimal("0.02")),
-            "trailing_trigger": getattr(settings, "TRAILING_TRIGGER", Decimal("0.0005")),
-            "trailing_distance": getattr(settings, "TRAILING_DISTANCE", Decimal("0.0003")),
+            "trailing_trigger": getattr(settings, "TRAILING_TRIGGER", Decimal("50")),
+            "trailing_trigger_unit": getattr(settings, "TRAILING_TRIGGER_UNIT", "points"),
+            "trailing_distance": getattr(settings, "TRAILING_DISTANCE", Decimal("30")),
+            "trailing_distance_unit": getattr(settings, "TRAILING_DISTANCE_UNIT", "points"),
             "paper_start_balance": getattr(settings, "PAPER_START_BALANCE", Decimal("100000")),
             "mt5_default_contract_size": getattr(settings, "MT5_DEFAULT_CONTRACT_SIZE", 100000),
             "max_order_lot": getattr(settings, "MAX_ORDER_LOT", Decimal("0.20")),

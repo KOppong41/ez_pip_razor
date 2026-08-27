@@ -26,6 +26,7 @@ from execution.models import (
     ScalperRunLog,
     TradeLog,
 )
+from execution.services.equity import equity_drawdown_pct
 from execution.mt5_tasks import (
     execute_mt5_order_task,
     modify_mt5_position_task,
@@ -148,8 +149,7 @@ def personal_dashboard(request):
         )
         if day_values:
             start_equity = day_values[0]
-            peak = max(day_values)
-            drawdown = ((peak - snapshot.equity) / peak * 100) if peak > 0 else Decimal("0")
+            drawdown = equity_drawdown_pct(risk, snapshot.equity)
 
     bots = Bot.objects.filter(broker_account=account)
     return Response(
@@ -389,7 +389,16 @@ def personal_risk(request):
                 setattr(policy, field, request.data[field])
         policy.full_clean()
         policy.save()
-    fields = ["id", "broker_account_id", *sorted(editable), "entries_enabled", "emergency_stop", "updated_at"]
+    fields = [
+        "id",
+        "broker_account_id",
+        *sorted(editable),
+        "equity_high_water",
+        "equity_high_water_at",
+        "entries_enabled",
+        "emergency_stop",
+        "updated_at",
+    ]
     return Response({field: getattr(policy, field) for field in fields})
 
 

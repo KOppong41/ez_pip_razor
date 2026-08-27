@@ -32,9 +32,9 @@ if not "%PROC_CHECK%"=="0" if not "%PROC_CHECK%"=="5" (
 call "%REPO_ROOT%\mt5_env\Scripts\activate.bat"
 
 set "LOG_FILE=%REPO_ROOT%\celery_worker.log"
-call :log Starting Celery worker || goto :log_error
+call :log Starting serialized Celery worker for default and MT5 queues || goto :log_error
 
-python -m celery -A config worker --loglevel=info --queues=mt5_execution --pool=solo --concurrency=1 >> "%LOG_FILE%" 2>&1
+python -m celery -A config worker --loglevel=info --queues=celery,mt5_execution --pool=solo --concurrency=1 >> "%LOG_FILE%" 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
 
 call :log Celery worker exited with code %EXIT_CODE%

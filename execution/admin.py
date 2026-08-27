@@ -554,7 +554,9 @@ class ExecutionSettingAdmin(admin.ModelAdmin):
             "fields": (
                 "early_exit_max_unrealized_pct",
                 "trailing_trigger",
+                "trailing_trigger_unit",
                 "trailing_distance",
+                "trailing_distance_unit",
                 "order_ack_timeout_seconds",
             ),
         }),

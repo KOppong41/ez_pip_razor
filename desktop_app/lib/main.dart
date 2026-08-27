@@ -535,6 +535,7 @@ class _DesktopShellState extends State<DesktopShell> {
     5 => HistoryPage(client: widget.client),
     6 => RiskPage(client: widget.client),
     7 => BacktestingPage(client: widget.client),
+    8 => LogsPage(client: widget.client),
     9 => SettingsPage(client: widget.client),
     _ => JsonPage(client: widget.client, title: item.label, path: item.path),
   };
@@ -1626,6 +1627,655 @@ class JsonPage extends StatelessWidget {
       );
     },
   );
+}
+
+class LogsPage extends StatefulWidget {
+  const LogsPage({super.key, required this.client});
+  final ApiClient client;
+
+  @override
+  State<LogsPage> createState() => _LogsPageState();
+}
+
+class _LogsPageState extends State<LogsPage> {
+  late Future<dynamic> future;
+  final search = TextEditingController();
+  String severity = 'all';
+
+  @override
+  void initState() {
+    super.initState();
+    future = widget.client.get('/api/personal/logs/');
+  }
+
+  @override
+  void dispose() {
+    search.dispose();
+    super.dispose();
+  }
+
+  void reload() => setState(() {
+    future = widget.client.get('/api/personal/logs/');
+  });
+
+  List<Map<String, dynamic>> visibleRows(List<Map<String, dynamic>> rows) {
+    final query = search.text.trim().toLowerCase();
+    return rows.where((row) {
+      final level = '${row['severity'] ?? 'info'}'.toLowerCase();
+      if (severity != 'all' && level != severity) return false;
+      if (query.isEmpty) return true;
+      final searchable = [
+        row['event_type'],
+        row['symbol'],
+        row['message'],
+        jsonEncode(row['context'] ?? const {}),
+      ].join(' ').toLowerCase();
+      return searchable.contains(query);
+    }).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder(
+    future: future,
+    builder: (_, snapshot) {
+      if (snapshot.hasError) {
+        return Empty(icon: Icons.cloud_off, text: snapshot.error.toString());
+      }
+      if (!snapshot.hasData) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      final rows = listOfMaps(snapshot.data);
+      final filtered = visibleRows(rows);
+      final warnings = rows
+          .where((row) => '${row['severity']}'.toLowerCase() == 'warning')
+          .length;
+      final errors = rows
+          .where((row) => '${row['severity']}'.toLowerCase() == 'error')
+          .length;
+
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+        child: Column(
+          children: [
+            _LogsOverview(
+              total: rows.length,
+              warnings: warnings,
+              errors: errors,
+              onRefresh: reload,
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (_, constraints) {
+                final searchBox = SizedBox(
+                  width: constraints.maxWidth >= 900
+                      ? 360
+                      : constraints.maxWidth,
+                  height: 40,
+                  child: TextField(
+                    controller: search,
+                    onChanged: (_) => setState(() {}),
+                    style: const TextStyle(fontSize: 12),
+                    decoration: InputDecoration(
+                      hintText: 'Search events, symbols or messages',
+                      hintStyle: const TextStyle(color: muted, fontSize: 12),
+                      prefixIcon: const Icon(
+                        Icons.search_rounded,
+                        color: muted,
+                        size: 18,
+                      ),
+                      suffixIcon: search.text.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: 'Clear search',
+                              onPressed: () {
+                                search.clear();
+                                setState(() {});
+                              },
+                              icon: const Icon(Icons.close_rounded, size: 16),
+                            ),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    ),
+                  ),
+                );
+                final filters = Wrap(
+                  spacing: 7,
+                  runSpacing: 7,
+                  children: [
+                    _LogFilter(
+                      label: 'All',
+                      count: rows.length,
+                      selected: severity == 'all',
+                      color: green,
+                      onSelected: () => setState(() => severity = 'all'),
+                    ),
+                    _LogFilter(
+                      label: 'Info',
+                      count: rows.length - warnings - errors,
+                      selected: severity == 'info',
+                      color: blue,
+                      onSelected: () => setState(() => severity = 'info'),
+                    ),
+                    _LogFilter(
+                      label: 'Warnings',
+                      count: warnings,
+                      selected: severity == 'warning',
+                      color: amber,
+                      onSelected: () => setState(() => severity = 'warning'),
+                    ),
+                    _LogFilter(
+                      label: 'Errors',
+                      count: errors,
+                      selected: severity == 'error',
+                      color: danger,
+                      onSelected: () => setState(() => severity = 'error'),
+                    ),
+                  ],
+                );
+                if (constraints.maxWidth < 900) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [searchBox, const SizedBox(height: 9), filters],
+                  );
+                }
+                return Row(
+                  children: [
+                    searchBox,
+                    const SizedBox(width: 12),
+                    Expanded(child: filters),
+                    Text(
+                      '${filtered.length} visible',
+                      style: const TextStyle(color: muted, fontSize: 11),
+                    ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: filtered.isEmpty
+                  ? const Empty(
+                      icon: Icons.manage_search_rounded,
+                      text: 'No journal events match the current filters.',
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.only(bottom: 24),
+                      itemCount: filtered.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 7),
+                      itemBuilder: (_, index) => _LogEventTile(
+                        key: ValueKey('log-${filtered[index]['id'] ?? index}'),
+                        row: filtered[index],
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+class _LogsOverview extends StatelessWidget {
+  const _LogsOverview({
+    required this.total,
+    required this.warnings,
+    required this.errors,
+    required this.onRefresh,
+  });
+  final int total;
+  final int warnings;
+  final int errors;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.fromLTRB(18, 16, 14, 16),
+    decoration: BoxDecoration(
+      color: panel,
+      borderRadius: BorderRadius.circular(11),
+      border: Border.all(color: border),
+    ),
+    child: Row(
+      children: [
+        Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: blue.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: const Icon(Icons.terminal_rounded, color: blue, size: 20),
+        ),
+        const SizedBox(width: 13),
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'OPERATIONS JOURNAL',
+                style: TextStyle(
+                  color: blue,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.25,
+                ),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'Automation activity',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+              ),
+              SizedBox(height: 3),
+              Text(
+                'Engine decisions, order lifecycle events and risk alerts.',
+                style: TextStyle(color: muted, fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+        _JournalStat(label: 'EVENTS', value: total, color: blue),
+        const SizedBox(width: 8),
+        _JournalStat(label: 'WARNINGS', value: warnings, color: amber),
+        const SizedBox(width: 8),
+        _JournalStat(label: 'ERRORS', value: errors, color: danger),
+        const SizedBox(width: 6),
+        IconButton(
+          tooltip: 'Reload journal',
+          onPressed: onRefresh,
+          icon: const Icon(Icons.refresh_rounded, size: 19, color: muted),
+        ),
+      ],
+    ),
+  );
+}
+
+class _JournalStat extends StatelessWidget {
+  const _JournalStat({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+  final String label;
+  final int value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 82,
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.06),
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: color.withValues(alpha: 0.16)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: muted,
+            fontSize: 8,
+            fontWeight: FontWeight.w800,
+            letterSpacing: .7,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '$value',
+          style: TextStyle(
+            color: color,
+            fontFamily: 'Consolas',
+            fontSize: 15,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _LogFilter extends StatelessWidget {
+  const _LogFilter({
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.color,
+    required this.onSelected,
+  });
+  final String label;
+  final int count;
+  final bool selected;
+  final Color color;
+  final VoidCallback onSelected;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onSelected,
+    borderRadius: BorderRadius.circular(7),
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 140),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      decoration: BoxDecoration(
+        color: selected ? color.withValues(alpha: 0.11) : panel,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(
+          color: selected ? color.withValues(alpha: 0.48) : border,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            label,
+            style: TextStyle(
+              color: selected ? const Color(0xFFE8F2EF) : muted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '$count',
+            style: TextStyle(
+              color: selected ? color : muted,
+              fontFamily: 'Consolas',
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _LogEventTile extends StatelessWidget {
+  const _LogEventTile({super.key, required this.row});
+  final Map<String, dynamic> row;
+
+  Color get levelColor {
+    final level = '${row['severity'] ?? 'info'}'.toLowerCase();
+    if (level == 'error') return danger;
+    if (level == 'warning') return amber;
+    return blue;
+  }
+
+  IconData get eventIcon {
+    final type = '${row['event_type'] ?? ''}'.toLowerCase();
+    if (type.contains('risk') || type.contains('kill')) {
+      return Icons.shield_outlined;
+    }
+    if (type.contains('order') || type.contains('execution')) {
+      return Icons.receipt_long_outlined;
+    }
+    if (type.contains('position') || type.contains('trade')) {
+      return Icons.swap_vert_circle_outlined;
+    }
+    if (type.contains('engine') || type.contains('signal')) {
+      return Icons.memory_rounded;
+    }
+    return Icons.terminal_rounded;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final contextData = mapOf(row['context']);
+    final highlights = _logHighlights(contextData);
+    final eventType = '${row['event_type'] ?? 'journal_event'}';
+    final messageText = '${row['message'] ?? ''}'.trim();
+    final symbol = '${row['symbol'] ?? ''}'.trim();
+    final timestamp = DateTime.tryParse(
+      '${row['created_at'] ?? ''}',
+    )?.toLocal();
+    String two(int value) => value.toString().padLeft(2, '0');
+    final day = timestamp == null
+        ? 'UNKNOWN'
+        : '${timestamp.year}-${two(timestamp.month)}-${two(timestamp.day)}';
+    final time = timestamp == null
+        ? '--:--:--'
+        : '${two(timestamp.hour)}:${two(timestamp.minute)}:${two(timestamp.second)}';
+
+    return Material(
+      color: panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: const BorderSide(color: border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.fromLTRB(14, 8, 12, 8),
+          childrenPadding: const EdgeInsets.fromLTRB(70, 0, 16, 14),
+          leading: SizedBox(
+            width: 40,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(eventIcon, size: 18, color: levelColor),
+                const SizedBox(height: 5),
+                Container(
+                  width: 5,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: levelColor,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          title: Row(
+            children: [
+              Flexible(
+                child: Text(
+                  label(eventType.replaceAll('.', '_')),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFFE4ECE9),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 9),
+              _LogBadge(
+                text: '${row['severity'] ?? 'info'}'.toUpperCase(),
+                color: levelColor,
+              ),
+              if (symbol.isNotEmpty) ...[
+                const SizedBox(width: 6),
+                _LogBadge(text: symbol, color: green),
+              ],
+              const Spacer(),
+              Text(
+                day,
+                style: const TextStyle(
+                  color: muted,
+                  fontFamily: 'Consolas',
+                  fontSize: 9,
+                ),
+              ),
+              const SizedBox(width: 9),
+              Text(
+                time,
+                style: const TextStyle(
+                  color: Color(0xFFB8C7CC),
+                  fontFamily: 'Consolas',
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  messageText.isEmpty
+                      ? 'No event message supplied.'
+                      : messageText,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFFAAB9BF),
+                    fontSize: 11,
+                    height: 1.35,
+                  ),
+                ),
+                if (highlights.isNotEmpty) ...[
+                  const SizedBox(height: 7),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 5,
+                    children: [
+                      for (final entry in highlights.entries)
+                        _ContextPill(name: entry.key, value: entry.value),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'TECHNICAL CONTEXT',
+                    style: TextStyle(
+                      color: muted,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  Container(
+                    width: double.infinity,
+                    constraints: const BoxConstraints(maxHeight: 260),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: bg,
+                      borderRadius: BorderRadius.circular(7),
+                      border: Border.all(color: border),
+                    ),
+                    child: SingleChildScrollView(
+                      child: SelectionArea(
+                        child: Text(
+                          contextData.isEmpty
+                              ? 'No additional context.'
+                              : const JsonEncoder.withIndent(
+                                  '  ',
+                                ).convert(contextData),
+                          style: const TextStyle(
+                            color: Color(0xFF94A8B2),
+                            fontFamily: 'Consolas',
+                            fontSize: 10,
+                            height: 1.45,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LogBadge extends StatelessWidget {
+  const _LogBadge({required this.text, required this.color});
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(5),
+      border: Border.all(color: color.withValues(alpha: 0.22)),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(
+        color: color,
+        fontFamily: 'Consolas',
+        fontSize: 8,
+        fontWeight: FontWeight.w800,
+        letterSpacing: .35,
+      ),
+    ),
+  );
+}
+
+class _ContextPill extends StatelessWidget {
+  const _ContextPill({required this.name, required this.value});
+  final String name;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+    decoration: BoxDecoration(
+      color: const Color(0xFF101B21),
+      borderRadius: BorderRadius.circular(5),
+      border: Border.all(color: border),
+    ),
+    child: Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: '${label(name)}  ',
+            style: const TextStyle(color: muted),
+          ),
+          TextSpan(
+            text: value,
+            style: const TextStyle(color: Color(0xFFD3DFDB)),
+          ),
+        ],
+      ),
+      style: const TextStyle(fontFamily: 'Consolas', fontSize: 9),
+    ),
+  );
+}
+
+Map<String, String> _logHighlights(Map<String, dynamic> context) {
+  const keys = [
+    'outcome',
+    'session',
+    'timeframe',
+    'signals',
+    'decisions',
+    'orders',
+    'strategy_profile',
+    'reason',
+  ];
+  final values = <String, String>{};
+  for (final key in keys) {
+    final value = context[key];
+    if (value == null || value is Map || value is List || '$value'.isEmpty) {
+      continue;
+    }
+    values[key] = '$value';
+    if (values.length == 5) break;
+  }
+  return values;
 }
 
 class BotsPage extends StatefulWidget {

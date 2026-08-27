@@ -9,7 +9,11 @@ from django.utils import timezone
 from execution.services.prices import get_price
 from execution.services.trade_constraints import distance_to_price
 from execution.services.strategy import StrategyDecision
-from execution.services.scalper_config import ScalperConfig, SymbolConfig
+from execution.services.scalper_config import (
+    ScalperConfig,
+    SymbolConfig,
+    normalize_execution_timeframe,
+)
 
 DEFAULT_TREND_WEIGHT = Decimal("0.4")
 DEFAULT_STRUCTURE_WEIGHT = Decimal("0.3")
@@ -295,14 +299,18 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     if not symbol_cfg:
         return StrategyDecision(action="ignore", reason="scalper:symbol_disabled")
 
-    tf_raw = (signal.timeframe or "").strip().upper()
-    if not tf_raw:
+    timeframe = normalize_execution_timeframe(signal.timeframe)
+    if not timeframe:
         return StrategyDecision(action="ignore", reason="scalper:timeframe_blocked")
-    if len(tf_raw) >= 2 and tf_raw[0].isdigit() and tf_raw[-1].isalpha():
-        timeframe = tf_raw[-1] + tf_raw[:-1]
-    else:
-        timeframe = tf_raw
-    if symbol_cfg.execution_timeframes and timeframe not in symbol_cfg.execution_timeframes:
+    allowed_timeframes = {
+        normalized
+        for normalized in (
+            normalize_execution_timeframe(value)
+            for value in symbol_cfg.execution_timeframes
+        )
+        if normalized
+    }
+    if allowed_timeframes and timeframe not in allowed_timeframes:
         return StrategyDecision(action="ignore", reason="scalper:timeframe_blocked")
 
     from execution.services.market_hours import is_crypto_symbol

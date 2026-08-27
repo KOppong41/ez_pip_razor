@@ -24,7 +24,9 @@ class RuntimeConfig:
     order_ack_timeout_seconds: int
     early_exit_max_unrealized_pct: Decimal
     trailing_trigger: Decimal
+    trailing_trigger_unit: str
     trailing_distance: Decimal
+    trailing_distance_unit: str
     paper_start_balance: Decimal
     mt5_default_contract_size: int
     max_order_lot: Decimal
@@ -57,8 +59,10 @@ def _build_runtime_config(defaults: dict[str, Any], cfg: ExecutionSetting | None
         decision_scalp_qty_multiplier=_decimal_or(Decimal("0.3"), _pick("decision_scalp_qty_multiplier")),
         order_ack_timeout_seconds=int(_pick("order_ack_timeout_seconds")),
         early_exit_max_unrealized_pct=_decimal_or(Decimal("0.02"), _pick("early_exit_max_unrealized_pct")),
-        trailing_trigger=_decimal_or(Decimal("0.0005"), _pick("trailing_trigger")),
-        trailing_distance=_decimal_or(Decimal("0.0003"), _pick("trailing_distance")),
+        trailing_trigger=_decimal_or(Decimal("50"), _pick("trailing_trigger")),
+        trailing_trigger_unit=str(_pick("trailing_trigger_unit") or "points").lower(),
+        trailing_distance=_decimal_or(Decimal("30"), _pick("trailing_distance")),
+        trailing_distance_unit=str(_pick("trailing_distance_unit") or "points").lower(),
         paper_start_balance=_decimal_or(Decimal("100000"), _pick("paper_start_balance")),
         mt5_default_contract_size=int(_pick("mt5_default_contract_size")),
         max_order_lot=_decimal_or(Decimal("0.05"), _pick("max_order_lot")),
