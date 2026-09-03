@@ -1,10 +1,11 @@
 from decimal import Decimal
+from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
-from execution.models import Signal, Position, Decision, Order
+from execution.models import BrokerPosition, Signal, Position, Decision, Order
 from execution.services.decision import make_decision_from_signal
 
 
@@ -25,12 +26,13 @@ class FlipFlowTests(TestCase):
             account_ref="p1",
             owner=self.user,
         )
-        self.asset = Asset.objects.create(symbol="EURUSDm")
+        self.asset, _ = Asset.objects.get_or_create(symbol="EURUSDm")
         self.bot = Bot.objects.create(
             name="Bot",
             owner=self.user,
             status="active",
             auto_trade=True,
+            trading_schedule_enabled=False,
             broker_account=self.account,
             asset=self.asset,
             allowed_symbols=["EURUSDm"],
@@ -48,7 +50,21 @@ class FlipFlowTests(TestCase):
             dedupe_key=key,
         )
 
-    def test_flip_creates_close_decision_and_order(self):
+    def _broker_position(self):
+        return BrokerPosition.objects.create(
+            broker_account=self.account,
+            bot=self.bot,
+            broker_position_ticket=12345,
+            ownership="ez_trade",
+            symbol="EURUSDm",
+            side="sell",
+            volume=Decimal("1.0"),
+            open_price=Decimal("1.1000"),
+            status="open",
+        )
+
+    @patch("execution.services.positions.dispatch_place_order")
+    def test_flip_creates_close_decision_and_order(self, dispatch_place_order):
         Position.objects.create(
             broker_account=self.account,
             symbol="EURUSDm",
@@ -56,6 +72,15 @@ class FlipFlowTests(TestCase):
             avg_price=Decimal("1.1000"),
             status="open",
         )
+        broker_position = self._broker_position()
+
+        def confirm_close(order):
+            order.status = "filled"
+            order.save(update_fields=["status"])
+            broker_position.status = "closed"
+            broker_position.save(update_fields=["status"])
+
+        dispatch_place_order.side_effect = confirm_close
         sig = self._signal("buy", score=1.0, key="flip-1")
         # inject score via payload->StrategyDecision naive uses 0.5 default; override by naive? For test set BotConfig? Instead monkey: set direction -> naive score default 0.5 enough due to threshold 0.2
         decision = make_decision_from_signal(sig)
@@ -78,6 +103,7 @@ class FlipFlowTests(TestCase):
             avg_price=Decimal("1.1000"),
             status="open",
         )
+        self._broker_position()
         Decision.objects.create(
             bot=self.bot,
             signal=self._signal("sell", score=1.0, key="seed"),
@@ -89,6 +115,7 @@ class FlipFlowTests(TestCase):
 
         sig = self._signal("buy", score=1.0, key="flip-2")
         decision = make_decision_from_signal(sig)
-        self.assertEqual(decision.action, "open")
+        self.assertEqual(decision.action, "ignore")
+        self.assertEqual(decision.reason, "flip_close_unconfirmed")
         # No new flip decisions/orders because cap hit
         self.assertEqual(Decision.objects.filter(action="close", reason="flip_close").count(), 1)

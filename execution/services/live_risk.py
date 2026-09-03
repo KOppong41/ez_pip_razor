@@ -4,9 +4,13 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
 
 from django.db import transaction
-from django.utils import timezone
-
-from execution.models import AccountSnapshot, BrokerPosition, Order, RiskPolicy
+from execution.models import BrokerPosition, Order, RiskPolicy
+from execution.services.daily_risk import (
+    create_account_snapshot,
+    daily_equity_change_pcts,
+    risk_day_window,
+    update_account_risk_day,
+)
 from execution.services.scalper_config import build_scalper_config
 from execution.services.trade_constraints import distance_to_price
 from execution.services.equity import update_equity_high_water
@@ -59,7 +63,15 @@ def _scalper_symbol_limit_points(order: Order, point: Decimal, value_field: str,
 
 
 @transaction.atomic
-def enforce_pretrade_risk(order: Order, connector, tick, symbol_info, account_info) -> PreTradeRiskResult:
+def enforce_pretrade_risk(
+    order: Order,
+    connector,
+    tick,
+    symbol_info,
+    account_info,
+    *,
+    broker_positions=None,
+) -> PreTradeRiskResult:
     """Enforce broker-aware monetary risk immediately before ``order_send``."""
     locked_order = Order.objects.select_for_update().select_related("broker_account", "bot").get(pk=order.pk)
     account = locked_order.broker_account
@@ -83,35 +95,28 @@ def enforce_pretrade_risk(order: Order, connector, tick, symbol_info, account_in
         raise RiskRejected("Live MT5 account requires explicit live-trading confirmation")
 
     equity = _decimal(getattr(account_info, "equity", 0))
-    balance = _decimal(getattr(account_info, "balance", 0))
-    margin = _decimal(getattr(account_info, "margin", 0))
     free_margin = _decimal(getattr(account_info, "margin_free", 0))
-    margin_level = _decimal(getattr(account_info, "margin_level", 0))
     if equity <= 0 or free_margin < 0:
         raise RiskRejected("MT5 account equity/free margin is unavailable")
 
-    snapshot = AccountSnapshot.objects.create(
-        broker_account=account,
-        balance=balance,
-        equity=equity,
-        margin=margin,
-        free_margin=free_margin,
-        margin_level=margin_level,
-        currency=str(getattr(account_info, "currency", "") or ""),
+    snapshot = create_account_snapshot(account, account_info)
+    risk_day = update_account_risk_day(
+        account,
+        snapshot,
+        connector=connector,
+        trade_mode=trade_mode,
+        broker_positions=broker_positions,
     )
-    today = timezone.localdate(snapshot.captured_at)
-    day_snapshots = AccountSnapshot.objects.filter(
-        broker_account=account,
-        captured_at__date=today,
-    ).order_by("captured_at")
-    start_equity = day_snapshots.first().equity
-    daily_loss_pct = ((start_equity - equity) / start_equity * 100) if start_equity > 0 else Decimal("0")
+    if not risk_day.baseline_locked:
+        raise RiskRejected(
+            "Daily risk baseline is unavailable; live entries remain blocked"
+        )
+    daily_loss_pct, daily_profit_pct = daily_equity_change_pcts(risk_day, equity)
     drawdown_pct = update_equity_high_water(
         policy,
         equity,
         observed_at=snapshot.captured_at,
     )
-    daily_profit_pct = ((equity - start_equity) / start_equity * 100) if start_equity > 0 else Decimal("0")
     if daily_loss_pct >= policy.max_daily_loss_pct:
         raise RiskRejected("Maximum daily loss reached")
     if drawdown_pct >= policy.max_account_drawdown_pct:
@@ -119,17 +124,33 @@ def enforce_pretrade_risk(order: Order, connector, tick, symbol_info, account_in
     if policy.stop_after_daily_profit_pct > 0 and daily_profit_pct >= policy.stop_after_daily_profit_pct:
         raise RiskRejected("Daily profit stop reached; new entries are disabled for today")
 
-    open_positions = BrokerPosition.objects.filter(broker_account=account, status="open")
-    if open_positions.count() >= policy.max_positions:
+    if broker_positions is None:
+        open_positions = BrokerPosition.objects.filter(
+            broker_account=account,
+            status="open",
+        )
+        open_position_count = open_positions.count()
+        symbol_position_count = open_positions.filter(symbol=locked_order.symbol).count()
+    else:
+        broker_positions = tuple(broker_positions)
+        open_position_count = len(broker_positions)
+        symbol_position_count = sum(
+            1
+            for position in broker_positions
+            if str(getattr(position, "symbol", "")) == locked_order.symbol
+        )
+    if open_position_count >= policy.max_positions:
         raise RiskRejected("Maximum open positions reached")
-    if open_positions.filter(symbol=locked_order.symbol).count() >= policy.max_positions_per_symbol:
+    if symbol_position_count >= policy.max_positions_per_symbol:
         raise RiskRejected("Maximum positions for symbol reached")
 
+    window = risk_day_window(account, snapshot.captured_at)
     entries_today = Order.objects.filter(
         broker_account=account,
         intent="entry",
         status__in=["ack", "part_filled", "filled"],
-        submitted_at__date=today,
+        submitted_at__gte=window.start,
+        submitted_at__lt=window.end,
     ).exclude(pk=locked_order.pk).count()
     if entries_today >= policy.max_entry_trades_per_day:
         raise RiskRejected("Maximum daily entry trades reached")

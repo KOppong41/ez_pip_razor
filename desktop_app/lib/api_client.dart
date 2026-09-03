@@ -131,7 +131,7 @@ class ApiClient {
       if (retry && refreshToken != null) {
         try {
           await _refreshOnce();
-          return request(method, path, body: body, retry: false);
+          return await request(method, path, body: body, retry: false);
         } on ApiException {
           _expireSession();
           throw const ApiException(

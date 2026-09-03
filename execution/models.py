@@ -1,5 +1,6 @@
 from datetime import time
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -416,6 +417,74 @@ class AccountSnapshot(models.Model):
     class Meta:
         ordering = ["-captured_at"]
         indexes = [models.Index(fields=["broker_account", "captured_at"])]
+
+
+class AccountRiskDay(models.Model):
+    BASELINE_SOURCES = [
+        ("opening_snapshot", "Opening snapshot"),
+        ("mt5_history", "MT5 history reconstruction"),
+        ("demo_first_snapshot", "Demo first snapshot"),
+        ("manual", "Operator supplied"),
+        ("unavailable", "Unavailable"),
+    ]
+
+    broker_account = models.ForeignKey(
+        BrokerAccount,
+        on_delete=models.CASCADE,
+        related_name="risk_days",
+    )
+    risk_date = models.DateField()
+    starting_balance = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    starting_equity = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    high_equity = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    realized_pnl = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    first_snapshot_at = models.DateTimeField(null=True, blank=True)
+    baseline_source = models.CharField(
+        max_length=32,
+        choices=BASELINE_SOURCES,
+        default="unavailable",
+    )
+    baseline_locked = models.BooleanField(default=False)
+    finalized_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-risk_date", "broker_account_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["broker_account", "risk_date"],
+                name="execution_unique_account_risk_day",
+            )
+        ]
+
+    def __str__(self):
+        return f"Risk day {self.risk_date} for account {self.broker_account_id}"
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            prior = type(self).objects.filter(pk=self.pk).values(
+                "broker_account_id",
+                "risk_date",
+                "starting_balance",
+                "starting_equity",
+                "baseline_source",
+                "baseline_locked",
+            ).first()
+            if prior and prior["baseline_locked"]:
+                immutable = {
+                    "broker_account_id": self.broker_account_id,
+                    "risk_date": self.risk_date,
+                    "starting_balance": self.starting_balance,
+                    "starting_equity": self.starting_equity,
+                    "baseline_source": self.baseline_source,
+                    "baseline_locked": self.baseline_locked,
+                }
+                if any(immutable[field] != value for field, value in prior.items()):
+                    raise ValidationError(
+                        "A locked account risk-day baseline cannot be changed"
+                    )
+        super().save(*args, **kwargs)
 
 
 class RiskPolicy(models.Model):

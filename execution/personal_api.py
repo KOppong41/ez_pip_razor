@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from bots.models import Asset, Bot, Strategy
 from brokers.models import BrokerAccount
 from execution.models import (
+    AccountRiskDay,
     AccountSnapshot,
     BrokerPosition,
     BrokerSymbolMapping,
@@ -26,6 +27,7 @@ from execution.models import (
     ScalperRunLog,
     TradeLog,
 )
+from execution.services.daily_risk import risk_day_window
 from execution.services.equity import equity_drawdown_pct
 from execution.mt5_tasks import (
     execute_mt5_order_task,
@@ -128,28 +130,31 @@ def personal_dashboard(request):
     snapshot = AccountSnapshot.objects.filter(broker_account=account).first()
     risk, _ = RiskPolicy.objects.get_or_create(broker_account=account)
     positions = BrokerPosition.objects.filter(broker_account=account, status="open")
-    today = timezone.localdate()
+    day_window = risk_day_window(account)
     entries = Order.objects.filter(
         broker_account=account,
         intent="entry",
-        submitted_at__date=today,
+        submitted_at__gte=day_window.start,
+        submitted_at__lt=day_window.end,
         status__in=["ack", "part_filled", "filled"],
     ).count()
-    completed = TradeLog.objects.filter(broker_account=account, closed_at__date=today)
+    completed = TradeLog.objects.filter(
+        broker_account=account,
+        closed_at__gte=day_window.start,
+        closed_at__lt=day_window.end,
+    )
     realized = sum((row.pnl or Decimal("0") for row in completed), Decimal("0"))
     floating = sum((row.profit for row in positions), Decimal("0"))
     start_equity = None
     drawdown = Decimal("0")
+    risk_day = AccountRiskDay.objects.filter(
+        broker_account=account,
+        risk_date=day_window.risk_date,
+    ).first()
     if snapshot:
-        day_values = list(
-            AccountSnapshot.objects.filter(
-                broker_account=account,
-                captured_at__date=today,
-            ).order_by("captured_at").values_list("equity", flat=True)
-        )
-        if day_values:
-            start_equity = day_values[0]
-            drawdown = equity_drawdown_pct(risk, snapshot.equity)
+        drawdown = equity_drawdown_pct(risk, snapshot.equity)
+    if risk_day and risk_day.baseline_locked:
+        start_equity = risk_day.starting_equity
 
     bots = Bot.objects.filter(broker_account=account)
     return Response(
@@ -181,6 +186,8 @@ def personal_dashboard(request):
                 "realized_pnl_today": realized,
                 "drawdown_pct": drawdown,
                 "start_equity": start_equity,
+                "daily_baseline_source": risk_day.baseline_source if risk_day else "unavailable",
+                "daily_baseline_locked": bool(risk_day and risk_day.baseline_locked),
                 "margin": snapshot.margin if snapshot else None,
                 "free_margin": snapshot.free_margin if snapshot else None,
                 "margin_level": snapshot.margin_level if snapshot else None,

@@ -171,6 +171,9 @@ CELERY_TASK_ALWAYS_EAGER = False  # For development/testing, run tasks immediate
 CELERY_TASK_DEFAULT_QUEUE = "celery"
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 MT5_TICK_MAX_AGE_SECONDS = int(env("MT5_TICK_MAX_AGE_SECONDS", default=120))
+ACCOUNT_RISK_OPENING_SNAPSHOT_GRACE_SECONDS = int(
+    env("ACCOUNT_RISK_OPENING_SNAPSHOT_GRACE_SECONDS", default=300)
+)
 # Some MT5 brokers expose tick epochs in broker-server time rather than UTC.
 # Accept a bounded future offset while still rejecting clearly invalid clocks.
 MT5_TICK_FUTURE_TOLERANCE_SECONDS = int(

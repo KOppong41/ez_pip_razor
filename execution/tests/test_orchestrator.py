@@ -46,6 +46,7 @@ class OrchestratorTest(TestCase):
         # create
         r = self.client.post("/api/orders/from-decision/", data={"decision_id": self.dec.id, "broker_account_id": self.ba.id, "qty": "0.10"}, content_type="application/json")
         order_id = r.json()["id"]
-        # new -> filled is invalid in our simple graph (must ack first)
-        r = self.client.post(f"/api/orders/{order_id}/transition/", data={"to_status": "filled"}, content_type="application/json")
+        # Immediate fills from new are valid. A terminal fill cannot move back to ack.
+        self.client.post(f"/api/orders/{order_id}/transition/", data={"to_status": "filled"}, content_type="application/json")
+        r = self.client.post(f"/api/orders/{order_id}/transition/", data={"to_status": "ack"}, content_type="application/json")
         self.assertEqual(r.status_code, 400)

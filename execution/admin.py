@@ -19,6 +19,7 @@ from .models import (
     ExecutionSetting,
     JournalEntry,
     ScalperProfile,
+    AccountRiskDay,
     AccountSnapshot,
     BrokerPosition,
     BrokerSymbolMapping,
@@ -303,6 +304,22 @@ class BrokerPositionAdmin(OwnedAdmin):
 class AccountSnapshotAdmin(admin.ModelAdmin):
     list_display = ("broker_account", "balance", "equity", "free_margin", "currency", "captured_at")
     readonly_fields = tuple(field.name for field in AccountSnapshot._meta.fields)
+
+
+@admin.register(AccountRiskDay)
+class AccountRiskDayAdmin(admin.ModelAdmin):
+    list_display = (
+        "broker_account",
+        "risk_date",
+        "starting_equity",
+        "high_equity",
+        "realized_pnl",
+        "baseline_source",
+        "baseline_locked",
+        "finalized_at",
+    )
+    list_filter = ("baseline_source", "baseline_locked", "risk_date")
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(RiskPolicy)

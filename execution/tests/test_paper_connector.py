@@ -5,6 +5,7 @@ from bots.models import Bot
 from brokers.models import BrokerAccount
 from execution.models import Signal, Decision, Order, Execution, Position
 from time import sleep
+from unittest.mock import patch
 from django.contrib.auth import get_user_model
 
 class PaperConnectorFlowTest(TestCase):
@@ -22,9 +23,14 @@ class PaperConnectorFlowTest(TestCase):
         }, content_type="application/json")
         self.order_id = r.json()["id"]
 
-    def test_send_and_fill(self):
+    @patch("execution.connectors.paper.current_app.send_task")
+    def test_send_and_fill(self, send_task):
         # send to connector -> should ACK then fill via async task
         self.client.post(f"/api/orders/{self.order_id}/send/")
+        send_task.assert_called_once_with(
+            "execution.tasks.simulate_fill_task",
+            args=[self.order_id],
+        )
         # Run task synchronously by calling it directly (no need to sleep if using eager)
         from execution.tasks import simulate_fill_task
         simulate_fill_task(self.order_id)

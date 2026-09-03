@@ -19,12 +19,13 @@ class OrderCooldownTests(TestCase):
             account_ref="p1",
             owner=self.user,
         )
-        self.asset = Asset.objects.create(symbol="EURUSDm")
+        self.asset, _ = Asset.objects.get_or_create(symbol="EURUSDm")
         self.bot = Bot.objects.create(
             name="Bot",
             owner=self.user,
             status="active",
             auto_trade=True,
+            trading_schedule_enabled=False,
             broker_account=self.acct,
             asset=self.asset,
             allowed_symbols=["EURUSDm"],

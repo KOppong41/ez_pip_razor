@@ -31,6 +31,11 @@ from execution.models import (
 from execution.services.brokers import dispatch_place_order, get_broker_symbol_constraints
 from execution.services.order_guard import GuardInputs, apply_order_guards
 from execution.services.decision import make_decision_from_signal
+from execution.services.daily_risk import (
+    create_account_snapshot,
+    daily_equity_change_pcts,
+    update_account_risk_day,
+)
 from execution.services.ai_strategy_selector import select_ai_strategies
 from execution.services.engine import run_engine_on_candles
 from execution.services.fanout import fanout_orders
@@ -2086,23 +2091,18 @@ def kill_switch_monitor_task(self):
         if not account.is_active:
             continue
         info = connector.account_info_for_account(account)
-        snapshot = AccountSnapshot.objects.create(
-            broker_account=account,
-            balance=Decimal(str(getattr(info, "balance", 0) or 0)),
-            equity=Decimal(str(getattr(info, "equity", 0) or 0)),
-            margin=Decimal(str(getattr(info, "margin", 0) or 0)),
-            free_margin=Decimal(str(getattr(info, "margin_free", 0) or 0)),
-            margin_level=Decimal(str(getattr(info, "margin_level", 0) or 0)),
-            currency=str(getattr(info, "currency", "") or ""),
+        snapshot = create_account_snapshot(account, info)
+        trade_mode = getattr(info, "trade_mode", None)
+        risk_day = update_account_risk_day(
+            account,
+            snapshot,
+            connector=connector,
+            trade_mode=trade_mode,
         )
-        today_values = list(
-            AccountSnapshot.objects.filter(
-                broker_account=account,
-                captured_at__date=timezone.localdate(),
-            ).order_by("captured_at").values_list("equity", flat=True)
-        )
-        start = today_values[0] if today_values else snapshot.equity
-        daily_loss = ((start - snapshot.equity) / start * 100) if start > 0 else Decimal("0")
+        try:
+            daily_loss, _ = daily_equity_change_pcts(risk_day, snapshot.equity)
+        except ValueError:
+            daily_loss = None
         drawdown = update_equity_high_water(
             policy,
             snapshot.equity,
@@ -2111,7 +2111,7 @@ def kill_switch_monitor_task(self):
         reason = None
         if policy.emergency_stop:
             reason = "explicit_emergency_stop"
-        elif daily_loss >= policy.max_daily_loss_pct:
+        elif daily_loss is not None and daily_loss >= policy.max_daily_loss_pct:
             reason = "maximum_daily_loss"
         elif drawdown >= policy.max_account_drawdown_pct:
             reason = "maximum_account_drawdown"
@@ -2127,7 +2127,12 @@ def kill_switch_monitor_task(self):
             broker_account=account,
             owner=account.owner,
             message=f"Kill switch triggered: {reason}",
-            context={"daily_loss_pct": str(daily_loss), "drawdown_pct": str(drawdown)},
+            context={
+                "daily_loss_pct": str(daily_loss) if daily_loss is not None else None,
+                "drawdown_pct": str(drawdown),
+                "daily_baseline_source": risk_day.baseline_source,
+                "daily_baseline_locked": risk_day.baseline_locked,
+            },
         )
         if policy.emergency_close_owned_positions:
             for position in BrokerPosition.objects.filter(
@@ -2348,6 +2353,7 @@ def market_hours_guard_task(self):
 # Celery autodiscovery imports this module. Re-export the dedicated queue tasks
 # so execution.mt5_tasks is registered without exposing MT5 to another worker.
 from execution.mt5_tasks import (  # noqa: E402,F401
+    cancel_mt5_order_task,
     check_mt5_account_task,
     execute_mt5_order_task,
     modify_mt5_position_task,

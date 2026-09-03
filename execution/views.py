@@ -125,6 +125,16 @@ class OrderViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel(self, request, pk=None):
         order = self.get_object()
+        if order.broker_account.requires_mt5_connector():
+            from execution.mt5_tasks import cancel_mt5_order_task
+
+            task = cancel_mt5_order_task.apply_async(
+                args=[order.id],
+                queue="mt5_execution",
+            )
+            data = OrderSerializer(order).data
+            data["task_id"] = task.id
+            return Response(data, status=status.HTTP_202_ACCEPTED)
         dispatch_cancel_order(order)
         return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
 

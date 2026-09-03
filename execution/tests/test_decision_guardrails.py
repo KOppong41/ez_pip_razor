@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -20,7 +21,7 @@ class DecisionGuardrailTests(TestCase):
             account_ref="p1",
             owner=self.user,
         )
-        self.asset = Asset.objects.create(symbol="EURUSDm")
+        self.asset, _ = Asset.objects.get_or_create(symbol="EURUSDm")
         self.bot = Bot.objects.create(
             name="Bot",
             owner=self.user,
@@ -57,7 +58,8 @@ class DecisionGuardrailTests(TestCase):
         self.assertEqual(decision.reason, "existing_position_same_direction")
 
     @override_settings(DECISION_ALLOW_HEDGING=False, DECISION_FLIP_SCORE=0.8, DECISION_MIN_SCORE=0.5)
-    def test_blocks_opposite_direction_when_no_hedging(self):
+    @patch("execution.services.decision.get_price", return_value=Decimal("1.1000"))
+    def test_blocks_opposite_direction_when_no_hedging(self, get_price):
         Position.objects.create(
             broker_account=self.account,
             symbol="EURUSDm",

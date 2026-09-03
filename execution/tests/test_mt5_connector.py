@@ -8,7 +8,7 @@ from django.utils import timezone
 from bots.models import Bot
 from brokers.models import BrokerAccount
 from execution.connectors.base import ConnectorError
-from execution.connectors.mt5 import MT5Connector
+from execution.connectors.mt5 import MT5Connector, _MT5Proxy
 from execution.models import BrokerPosition, Decision, ExecutionAttempt, Signal
 from execution.services.live_risk import PreTradeRiskResult
 from execution.services.orchestrator import create_order_from_decision
@@ -85,6 +85,15 @@ class MT5ConnectorTest(TestCase):
         api.history_deals_get.return_value = ()
         api.last_error.return_value = (0, "ok")
 
+    @patch("execution.connectors.mt5._mt5_module", None)
+    def test_missing_mt5_proxy_supports_python_introspection(self):
+        proxy = _MT5Proxy()
+
+        self.assertFalse(hasattr(proxy, "__func__"))
+        self.assertFalse(hasattr(proxy, "_is_coroutine"))
+        with self.assertRaisesRegex(ConnectorError, "package is not installed"):
+            proxy.account_info
+
     @patch("execution.connectors.mt5.mt5")
     @patch("execution.services.live_risk.enforce_pretrade_risk")
     def test_done_records_attempt_and_fill(self, risk, api):
@@ -112,6 +121,59 @@ class MT5ConnectorTest(TestCase):
         self.assertEqual(self.order.broker_position_ticket, 333)
         self.assertEqual(ExecutionAttempt.objects.get(order=self.order).status, "accepted")
         self.assertEqual(api.order_send.call_args.args[0]["deviation"], 17)
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_entry_refreshes_full_broker_exposure_before_risk_gate(self, risk, api):
+        self._configure_api(api)
+        risk.return_value = self._risk_result()
+        manual_position = SimpleNamespace(
+            ticket=900,
+            identifier=900,
+            type=0,
+            symbol="GBPUSD",
+            volume=0.01,
+            price_open=1.25,
+            price_current=1.251,
+            sl=0,
+            tp=0,
+            profit=1,
+            swap=0,
+            magic=0,
+            comment="",
+            time=0,
+        )
+        api.positions_get.side_effect = lambda **kwargs: (
+            () if kwargs.get("ticket") is not None else (manual_position,)
+        )
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            price=1.1002,
+            volume=0.04,
+            order=111,
+            deal=222,
+            position=333,
+            comment="done",
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            connector.place_order(self.order)
+
+        self.assertTrue(
+            BrokerPosition.objects.filter(
+                broker_account=self.account,
+                broker_position_ticket=900,
+                ownership="manual",
+                status="open",
+            ).exists()
+        )
+        self.assertEqual(
+            risk.call_args.kwargs["broker_positions"],
+            (manual_position,),
+        )
 
     @patch("execution.connectors.mt5.mt5")
     @patch("execution.services.live_risk.enforce_pretrade_risk")

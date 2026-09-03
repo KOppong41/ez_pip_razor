@@ -27,14 +27,7 @@ jobs:
       - run: python manage.py check
       - run: python manage.py makemigrations --check --dry-run
       - name: Run execution and risk regression tests
-        run: >-
-          python manage.py test
-          execution.tests.test_mt5_connector
-          execution.tests.test_live_risk
-          execution.tests.test_trade_constraints
-          execution.tests.test_backtest_engine
-          execution.tests.test_scalper_htf_safety
-          --verbosity 2
+        run: python manage.py test execution.tests --verbosity 2
 
   desktop-client:
     runs-on: ubuntu-latest

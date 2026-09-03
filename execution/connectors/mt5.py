@@ -38,6 +38,12 @@ class _MT5Proxy:
     """
 
     def __getattr__(self, item):
+        # Python tooling probes private protocol attributes (for example
+        # ``__func__`` and ``_is_coroutine`` when unittest.mock determines
+        # whether an object is async). Missing protocol attributes must follow
+        # normal attribute semantics.
+        if item.startswith("_"):
+            raise AttributeError(item)
         if _mt5_module is None:
             raise ConnectorError(
                 "MetaTrader5 Python package is not installed. "
@@ -495,10 +501,13 @@ class MT5Connector(BaseConnector):
         )
 
     def history_deals_for_account(self, broker_account, date_from, date_to, **filters):
-        return self._call_for_account(
-            broker_account,
-            lambda: mt5.history_deals_get(date_from, date_to, **filters) or (),
-        )
+        def operation():
+            result = mt5.history_deals_get(date_from, date_to, **filters)
+            if result is None:
+                raise ConnectorError(f"MT5 history_deals_get failed: {mt5.last_error()}")
+            return result
+
+        return self._call_for_account(broker_account, operation)
 
     def history_deals_for_position_account(self, broker_account, broker_position_ticket: int):
         """Load a position's complete deal chain without relying on broker clock alignment."""
@@ -707,6 +716,45 @@ class MT5Connector(BaseConnector):
             },
         )
         return position
+
+    def _sync_broker_exposure_snapshot(self, broker_account, raw_positions) -> None:
+        """Persist every position returned by the just-read broker snapshot."""
+        configured_magic = int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813))
+        for raw_position in raw_positions:
+            ticket = _coerce_ticket(
+                getattr(raw_position, "ticket", None)
+                or getattr(raw_position, "identifier", None)
+            )
+            if ticket is None:
+                raise ConnectorError("MT5 returned a position without a ticket")
+            order = (
+                Order.objects.filter(
+                    broker_account=broker_account,
+                    broker_position_ticket=ticket,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            magic = int(getattr(raw_position, "magic", 0) or 0)
+            comment = str(getattr(raw_position, "comment", "") or "")
+            is_owned = bool(
+                order
+                or (
+                    magic == configured_magic
+                    and comment.startswith(("ez:", "ezc:"))
+                )
+            )
+            ownership = (
+                "ez_trade"
+                if is_owned
+                else ("manual" if not comment else "external")
+            )
+            self._sync_broker_position(
+                order,
+                raw_position,
+                broker_account=broker_account,
+                ownership=ownership,
+            )
 
     def _matching_broker_records(self, order: Order):
         comment = self._order_comment(order, closing=order.is_exit)
@@ -1042,11 +1090,18 @@ class MT5Connector(BaseConnector):
             runtime_cfg.decision_allow_hedging
             or (order.bot and getattr(order.bot, "allow_opposite_scalp", False))
         )
-        positions = mt5.positions_get(symbol=order.symbol)
-        if positions is None:
-            msg = f"Order {order.id} rejected: unable to fetch positions for {order.symbol}"
+        broker_positions = mt5.positions_get()
+        if broker_positions is None:
+            msg = f"Order {order.id} rejected: unable to refresh broker exposure"
             update_order_status(order, "error", error_msg=msg)
             raise ConnectorError(msg)
+        broker_positions = tuple(broker_positions)
+        self._sync_broker_exposure_snapshot(order.broker_account, broker_positions)
+        positions = tuple(
+            position
+            for position in broker_positions
+            if str(getattr(position, "symbol", "")) == order.symbol
+        )
         if not allow_hedge and positions and not is_close_order:
             buys = sum(Decimal(str(p.volume)) for p in positions if p.type == mt5.ORDER_TYPE_BUY)
             sells = sum(Decimal(str(p.volume)) for p in positions if p.type == mt5.ORDER_TYPE_SELL)
@@ -1099,6 +1154,7 @@ class MT5Connector(BaseConnector):
                 tick,
                 mt5.symbol_info(order.symbol),
                 mt5.account_info(),
+                broker_positions=broker_positions,
             )
             qty_dec = risk_result.volume
         except RiskRejected as exc:

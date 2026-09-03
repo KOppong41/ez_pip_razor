@@ -19,6 +19,7 @@ class InternalEngineEndToEndTest(TestCase):
         self.bot = Bot.objects.create(
             name="Internal engine",
             status="active",
+            trading_schedule_enabled=False,
             broker_account=self.account,
             default_qty="0.10",
             allowed_symbols=["EURUSD"],

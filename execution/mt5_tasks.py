@@ -8,14 +8,14 @@ from django.utils import timezone
 from execution.connectors.mt5 import MT5Connector
 from brokers.models import BrokerAccount
 from execution.models import (
-    AccountSnapshot,
     BrokerPosition,
     BrokerSymbolMapping,
     MT5ConnectionState,
     Order,
     RiskPolicy,
 )
-from execution.services.brokers import dispatch_place_order
+from execution.services.brokers import dispatch_cancel_order, dispatch_place_order
+from execution.services.daily_risk import create_account_snapshot, update_account_risk_day
 from execution.utils.symbols import canonical_symbol
 from bots.models import Asset
 from execution.services.equity import update_equity_high_water
@@ -31,6 +31,20 @@ from execution.services.equity import update_equity_high_water
 def execute_mt5_order_task(self, order_id: int):
     order = Order.objects.select_related("broker_account", "bot").get(pk=order_id)
     dispatch_place_order(order)
+    order.refresh_from_db()
+    return {"order_id": order.id, "status": order.status}
+
+
+@shared_task(bind=True, queue="mt5_execution")
+def cancel_mt5_order_task(self, order_id: int):
+    """Cancel an MT5 order inside the single process that owns the session.
+
+    This task deliberately has no automatic retry. A transport failure after
+    ``order_send`` is ambiguous and must be reconciled before an operator asks
+    for another cancellation attempt.
+    """
+    order = Order.objects.select_related("broker_account", "bot").get(pk=order_id)
+    dispatch_cancel_order(order)
     order.refresh_from_db()
     return {"order_id": order.id, "status": order.status}
 
@@ -74,14 +88,12 @@ def check_mt5_account_task(self, broker_account_id: int):
                 "last_error": "",
             },
         )
-        snapshot = AccountSnapshot.objects.create(
-            broker_account=account,
-            balance=Decimal(str(getattr(info, "balance", 0) or 0)),
-            equity=Decimal(str(getattr(info, "equity", 0) or 0)),
-            margin=Decimal(str(getattr(info, "margin", 0) or 0)),
-            free_margin=Decimal(str(getattr(info, "margin_free", 0) or 0)),
-            margin_level=Decimal(str(getattr(info, "margin_level", 0) or 0)),
-            currency=str(getattr(info, "currency", "") or ""),
+        snapshot = create_account_snapshot(account, info)
+        update_account_risk_day(
+            account,
+            snapshot,
+            connector=connector,
+            trade_mode=trade_mode,
         )
         policy, _ = RiskPolicy.objects.get_or_create(broker_account=account)
         update_equity_high_water(

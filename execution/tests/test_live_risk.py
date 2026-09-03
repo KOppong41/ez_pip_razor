@@ -1,7 +1,7 @@
 from decimal import Decimal
 from types import SimpleNamespace
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
@@ -99,6 +99,21 @@ class LiveRiskSymbolLimitsTest(TestCase):
                 self.account_info,
             )
 
+    def test_broker_current_manual_exposure_counts_toward_position_cap(self):
+        self.policy.max_positions = 1
+        self.policy.save(update_fields=["max_positions"])
+        broker_positions = (SimpleNamespace(symbol="GBPUSD"),)
+
+        with self.assertRaisesRegex(RiskRejected, "Maximum open positions reached"):
+            enforce_pretrade_risk(
+                self._order(suffix="broker-current-position"),
+                self.connector,
+                self.tick,
+                self.symbol_info,
+                self.account_info,
+                broker_positions=broker_positions,
+            )
+
     def test_account_drawdown_uses_persistent_high_water(self):
         self.policy.max_daily_loss_pct = Decimal("100")
         self.policy.max_account_drawdown_pct = Decimal("5")
@@ -136,3 +151,19 @@ class LiveRiskSymbolLimitsTest(TestCase):
         self.policy.refresh_from_db()
         self.assertEqual(self.policy.equity_high_water, Decimal("1200"))
         self.assertEqual(drawdown.quantize(Decimal("0.01")), Decimal("8.33"))
+
+    @override_settings(ACCOUNT_RISK_OPENING_SNAPSHOT_GRACE_SECONDS=-1)
+    def test_live_entry_fails_closed_when_daily_baseline_is_unavailable(self):
+        self.policy.live_trading_confirmed = True
+        self.policy.save(update_fields=["live_trading_confirmed"])
+        self.account_info.trade_mode = 2
+
+        with self.assertRaisesRegex(RiskRejected, "Daily risk baseline is unavailable"):
+            enforce_pretrade_risk(
+                self._order(suffix="missing-live-baseline"),
+                self.connector,
+                self.tick,
+                self.symbol_info,
+                self.account_info,
+                broker_positions=(),
+            )
