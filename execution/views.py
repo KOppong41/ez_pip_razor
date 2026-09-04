@@ -113,9 +113,9 @@ class OrderViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         if order.status != "new":
             return Response({"detail": "Only 'new' orders can be sent."}, status=status.HTTP_400_BAD_REQUEST)
         if getattr(order.broker_account, "connector", "mt5_local") == "mt5_local":
-            from execution.mt5_tasks import execute_mt5_order_task
+            from execution.mt5_tasks import enqueue_mt5_order
 
-            task = execute_mt5_order_task.apply_async(args=[order.id], queue="mt5_execution")
+            task = enqueue_mt5_order(order)
             data = OrderSerializer(order).data
             data["task_id"] = task.id
             return Response(data, status=status.HTTP_202_ACCEPTED)
@@ -131,6 +131,7 @@ class OrderViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             task = cancel_mt5_order_task.apply_async(
                 args=[order.id],
                 queue="mt5_execution",
+                priority=3,
             )
             data = OrderSerializer(order).data
             data["task_id"] = task.id

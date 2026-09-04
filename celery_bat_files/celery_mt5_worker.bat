@@ -20,34 +20,33 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
     goto finish
 )
 
-powershell -NoProfile -Command "$proc = Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%%celery -A config beat%%'\"; if ($proc) { exit 5 } else { exit 0 }"
+powershell -NoProfile -Command "$proc = @(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%%celery -A config worker%%'\"); $mt5 = @($proc | Where-Object { $_.CommandLine -match '(--queues=mt5_execution|-Q\s+mt5_execution)(\s|$)' }); if ($mt5.Count) { exit 5 } else { exit 0 }"
 set "PROC_CHECK=%ERRORLEVEL%"
 if "%PROC_CHECK%"=="5" (
-    echo Celery beat already running. Stop it before starting a new one.
+    echo Dedicated MT5 Celery worker already running. Stop it before starting a new one.
     set "RETURN_CODE=1"
     goto finish
 )
 if not "%PROC_CHECK%"=="0" if not "%PROC_CHECK%"=="5" (
-    echo [%date% %time%] Warning: Unable to verify existing Celery beat process (code %PROC_CHECK%). Continuing anyway.
+    echo [%date% %time%] Warning: Unable to verify existing MT5 worker (code %PROC_CHECK%). Continuing anyway.
 )
 
 call "%VENV_DIR%\Scripts\activate.bat"
 
-set "LOG_FILE=%PROJECT_ROOT%\celery_beat.log"
-call :log Starting Celery beat || goto :log_error
+set "LOG_FILE=%PROJECT_ROOT%\celery_mt5_worker.log"
+call :log Starting dedicated serialized MT5 worker || goto :log_error
 
-python -m celery -A config beat --loglevel=info >> "%LOG_FILE%" 2>&1
+python -m celery -A config worker --loglevel=info --queues=mt5_execution --pool=solo --concurrency=1 --prefetch-multiplier=1 --hostname=mt5@%%h >> "%LOG_FILE%" 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
 
-call :log Celery beat exited with code %EXIT_CODE%
-
+call :log Dedicated MT5 worker exited with code %EXIT_CODE%
 set "RETURN_CODE=%EXIT_CODE%"
 goto finish
 
 :log_error
 echo [%date% %time%] Unable to write to "%LOG_FILE%".
 echo Another process is likely still running and holding the log file open.^
- Close the existing Celery beat instance or any editor tailing the log, then run this script again.
+ Close the existing MT5 worker or any editor tailing the log, then run this script again.
 set "RETURN_CODE=1"
 goto finish
 

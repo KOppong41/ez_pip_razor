@@ -30,7 +30,7 @@ from execution.models import (
 from execution.services.daily_risk import risk_day_window
 from execution.services.equity import equity_drawdown_pct
 from execution.mt5_tasks import (
-    execute_mt5_order_task,
+    enqueue_mt5_order,
     modify_mt5_position_task,
     test_mt5_account_task,
 )
@@ -244,7 +244,7 @@ def personal_control(request):
                 status="open",
             ):
                 order, _ = create_close_order_for_position(position, account)
-                execute_mt5_order_task.apply_async(args=[order.id], queue="mt5_execution")
+                enqueue_mt5_order(order, emergency=True)
     else:
         return Response({"detail": "action must be start, stop, or emergency_stop"}, status=400)
     return Response({"action": action, "entries_enabled": policy.entries_enabled, "emergency_stop": policy.emergency_stop})
@@ -352,7 +352,7 @@ def personal_position_action(request, position_id: int):
     action = str(request.data.get("action", "")).lower()
     if action == "close":
         order, _ = create_close_order_for_position(position, position.broker_account)
-        task = execute_mt5_order_task.apply_async(args=[order.id], queue="mt5_execution")
+        task = enqueue_mt5_order(order)
     elif action in {"modify_sl", "modify_tp", "modify_protection"}:
         sl = request.data.get("sl")
         tp = request.data.get("tp")
@@ -362,6 +362,7 @@ def personal_position_action(request, position_id: int):
             args=[position.id],
             kwargs={"sl": sl, "tp": tp},
             queue="mt5_execution",
+            priority=3,
         )
     else:
         return Response({"detail": "Unsupported position action"}, status=400)
@@ -526,7 +527,7 @@ def personal_account_test(request):
         )
     queued_at = timezone.now()
     task = test_mt5_account_task.apply_async(
-        args=[account.id], queue="mt5_execution"
+        args=[account.id], queue="mt5_execution", priority=9
     )
     return Response(
         {

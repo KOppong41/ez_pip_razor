@@ -69,21 +69,16 @@ def fanout_orders(decision: Decision, master_qty: str | None) -> List[Tuple[Orde
     # Hard cap by lot size if configured
     if runtime_cfg.max_order_lot > 0:
         cap = runtime_cfg.max_order_lot
-        if asset_min_qty > 0 and cap < asset_min_qty:
-            # Avoid capping below the broker's minimum trade size
-            logger.warning(
-                "max_order_lot %s is below broker min %s for %s; using broker min instead",
-                cap,
-                asset_min_qty,
-                bot.asset.symbol if bot and bot.asset else "unknown",
-            )
-            cap = asset_min_qty
         if qty > cap:
             qty = cap
 
     # Asset minimum is a local creation guard. The serialized MT5 execution
     # layer performs authoritative risk sizing and broker step normalization.
-    if asset_min_qty > 0 and qty < asset_min_qty:
+    if (
+        asset_min_qty > 0
+        and qty < asset_min_qty
+        and (runtime_cfg.max_order_lot <= 0 or asset_min_qty <= runtime_cfg.max_order_lot)
+    ):
         qty = asset_min_qty
 
     if qty <= 0:

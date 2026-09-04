@@ -192,7 +192,7 @@ class BrokerAccountAdmin(admin.ModelAdmin):
             return JsonResponse({"ok": False, "message": "Account is inactive. Activate before testing."}, status=400)
         from execution.mt5_tasks import check_mt5_account_task
 
-        task = check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution")
+        task = check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution", priority=9)
         return JsonResponse(
             {"ok": True, "pending": True, "task_id": task.id, "message": "MT5 connection test queued."},
             status=202,
@@ -213,7 +213,7 @@ class BrokerAccountAdmin(admin.ModelAdmin):
         
         from execution.mt5_tasks import check_mt5_account_task
 
-        task = check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution")
+        task = check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution", priority=9)
         return JsonResponse({"ok": True, "pending": True, "task_id": task.id}, status=202)
 
     @admin.action(description="Verify credentials for selected accounts")
@@ -229,7 +229,7 @@ class BrokerAccountAdmin(admin.ModelAdmin):
                 continue
             from execution.mt5_tasks import check_mt5_account_task
 
-            check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution")
+            check_mt5_account_task.apply_async(args=[obj.id], queue="mt5_execution", priority=9)
             checked += 1
         if checked:
             self.message_user(request, f"Queued verification for {checked} account(s).")

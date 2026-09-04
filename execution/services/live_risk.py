@@ -14,6 +14,7 @@ from execution.services.daily_risk import (
 from execution.services.scalper_config import build_scalper_config
 from execution.services.trade_constraints import distance_to_price
 from execution.services.equity import update_equity_high_water
+from execution.services.runtime_config import get_runtime_config
 
 
 class RiskRejected(ValueError):
@@ -88,9 +89,11 @@ def enforce_pretrade_risk(
     if not locked_order.bot.auto_trade or locked_order.bot.status != "active":
         raise RiskRejected("Bot is not enabled for new automated entries")
 
-    # MT5: 0=demo, 1=contest, 2=real. Unknown values remain visible but the
-    # explicit entries_enabled switch is still required above.
+    # MT5: 0=demo, 1=contest, 2=real. Unknown safety-sensitive metadata must
+    # fail closed for new exposure.
     trade_mode = getattr(account_info, "trade_mode", None)
+    if trade_mode not in {0, 1, 2}:
+        raise RiskRejected("Unknown or unsupported MT5 account trade mode")
     if trade_mode == 2 and not policy.live_trading_confirmed:
         raise RiskRejected("Live MT5 account requires explicit live-trading confirmation")
 
@@ -158,6 +161,10 @@ def enforce_pretrade_risk(
     bid = _decimal(getattr(tick, "bid", 0))
     ask = _decimal(getattr(tick, "ask", 0))
     point = _decimal(getattr(symbol_info, "point", 0))
+    volume_min = _decimal(getattr(symbol_info, "volume_min", 0))
+    runtime_max_lot = get_runtime_config().max_order_lot
+    if runtime_max_lot > 0 and volume_min > runtime_max_lot:
+        raise RiskRejected("broker_min_volume_exceeds_max_order_lot")
     if bid <= 0 or ask <= 0 or ask < bid or point <= 0:
         raise RiskRejected("Fresh broker bid/ask and point size are required")
     spread_points = (ask - bid) / point
@@ -204,12 +211,14 @@ def enforce_pretrade_risk(
         raise RiskRejected("Risk amount is not positive")
     volume = risk_amount / loss_per_lot
 
-    volume_min = _decimal(getattr(symbol_info, "volume_min", 0))
     volume_max = _decimal(getattr(symbol_info, "volume_max", 0))
     volume_step = _decimal(getattr(symbol_info, "volume_step", 0))
-    effective_max = policy.max_lot
-    if volume_max > 0:
-        effective_max = min(effective_max, volume_max) if effective_max > 0 else volume_max
+    configured_caps = [
+        cap
+        for cap in (policy.max_lot, runtime_max_lot, volume_max)
+        if cap > 0
+    ]
+    effective_max = min(configured_caps) if configured_caps else Decimal("0")
     volume = min(volume, effective_max) if effective_max > 0 else volume
     volume = _floor_to_step(volume, volume_step)
     if volume <= 0 or (volume_min > 0 and volume < volume_min):

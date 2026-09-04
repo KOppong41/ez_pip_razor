@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 
@@ -59,3 +61,24 @@ class OrderCooldownTests(TestCase):
         self.assertFalse(b[0][1])
         self.assertEqual(b[0][0].id, a[0][0].id)
         self.assertEqual(Order.objects.count(), 1)
+
+    @override_settings(MAX_ORDER_LOT=Decimal("0.05"))
+    def test_asset_minimum_never_raises_configured_hard_cap(self):
+        self.asset.min_qty = Decimal("0.10")
+        self.asset.save(update_fields=["min_qty"])
+        self.bot.default_qty = Decimal("0.20")
+        self.bot.save(update_fields=["default_qty"])
+        decision = Decision.objects.create(
+            bot=self.bot,
+            signal=self.signal,
+            action="open",
+            reason="hard-cap-test",
+            score=1.0,
+            params={"sl": "1.0", "tp": "2.0"},
+        )
+
+        orders = fanout_orders(decision, master_qty=None)
+
+        self.assertEqual(len(orders), 1)
+        orders[0][0].refresh_from_db()
+        self.assertEqual(orders[0][0].qty, Decimal("0.05"))

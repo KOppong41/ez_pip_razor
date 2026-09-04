@@ -419,6 +419,7 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
 
 @transaction.atomic
 def make_decision_from_signal(signal: Signal) -> Decision:
+    evaluation_started_at = timezone.now()
     # Lock and reuse the signal's first decision so duplicated tasks cannot
     # produce competing intents for the same completed candle/signal.
     signal = Signal.objects.select_for_update().get(pk=signal.pk)
@@ -595,6 +596,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
         reason=proposed.reason,
         score=proposed.score,
         params=proposed.params or {},
+        evaluation_started_at=evaluation_started_at,
     )
     decisions_total.labels(action=decision.action).inc()
     if is_scalper_bot:

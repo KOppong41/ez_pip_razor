@@ -21,7 +21,17 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = "__all__"
-        read_only_fields = ("status","created_at","updated_at")
+        read_only_fields = (
+            "status",
+            "created_at",
+            "updated_at",
+            "execution_queued_at",
+            "mt5_worker_started_at",
+            "risk_validation_completed_at",
+            "order_send_called_at",
+            "broker_response_received_at",
+            "execution_recorded_at",
+        )
 
 class QuickOrderCreateSerializer(serializers.Serializer):
     bot_id = serializers.PrimaryKeyRelatedField(queryset=Bot.objects.all(), source="bot")

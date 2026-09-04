@@ -1,4 +1,4 @@
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 # Ingest
 signals_ingested_total = Counter(
@@ -32,4 +32,11 @@ mt5_errors_total = Counter(
     "mt5_errors_total",
     "MT5 errors by action",
     ["action"],  # e.g. initialize, login, symbol_select, copy_rates, ipc
+)
+
+execution_latency_seconds = Histogram(
+    "execution_latency_seconds",
+    "End-to-end order execution latency by stage",
+    ["stage"],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
 )

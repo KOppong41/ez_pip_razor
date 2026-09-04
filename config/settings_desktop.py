@@ -44,17 +44,22 @@ os.environ.setdefault("ALLOW_SQLITE_DESKTOP", "True")
 os.environ.setdefault("BROKER_CREDS_KEY", load_or_create_broker_creds_key())
 os.environ.setdefault("MT5_AUTO_ENABLE_ALGO_TRADING", "True")
 
-# Use a shared filesystem queue so the desktop app has no Redis dependency.
+# Use a shared, priority-aware filesystem queue so the desktop app has no
+# Redis dependency while urgent MT5 work can overtake queued entries.
 QUEUE_ROOT = DESKTOP_ROOT / "celery"
 QUEUE_IN = QUEUE_ROOT / "queue"
 QUEUE_PROCESSED = QUEUE_ROOT / "processed"
+QUEUE_CONTROL = QUEUE_ROOT / "control"
 RESULT_ROOT = QUEUE_ROOT / "results"
-for directory in (QUEUE_IN, QUEUE_PROCESSED, RESULT_ROOT):
+for directory in (QUEUE_IN, QUEUE_PROCESSED, QUEUE_CONTROL, RESULT_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
 
 # Desktop mode deliberately overrides server/compose Redis values. All local
 # processes share these per-user folders, so the app remains self-contained.
-os.environ["CELERY_BROKER_URL"] = "filesystem://"
+from .celery_priority_filesystem import register_transport
+
+register_transport()
+os.environ["CELERY_BROKER_URL"] = "priorityfilesystem://"
 os.environ["CELERY_RESULT_BACKEND"] = f"file:///{RESULT_ROOT.as_posix()}"
 
 from .settings import *  # noqa: E402,F401,F403
@@ -67,7 +72,8 @@ if "sqlite" in DATABASES["default"]["ENGINE"]:
 CELERY_BROKER_TRANSPORT_OPTIONS = {
     "data_folder_in": str(QUEUE_IN),
     "data_folder_out": str(QUEUE_IN),
-    "data_folder_processed": str(QUEUE_PROCESSED),
+    "processed_folder": str(QUEUE_PROCESSED),
+    "control_folder": str(QUEUE_CONTROL),
 }
 
 # Override paths to keep desktop artifacts isolated from the repo tree.

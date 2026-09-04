@@ -2,7 +2,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from bots.models import Bot
@@ -66,6 +66,8 @@ class MT5ConnectorTest(TestCase):
         api.TRADE_RETCODE_PLACED = 10008
         api.ORDER_TYPE_BUY = 0
         api.ORDER_TYPE_SELL = 1
+        api.POSITION_TYPE_BUY = 0
+        api.POSITION_TYPE_SELL = 1
         api.TRADE_ACTION_DEAL = 1
         api.TRADE_ACTION_REMOVE = 8
         api.ORDER_TIME_GTC = 0
@@ -76,6 +78,9 @@ class MT5ConnectorTest(TestCase):
             point=0.0001,
             digits=5,
             trade_contract_size=100000,
+            volume_min=0.01,
+            volume_max=100,
+            volume_step=0.01,
             filling_mode=0,
             trade_stops_level=0,
             stops_level=0,
@@ -121,6 +126,157 @@ class MT5ConnectorTest(TestCase):
         self.assertEqual(self.order.broker_position_ticket, 333)
         self.assertEqual(ExecutionAttempt.objects.get(order=self.order).status, "accepted")
         self.assertEqual(api.order_send.call_args.args[0]["deviation"], 17)
+        self.order.refresh_from_db()
+        self.assertIsNotNone(self.order.risk_validation_completed_at)
+        self.assertIsNotNone(self.order.order_send_called_at)
+        self.assertIsNotNone(self.order.broker_response_received_at)
+        self.assertIsNotNone(self.order.execution_recorded_at)
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_broker_minimum_below_configured_max_is_allowed(self, risk, api):
+        self._configure_api(api)
+        api.symbol_info.return_value.volume_min = 0.01
+        risk.return_value = self._risk_result()
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            price=1.1002,
+            volume=0.04,
+            order=111,
+            deal=222,
+            position=333,
+            comment="done",
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            connector.place_order(self.order)
+
+        api.order_send.assert_called_once()
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    @override_settings(MAX_ORDER_NOTIONAL=Decimal("10000"))
+    def test_broker_minimum_equal_to_configured_max_is_allowed(self, risk, api):
+        self._configure_api(api)
+        api.symbol_info.return_value.volume_min = 0.05
+        self.order.qty = Decimal("0.05")
+        self.order.remaining_qty = Decimal("0.05")
+        self.order.save(update_fields=["qty", "remaining_qty"])
+        risk_result = self._risk_result()
+        risk.return_value = PreTradeRiskResult(
+            **{**risk_result.__dict__, "volume": Decimal("0.05")}
+        )
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            price=1.1002,
+            volume=0.05,
+            order=111,
+            deal=222,
+            position=333,
+            comment="done",
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            connector.place_order(self.order)
+
+        api.order_send.assert_called_once()
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_broker_minimum_above_configured_max_is_rejected_before_send(self, risk, api):
+        self._configure_api(api)
+        api.symbol_info.return_value.volume_min = 0.10
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            with self.assertRaisesRegex(
+                ConnectorError,
+                "broker_min_volume_exceeds_max_order_lot",
+            ):
+                connector.place_order(self.order)
+
+        risk.assert_not_called()
+        api.order_send.assert_not_called()
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "rejected")
+        self.assertIn(
+            "broker_min_volume_exceeds_max_order_lot",
+            self.order.last_error,
+        )
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_hard_lot_cap_does_not_block_risk_reducing_close(self, api):
+        self._configure_api(api)
+        api.symbol_info.return_value.volume_min = 0.10
+        broker_position = BrokerPosition.objects.create(
+            broker_account=self.account,
+            bot=self.bot,
+            originating_order=self.order,
+            broker_position_ticket=444,
+            ownership="ez_trade",
+            symbol="EURUSD",
+            side="buy",
+            volume=Decimal("0.10"),
+            open_price=Decimal("1.1000"),
+        )
+        self.order.intent = "exit"
+        self.order.side = "sell"
+        self.order.qty = Decimal("0.10")
+        self.order.remaining_qty = Decimal("0.10")
+        self.order.broker_position_ticket = broker_position.broker_position_ticket
+        self.order.save(
+            update_fields=[
+                "intent",
+                "side",
+                "qty",
+                "remaining_qty",
+                "broker_position_ticket",
+            ]
+        )
+        raw_position = SimpleNamespace(
+            ticket=444,
+            identifier=444,
+            type=api.POSITION_TYPE_BUY,
+            symbol="EURUSD",
+            volume=0.10,
+            price_open=1.1000,
+            price_current=1.1002,
+            sl=1.0900,
+            tp=1.1200,
+            profit=0,
+            swap=0,
+            magic=20250813,
+            comment="ez:test",
+            time=0,
+        )
+        api.positions_get.side_effect = [(raw_position,), ()]
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            price=1.1000,
+            volume=0.10,
+            order=555,
+            deal=556,
+            position=444,
+            comment="closed",
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            connector.place_order(self.order)
+
+        api.order_send.assert_called_once()
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "filled")
 
     @patch("execution.connectors.mt5.mt5")
     @patch("execution.services.live_risk.enforce_pretrade_risk")

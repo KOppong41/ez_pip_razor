@@ -20,6 +20,7 @@ from django.conf import settings
 from core.metrics import mt5_errors_total
 from execution.services.runtime_config import get_runtime_config
 from execution.services.mt5_session import MT5SessionService
+from execution.services.latency import mark_execution_recorded, mark_order_timestamp
 
 try:
     import MetaTrader5 as _mt5_module  # type: ignore
@@ -29,6 +30,14 @@ except Exception:
 
 def is_mt5_available() -> bool:
     return _mt5_module is not None
+
+
+def _timed_order_send(order: Order, request):
+    mark_order_timestamp(order, "order_send_called_at")
+    result = mt5.order_send(request)
+    if result is not None:
+        mark_order_timestamp(order, "broker_response_received_at")
+    return result
 
 
 class _MT5Proxy:
@@ -996,7 +1005,7 @@ class MT5Connector(BaseConnector):
                     remaining_qty=locked_order.remaining_qty or requested,
                     submitted_at=timezone.now(),
                 )
-            result = mt5.order_send(req)
+            result = _timed_order_send(order, req)
             if result is None:
                 order.last_error = f"Ambiguous MT5 close submission; reconciliation required: {mt5.last_error()}"
                 order.save(update_fields=["last_error"])
@@ -1069,6 +1078,7 @@ class MT5Connector(BaseConnector):
                 broker_position_ticket=int(ticket),
                 broker_metadata=_safe_mt5_metadata(result),
             )
+            mark_execution_recorded(order)
             remaining = mt5.positions_get(ticket=int(ticket)) or ()
             if remaining:
                 self._sync_broker_position(order, remaining[0], ownership="ez_trade")
@@ -1145,6 +1155,23 @@ class MT5Connector(BaseConnector):
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)
 
+        symbol_info = mt5.symbol_info(order.symbol)
+        broker_min_volume = Decimal(
+            str(getattr(symbol_info, "volume_min", 0) or 0)
+        )
+        if (
+            runtime_cfg.max_order_lot > 0
+            and broker_min_volume > runtime_cfg.max_order_lot
+        ):
+            reason = "broker_min_volume_exceeds_max_order_lot"
+            msg = (
+                f"Order {order.id} rejected: {reason} "
+                f"(broker_min={broker_min_volume}, "
+                f"configured_max={runtime_cfg.max_order_lot})"
+            )
+            update_order_status(order, "rejected", error_msg=msg)
+            raise ConnectorError(msg)
+
         try:
             from execution.services.live_risk import RiskRejected, enforce_pretrade_risk
 
@@ -1152,11 +1179,12 @@ class MT5Connector(BaseConnector):
                 order,
                 self,
                 tick,
-                mt5.symbol_info(order.symbol),
+                symbol_info,
                 mt5.account_info(),
                 broker_positions=broker_positions,
             )
             qty_dec = risk_result.volume
+            mark_order_timestamp(order, "risk_validation_completed_at")
         except RiskRejected as exc:
             msg = f"Order {order.id} risk rejected: {exc}"
             update_order_status(order, "rejected", error_msg=msg)
@@ -1208,7 +1236,6 @@ class MT5Connector(BaseConnector):
 
         spread = ask - bid
         # Asset-based guards
-        asset_min_qty = Decimal(str(asset.min_qty)) if asset else Decimal("0")
         asset_max_spread = Decimal(str(asset.max_spread)) if asset else Decimal("0")
         # Allow close orders to proceed even if spread is wide to avoid being trapped.
         if not is_close_order and asset_max_spread > 0 and spread > asset_max_spread:
@@ -1219,18 +1246,8 @@ class MT5Connector(BaseConnector):
         # Min/max notional and max lot checks (price * qty)
         test_mode = bool(getattr(settings, "TRADING_TEST_MODE", False))
         max_lot = runtime_cfg.max_order_lot
-        effective_max_lot = max_lot
-        if asset_min_qty > 0 and max_lot > 0 and max_lot < asset_min_qty:
-            # If the configured cap is below the broker minimum, respect the broker to avoid rejections.
-            effective_max_lot = asset_min_qty
-            logger.warning(
-                "max_order_lot %s below broker minimum %s for %s; raising cap to broker minimum",
-                max_lot,
-                asset_min_qty,
-                order.symbol,
-            )
-        if not test_mode and effective_max_lot > 0 and qty_dec > effective_max_lot:
-            msg = f"Order {order.id} rejected: qty {order.qty} exceeds max lot {effective_max_lot}"
+        if max_lot > 0 and qty_dec > max_lot:
+            msg = f"Order {order.id} rejected: qty {qty_dec} exceeds max lot {max_lot}"
             update_order_status(order, "error", error_msg=msg)
             raise ConnectorError(msg)
 
@@ -1364,7 +1381,7 @@ class MT5Connector(BaseConnector):
                 submitted_at=timezone.now(),
             )
 
-        result = mt5.order_send(req)
+        result = _timed_order_send(order, req)
         if result is None:
             err = mt5.last_error()
             msg = f"MT5 submission outcome is ambiguous: {err}"
@@ -1513,6 +1530,7 @@ class MT5Connector(BaseConnector):
                 swap=swap,
                 broker_metadata=deal_metadata,
             )
+            mark_execution_recorded(order)
 
             if order.broker_position_ticket:
                 try:

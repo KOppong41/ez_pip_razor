@@ -114,6 +114,37 @@ class LiveRiskSymbolLimitsTest(TestCase):
                 broker_positions=broker_positions,
             )
 
+    def test_unknown_mt5_trade_mode_fails_closed(self):
+        self.account_info.trade_mode = 99
+
+        with self.assertRaisesRegex(
+            RiskRejected,
+            "Unknown or unsupported MT5 account trade mode",
+        ):
+            enforce_pretrade_risk(
+                self._order(suffix="unknown-trade-mode"),
+                self.connector,
+                self.tick,
+                self.symbol_info,
+                self.account_info,
+            )
+
+    @override_settings(MAX_ORDER_LOT=Decimal("0.05"))
+    def test_broker_minimum_above_runtime_hard_cap_is_rejected(self):
+        self.symbol_info.volume_min = Decimal("0.10")
+
+        with self.assertRaisesRegex(
+            RiskRejected,
+            "broker_min_volume_exceeds_max_order_lot",
+        ):
+            enforce_pretrade_risk(
+                self._order(suffix="broker-min-over-hard-cap"),
+                self.connector,
+                self.tick,
+                self.symbol_info,
+                self.account_info,
+            )
+
     def test_account_drawdown_uses_persistent_high_water(self):
         self.policy.max_daily_loss_pct = Decimal("100")
         self.policy.max_account_drawdown_pct = Decimal("5")

@@ -96,12 +96,25 @@ git pull origin dev
 
 ### 3. Restart Services
 ```powershell
-cd "d:\Software Projects\trading_bot\trading_bot"
-& "..\mt5_env\Scripts\Activate.ps1"
+cd "D:\Software Projects\EzScalperBot"
 
-# Start worker (background)
+# First setup only: create the project-local environment and install dependencies
+if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
+  py -3.11 -m venv .venv
+}
+& ".\.venv\Scripts\Activate.ps1"
+python -m pip install -r requirements.txt
+
+# Apply database migrations before starting workers
+python manage.py migrate
+
+# Start general worker (background)
 Start-Process -WindowStyle Hidden -FilePath python `
-  -ArgumentList "-m celery -A config worker --loglevel=info"
+  -ArgumentList "-m celery -A config worker --loglevel=info --queues=celery"
+
+# Start the only MT5-owning worker (background)
+Start-Process -WindowStyle Hidden -FilePath python `
+  -ArgumentList "-m celery -A config worker --loglevel=info --queues=mt5_execution --pool=solo --concurrency=1 --prefetch-multiplier=1"
 
 # Start beat (foreground, in new terminal)
 python -m celery -A config beat --loglevel=info

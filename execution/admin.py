@@ -250,6 +250,14 @@ class OrderAdmin(OwnedAdmin):
     
     list_display = ("id","client_order_id","bot","broker_account","symbol","side","status","created_at")
     list_filter = ("status","symbol","side")
+    readonly_fields = (
+        "execution_queued_at",
+        "mt5_worker_started_at",
+        "risk_validation_completed_at",
+        "order_send_called_at",
+        "broker_response_received_at",
+        "execution_recorded_at",
+    )
 
     def changelist_view(self, request, extra_context=None):
         from django.core.paginator import Paginator, InvalidPage
@@ -519,7 +527,7 @@ class DecisionAdmin(OwnedAdmin):
     
     list_display = ("id","bot","signal","action","reason","score","decided_at")
     list_filter = ("action",)
-    readonly_fields = ("decided_at",)
+    readonly_fields = ("evaluation_started_at", "decided_at")
 
     def changelist_view(self, request, extra_context=None):
         qs = self.get_queryset(request).select_related("bot", "signal").order_by("-decided_at")

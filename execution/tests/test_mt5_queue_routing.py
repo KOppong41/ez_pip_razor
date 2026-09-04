@@ -47,6 +47,7 @@ class MT5QueueRoutingTests(TestCase):
         apply_async.assert_called_once_with(
             args=[order.id],
             queue="mt5_execution",
+            priority=3,
         )
         order.refresh_from_db()
         self.assertEqual(order.status, "new")

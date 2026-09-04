@@ -19,23 +19,42 @@ from execution.services.daily_risk import create_account_snapshot, update_accoun
 from execution.utils.symbols import canonical_symbol
 from bots.models import Asset
 from execution.services.equity import update_equity_high_water
+from execution.services.latency import mark_order_timestamp
+from execution.task_priorities import (
+    MT5_PRIORITY_HIGH,
+    MT5_PRIORITY_LOW,
+    MT5_PRIORITY_NORMAL,
+    priority_for_order,
+)
 
 
 @shared_task(
     bind=True,
     queue="mt5_execution",
+    priority=MT5_PRIORITY_NORMAL,
     autoretry_for=(Exception,),
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
 )
 def execute_mt5_order_task(self, order_id: int):
+    mark_order_timestamp(order_id, "mt5_worker_started_at")
     order = Order.objects.select_related("broker_account", "bot").get(pk=order_id)
     dispatch_place_order(order)
     order.refresh_from_db()
     return {"order_id": order.id, "status": order.status}
 
 
-@shared_task(bind=True, queue="mt5_execution")
+def enqueue_mt5_order(order: Order, *, emergency: bool = False):
+    """Queue an order with persisted enqueue time and risk-aware priority."""
+    mark_order_timestamp(order, "execution_queued_at")
+    return execute_mt5_order_task.apply_async(
+        args=[order.id],
+        queue="mt5_execution",
+        priority=priority_for_order(order, emergency=emergency),
+    )
+
+
+@shared_task(bind=True, queue="mt5_execution", priority=MT5_PRIORITY_HIGH)
 def cancel_mt5_order_task(self, order_id: int):
     """Cancel an MT5 order inside the single process that owns the session.
 
@@ -52,6 +71,7 @@ def cancel_mt5_order_task(self, order_id: int):
 @shared_task(
     bind=True,
     queue="mt5_execution",
+    priority=MT5_PRIORITY_HIGH,
     autoretry_for=(Exception,),
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
@@ -67,7 +87,7 @@ def modify_mt5_position_task(self, broker_position_id: int, *, sl=None, tp=None)
     }
 
 
-@shared_task(bind=True, queue="mt5_execution")
+@shared_task(bind=True, queue="mt5_execution", priority=MT5_PRIORITY_LOW)
 def check_mt5_account_task(self, broker_account_id: int):
     account = BrokerAccount.objects.get(pk=broker_account_id, connector="mt5_local")
     connector = MT5Connector()
@@ -116,7 +136,7 @@ def check_mt5_account_task(self, broker_account_id: int):
         return {"connected": False, "error": str(exc)}
 
 
-@shared_task(bind=True, queue="mt5_execution")
+@shared_task(bind=True, queue="mt5_execution", priority=MT5_PRIORITY_LOW)
 def refresh_mt5_markets_task(self, broker_account_id: int):
     account = BrokerAccount.objects.get(pk=broker_account_id, connector="mt5_local")
     connector = MT5Connector()
@@ -161,7 +181,7 @@ def refresh_mt5_markets_task(self, broker_account_id: int):
     return {"refreshed": refreshed}
 
 
-@shared_task(bind=True, queue="mt5_execution")
+@shared_task(bind=True, queue="mt5_execution", priority=MT5_PRIORITY_LOW)
 def test_mt5_account_task(self, broker_account_id: int):
     """Test one account, then refresh markets only after a valid connection."""
     health = check_mt5_account_task.run(broker_account_id)
@@ -171,7 +191,7 @@ def test_mt5_account_task(self, broker_account_id: int):
     return {"health": health, "markets": markets}
 
 
-@shared_task(bind=True, queue="mt5_execution")
+@shared_task(bind=True, queue="mt5_execution", priority=MT5_PRIORITY_LOW)
 def reconcile_mt5_order_task(self, order_id: int):
     order = Order.objects.select_related("broker_account", "bot").get(pk=order_id)
     found = MT5Connector().reconcile_order(order)

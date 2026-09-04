@@ -101,12 +101,12 @@ def _get_htf(timeframe: str) -> str | None:
 logger = logging.getLogger(__name__)
 
 
-def _queue_or_dispatch_order(order: Order) -> str:
+def _queue_or_dispatch_order(order: Order, *, emergency: bool = False) -> str:
     """Keep every MT5 operation on the single serialized execution queue."""
     if getattr(order.broker_account, "connector", "mt5_local") == "mt5_local":
-        from execution.mt5_tasks import execute_mt5_order_task
+        from execution.mt5_tasks import enqueue_mt5_order
 
-        execute_mt5_order_task.apply_async(args=[order.id], queue="mt5_execution")
+        enqueue_mt5_order(order, emergency=emergency)
         return "queued"
     dispatch_place_order(order)
     return "executed"
@@ -2142,7 +2142,7 @@ def kill_switch_monitor_task(self):
             ):
                 try:
                     order, _ = create_close_order_for_position(position, account)
-                    _queue_or_dispatch_order(order)
+                    _queue_or_dispatch_order(order, emergency=True)
                     closed.append(position.broker_position_ticket)
                 except Exception:
                     task_failures_total.labels(task="kill_switch_monitor_task").inc()

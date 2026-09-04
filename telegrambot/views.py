@@ -15,6 +15,17 @@ from core.metrics import signals_ingested_total
 
 ENFORCE_SOURCE_ON_TRADES = True
 
+
+def _queue_or_dispatch_order(order):
+    """Keep MT5 work on its dedicated session-owning worker."""
+    if order.broker_account.requires_mt5_connector():
+        from execution.mt5_tasks import enqueue_mt5_order
+
+        return enqueue_mt5_order(order)
+    dispatch_place_order(order)
+    return None
+
+
 @csrf_exempt
 @api_view(["POST", "GET"])
 @permission_classes([AllowAny])
@@ -101,7 +112,7 @@ def webhook(request, secret: str):
             if getattr(decision, "action", None) == "open":
                 for order, _ in fanout_orders(decision, master_qty=None):
                     try:
-                        dispatch_place_order(order)
+                        _queue_or_dispatch_order(order)
                         orders_sent += 1
                     except Exception as oe:
                         traceback.print_exc()

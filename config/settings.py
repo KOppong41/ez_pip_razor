@@ -170,6 +170,13 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_ALWAYS_EAGER = False  # For development/testing, run tasks immediately
 CELERY_TASK_DEFAULT_QUEUE = "celery"
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_QUEUE_MAX_PRIORITY = 9
+CELERY_TASK_DEFAULT_PRIORITY = 6
+CELERY_TASK_INHERIT_PARENT_PRIORITY = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "priority_steps": [0, 3, 6, 9],
+    "queue_order_strategy": "priority",
+}
 MT5_TICK_MAX_AGE_SECONDS = int(env("MT5_TICK_MAX_AGE_SECONDS", default=120))
 ACCOUNT_RISK_OPENING_SNAPSHOT_GRACE_SECONDS = int(
     env("ACCOUNT_RISK_OPENING_SNAPSHOT_GRACE_SECONDS", default=300)
@@ -182,18 +189,24 @@ MT5_TICK_FUTURE_TOLERANCE_SECONDS = int(
 CELERY_TASK_ROUTES = {
     # Every task that can touch the process-global MetaTrader session is pinned
     # to the dedicated worker started with --pool=solo --concurrency=1.
-    "execution.tasks.monitor_positions_task": {"queue": "mt5_execution"},
-    "execution.tasks.trail_positions_task": {"queue": "mt5_execution"},
-    "execution.tasks.reconcile_daily_task": {"queue": "mt5_execution"},
-    "execution.tasks.scan_harami_for_bot": {"queue": "mt5_execution"},
-    "execution.tasks.trade_harami_for_bot": {"queue": "mt5_execution"},
-    "execution.tasks.check_broker_health_task": {"queue": "mt5_execution"},
-    "execution.tasks.run_scalper_engine_for_all_bots": {"queue": "mt5_execution"},
-    "execution.tasks.trade_scalper_strategies_for_bot": {"queue": "mt5_execution"},
-    "execution.tasks.kill_switch_monitor_task": {"queue": "mt5_execution"},
-    "execution.tasks.cancel_stale_orders_task": {"queue": "mt5_execution"},
-    "execution.tasks.reconcile_broker_positions_task": {"queue": "mt5_execution"},
-    "execution.mt5_tasks.*": {"queue": "mt5_execution"},
+    "execution.tasks.monitor_positions_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.tasks.trail_positions_task": {"queue": "mt5_execution", "priority": 3},
+    "execution.tasks.reconcile_daily_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.tasks.scan_harami_for_bot": {"queue": "mt5_execution", "priority": 6},
+    "execution.tasks.trade_harami_for_bot": {"queue": "mt5_execution", "priority": 6},
+    "execution.tasks.check_broker_health_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.tasks.run_scalper_engine_for_all_bots": {"queue": "mt5_execution", "priority": 6},
+    "execution.tasks.trade_scalper_strategies_for_bot": {"queue": "mt5_execution", "priority": 6},
+    "execution.tasks.kill_switch_monitor_task": {"queue": "mt5_execution", "priority": 0},
+    "execution.tasks.cancel_stale_orders_task": {"queue": "mt5_execution", "priority": 3},
+    "execution.tasks.reconcile_broker_positions_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.mt5_tasks.execute_mt5_order_task": {"queue": "mt5_execution", "priority": 6},
+    "execution.mt5_tasks.cancel_mt5_order_task": {"queue": "mt5_execution", "priority": 3},
+    "execution.mt5_tasks.modify_mt5_position_task": {"queue": "mt5_execution", "priority": 3},
+    "execution.mt5_tasks.check_mt5_account_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.mt5_tasks.refresh_mt5_markets_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.mt5_tasks.test_mt5_account_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.mt5_tasks.reconcile_mt5_order_task": {"queue": "mt5_execution", "priority": 9},
 }
 CELERY_BEAT_SCHEDULE = {
     "monitor-positions-every-60s": {

@@ -20,7 +20,9 @@ prometheus_client==0.22.1
 prompt_toolkit==3.0.51
 psycopg2-binary==2.9.10
 PyJWT==2.10.1
+PyYAML==6.0.1
 python-dateutil==2.9.0.post0
+pywin32==312; sys_platform == "win32"
 redis==6.4.0
 six==1.17.0
 sqlparse==0.5.3

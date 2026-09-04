@@ -72,6 +72,11 @@ class Decision(models.Model):
     reason = models.CharField(max_length=255, blank=True)
     score = models.FloatField(default=0.0)
     params = models.JSONField(default=dict)
+    evaluation_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When strategy/decision evaluation began for latency telemetry.",
+    )
     decided_at = models.DateTimeField(auto_now_add=True)
 
     def save(self, *args, **kwargs):
@@ -155,6 +160,12 @@ class Order(models.Model):
     broker_response = models.JSONField(default=dict, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    execution_queued_at = models.DateTimeField(null=True, blank=True)
+    mt5_worker_started_at = models.DateTimeField(null=True, blank=True)
+    risk_validation_completed_at = models.DateTimeField(null=True, blank=True)
+    order_send_called_at = models.DateTimeField(null=True, blank=True)
+    broker_response_received_at = models.DateTimeField(null=True, blank=True)
+    execution_recorded_at = models.DateTimeField(null=True, blank=True)
     last_error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

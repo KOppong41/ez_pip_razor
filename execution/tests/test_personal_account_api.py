@@ -49,5 +49,5 @@ class PersonalAccountApiTest(TestCase):
         self.assertEqual(response.json()["task_id"], "account-test-task")
         self.assertIn("queued_at", response.json())
         account_test.assert_called_once_with(
-            args=[self.account.id], queue="mt5_execution"
+            args=[self.account.id], queue="mt5_execution", priority=9
         )
