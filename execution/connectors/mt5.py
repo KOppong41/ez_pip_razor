@@ -1347,7 +1347,13 @@ class MT5Connector(BaseConnector):
         try:
             sinfo = mt5.symbol_info(order.symbol)
             point = Decimal(str(getattr(sinfo, "point", 0) or 0))
-            stops_level = Decimal(str(getattr(sinfo, "stops_level", 0) or 0))
+            stops_level = Decimal(
+                str(
+                    getattr(sinfo, "trade_stops_level", None)
+                    or getattr(sinfo, "stops_level", 0)
+                    or 0
+                )
+            )
             min_stop = point * stops_level
             if min_stop > 0:
                 if order.side == "buy":

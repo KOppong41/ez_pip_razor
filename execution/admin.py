@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django import forms
@@ -153,14 +154,20 @@ def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
     Return per-symbol diagnostics with last few decisions to help operators see why trades were skipped/placed.
     """
     data = []
+    window_start = timezone.now() - timedelta(hours=24)
     for sym, meta in symbols_cfg.items():
-        variants = {sym.upper()}
+        variants = {str(sym)}
         for alias in meta.get("aliases", []) or []:
             if alias:
-                variants.add(str(alias).upper())
+                variants.add(str(alias))
+        signal_symbol_query = Q()
+        asset_symbol_query = Q()
+        for variant in variants:
+            signal_symbol_query |= Q(signal__symbol__iexact=variant)
+            asset_symbol_query |= Q(asset__symbol__iexact=variant)
         decisions_data = []
         for decision in (
-            Decision.objects.filter(signal__symbol__in=variants)
+            Decision.objects.filter(signal_symbol_query)
             .select_related("signal", "bot")
             .order_by("-id")[:3]
         ):
@@ -197,13 +204,15 @@ def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
                 }
             )
         run_logs = []
+        outcome_counts = {}
+        strategy_counts = {}
         try:
             from bots.models import Bot
             from execution.models import ScalperRunLog
 
             bots = (
                 Bot.objects.select_related("asset")
-                .filter(engine_mode="scalper", asset__symbol__in=variants)
+                .filter(asset_symbol_query, engine_mode="scalper")
                 .order_by("id")
             )
             for bot in bots:
@@ -226,18 +235,56 @@ def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
                         "htf_bias": summary.get("htf_bias"),
                     }
                 )
+
+            recent_runs = ScalperRunLog.objects.filter(
+                bot__in=bots,
+                created_at__gte=window_start,
+            ).order_by("-created_at")[:1000]
+            for run in recent_runs:
+                summary = run.summary or {}
+                outcome = str(summary.get("outcome") or "unknown")
+                outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+                for event in summary.get("strategies") or []:
+                    key = (
+                        str(event.get("strategy") or "unknown"),
+                        str(event.get("action") or "unknown"),
+                        str(event.get("reason") or "unspecified"),
+                    )
+                    strategy_counts[key] = strategy_counts.get(key, 0) + 1
         except Exception:
             run_logs = []
+            outcome_counts = {}
+            strategy_counts = {}
         data.append(
             {
                 "symbol": sym,
-                "variants": sorted(variants),
+                "variants": sorted(variants, key=str.upper),
                 "exit_mode": meta.get("exit_mode", "fixed_tp"),
                 "sl_unit": (meta.get("sl_points") or {}).get("unit") or meta.get("sl_points_unit") or "points",
                 "spread_unit": meta.get("max_spread_unit") or "points",
                 "slip_unit": meta.get("max_slippage_unit") or "points",
                 "decisions": decisions_data,
                 "run_logs": run_logs,
+                "window_hours": 24,
+                "outcome_counts": [
+                    {"outcome": outcome, "count": count}
+                    for outcome, count in sorted(
+                        outcome_counts.items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                ],
+                "strategy_counts": [
+                    {
+                        "strategy": strategy,
+                        "action": action,
+                        "reason": reason,
+                        "count": count,
+                    }
+                    for (strategy, action, reason), count in sorted(
+                        strategy_counts.items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                ],
             }
         )
     return data

@@ -341,6 +341,29 @@
                     <span class="label">{% trans "Spread unit" %}</span><span>{{ diag.spread_unit }}</span>
                     <span class="label">{% trans "Slippage unit" %}</span><span>{{ diag.slip_unit }}</span>
                 </div>
+                {% if diag.outcome_counts %}
+                <div style="margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--gray-300);">
+                    <div style="color: var(--gray-400);">
+                        {% trans "Cycle outcomes" %} ({{ diag.window_hours }}h)
+                    </div>
+                    {% for row in diag.outcome_counts %}
+                        <div>{{ row.outcome }}: <strong>{{ row.count }}</strong></div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% if diag.strategy_counts %}
+                <div style="margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--gray-300);">
+                    <div style="color: var(--gray-400);">
+                        {% trans "Per-strategy outcomes" %} ({{ diag.window_hours }}h)
+                    </div>
+                    {% for row in diag.strategy_counts %}
+                        <div>
+                            {{ row.strategy }} / {{ row.action }} / {{ row.reason }}:
+                            <strong>{{ row.count }}</strong>
+                        </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
                 {% if diag.decisions %}
                 <div style="font-size: var(--text-xs); color: var(--gray-300);">
                     {% for d in diag.decisions %}
@@ -366,7 +389,7 @@
                 {% if diag.run_logs %}
                 <div style="margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--gray-300);">
                     <div style="margin-bottom: var(--space-xs); color: var(--gray-400);">
-                        {% trans "Last scalper runs (no-signal cycles only)" %}
+                        {% trans "Latest scalper run per bot" %}
                     </div>
                     {% for run in diag.run_logs %}
                         <div style="margin-bottom: var(--space-xs);">

@@ -228,7 +228,7 @@ def stop_processes(processes: list[tuple[str, subprocess.Popen[str], list[str]]]
 
 
 def backend_is_ready(base_url: str, *, timeout: float = 1.0) -> bool:
-    """Recognise this project's health response, including its 503 degraded state."""
+    """Return true only when the database and worker health checks pass."""
     try:
         response = urllib.request.urlopen(f"{base_url}/api/health/", timeout=timeout)
     except urllib.error.HTTPError as exc:
@@ -240,7 +240,12 @@ def backend_is_ready(base_url: str, *, timeout: float = 1.0) -> bool:
 
     try:
         payload = json.loads(response.read().decode("utf-8"))
-        return isinstance(payload, dict) and {"status", "db", "worker"}.issubset(payload)
+        return (
+            isinstance(payload, dict)
+            and payload.get("status") == "ok"
+            and payload.get("db") is True
+            and payload.get("worker") is True
+        )
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
     finally:
@@ -289,6 +294,10 @@ def _normalise_celery_args(value: str, expected_command: str) -> list[str]:
         args = args[2:]
     if not args or args[0] != expected_command:
         args.insert(0, expected_command)
+    if expected_command == "worker" and os.name == "nt":
+        pool_flags = {"--pool", "-P"}
+        if not any(flag in pool_flags or flag.startswith("--pool=") for flag in args):
+            args.extend(["--pool", "solo"])
     return args
 
 
@@ -363,8 +372,13 @@ def run_service(service: str, config: dict[str, Any]) -> int:
         app.worker_main(args)
         return 0
     if service == "mt5-worker":
+        mt5_config = config["celery"].get("mt5_worker") or {}
         args = _normalise_celery_args(
-            config["celery"]["mt5_worker"]["args"], "worker"
+            mt5_config.get(
+                "args",
+                "worker -l info -Q mt5_execution --pool=solo --concurrency=1 --hostname=mt5@%h",
+            ),
+            "worker",
         )
         app.worker_main(args)
         return 0

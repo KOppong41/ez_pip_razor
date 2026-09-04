@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -461,8 +462,10 @@ def personal_logs(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def personal_backtesting(request):
-    """Expose persisted engine/backtest evidence without running MT5 in a request."""
-    queryset = ScalperRunLog.objects.select_related("bot").order_by("-created_at")
+    """Expose the last 24 hours of persisted strategy-run evidence."""
+    queryset = ScalperRunLog.objects.select_related("bot").filter(
+        created_at__gte=timezone.now() - timedelta(hours=24)
+    ).order_by("-created_at")
     if not request.user.is_superuser:
         queryset = queryset.filter(bot__owner=request.user)
     return Response(

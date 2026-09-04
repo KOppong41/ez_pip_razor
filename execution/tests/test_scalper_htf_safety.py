@@ -9,6 +9,7 @@ from django.utils import timezone
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.models import JournalEntry
+from execution.services.brokers import BrokerSymbolConstraints
 from execution.tasks import trade_scalper_strategies_for_bot
 
 
@@ -102,3 +103,39 @@ class ScalperHtfSafetyTest(TestCase):
                 context__reason="htf_bias_unavailable",
             ).exists()
         )
+
+    @patch("execution.tasks.build_scalper_config")
+    @patch("execution.tasks.get_broker_symbol_constraints")
+    @patch("execution.tasks.bot_is_available_for_trading", return_value=True)
+    @patch("execution.tasks.get_market_status_for_bot")
+    def test_missing_broker_constraints_skip_before_market_analysis(
+        self,
+        market_status,
+        _available,
+        constraints,
+        scalper_config,
+    ):
+        market_status.return_value = SimpleNamespace(is_open=True, reason="test")
+        constraints.return_value = BrokerSymbolConstraints()
+        profile = SimpleNamespace(symbol="EURUSD", enabled_strategies=["harami"])
+        scalper_config.return_value = SimpleNamespace(
+            default_strategy_profile="profile",
+            strategy_profiles={"profile": profile},
+        )
+
+        result = trade_scalper_strategies_for_bot.run(
+            self.bot.id,
+            timeframe="1m",
+            n_bars=25,
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "skipped", "reason": "broker_constraints_unavailable"},
+        )
+        event = JournalEntry.objects.get(
+            bot=self.bot,
+            event_type="scalper_engine_run",
+            context__reason="broker_constraints_unavailable",
+        )
+        self.assertIn("point", event.context["missing_constraints"])

@@ -32,6 +32,7 @@ from execution.services.brokers import (
     dispatch_cancel_order,
     dispatch_place_order,
     get_broker_symbol_constraints,
+    missing_entry_constraint_fields,
 )
 from execution.services.order_guard import GuardInputs, apply_order_guards
 from execution.services.decision import make_decision_from_signal
@@ -200,13 +201,28 @@ def _session_label(moment=None) -> str:
     return "overnight"
 
 
-def _tick_timestamp_is_stale(tick_dt: datetime, *, now: datetime | None = None) -> bool:
-    """Validate freshness while tolerating bounded MT5 broker-clock skew."""
+def _tick_timestamp_problem(
+    tick_dt: datetime,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Return the fail-closed reason for an invalid MT5 tick timestamp."""
     now = now or timezone.now()
     age_seconds = (now - tick_dt).total_seconds()
     max_age = int(getattr(settings, "MT5_TICK_MAX_AGE_SECONDS", 120))
-    future_tolerance = int(getattr(settings, "MT5_TICK_FUTURE_TOLERANCE_SECONDS", 7200))
-    return age_seconds > max_age or age_seconds < -future_tolerance
+    future_tolerance = int(
+        getattr(settings, "MT5_TICK_FUTURE_TOLERANCE_SECONDS", 120)
+    )
+    if age_seconds > max_age:
+        return "market_data_stale"
+    if age_seconds < -future_tolerance:
+        return "broker_clock_skew"
+    return None
+
+
+def _tick_timestamp_is_stale(tick_dt: datetime, *, now: datetime | None = None) -> bool:
+    """Backward-compatible boolean wrapper for tick timestamp validation."""
+    return _tick_timestamp_problem(tick_dt, now=now) is not None
 
 
 def _analyze_htf_bias(candles) -> dict | None:
@@ -819,6 +835,12 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
 
     market_status = get_market_status_for_bot(bot, use_mt5_probe=True)
     if market_status and not market_status.is_open:
+        if market_status.reason == "clock_skew":
+            _log_skip(
+                "broker_clock_skew",
+                {"market_details": market_status.details or {}},
+            )
+            return {"status": "skipped", "reason": "broker_clock_skew"}
         maybe_pause_bot_for_market(bot, market_status)
         logger.info("[EngineTrade] bot=%s symbol=%s skipped: market_closed (%s)", bot.id, getattr(bot.asset, "symbol", None), market_status.reason)
         return {"status": "skipped", "reason": f"market_closed:{market_status.reason}"}
@@ -1468,7 +1490,17 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         )
     timeframe = effective_timeframe
 
-    broker_constraints = get_broker_symbol_constraints(broker_account, getattr(bot.asset, "symbol", None))
+    broker_constraints = get_broker_symbol_constraints(
+        broker_account,
+        getattr(bot.asset, "symbol", None),
+    )
+    missing_constraints = missing_entry_constraint_fields(broker_constraints)
+    if missing_constraints:
+        _log_skip(
+            "broker_constraints_unavailable",
+            {"missing_constraints": list(missing_constraints)},
+        )
+        return {"status": "skipped", "reason": "broker_constraints_unavailable"}
     broker_min_stop_points = broker_constraints.stops_level_points or Decimal("0")
     broker_point = broker_constraints.point
     broker_lot_step = broker_constraints.lot_step
@@ -1568,12 +1600,17 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 return {"status": "skipped", "reason": "market_data_unavailable"}
             tick_dt = datetime.fromtimestamp(float(tick_seconds), tz=dt_timezone.utc)
             seconds_since_tick = (timezone.now() - tick_dt).total_seconds()
-            if _tick_timestamp_is_stale(tick_dt):
+            timestamp_problem = _tick_timestamp_problem(tick_dt)
+            if timestamp_problem:
                 _log_skip(
-                    "market_data_stale",
-                    {"age_seconds": int(seconds_since_tick), "strategy_profile": strategy_profile_key},
+                    timestamp_problem,
+                    {
+                        "age_seconds": int(seconds_since_tick),
+                        "clock_skew_seconds": max(0, int(-seconds_since_tick)),
+                        "strategy_profile": strategy_profile_key,
+                    },
                 )
-                return {"status": "skipped", "reason": "market_data_stale"}
+                return {"status": "skipped", "reason": timestamp_problem}
         except Exception as exc:
             logger.warning(
                 "[ScalperTrade] broker market data unavailable bot=%s symbol=%s: %s",
@@ -1629,8 +1666,12 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         "max_lot": str(broker_constraints.max_lot) if broker_constraints.max_lot is not None else None,
         "lot_step": str(broker_lot_step) if broker_lot_step is not None else None,
         "point": str(broker_point) if broker_point is not None else None,
-        "stops_level_points": str(broker_min_stop_points) if broker_min_stop_points else None,
-        "freeze_level_points": str(broker_constraints.freeze_level_points) if broker_constraints.freeze_level_points else None,
+        "stops_level_points": str(broker_constraints.stops_level_points),
+        "freeze_level_points": (
+            str(broker_constraints.freeze_level_points)
+            if broker_constraints.freeze_level_points is not None
+            else None
+        ),
         "max_deviation": str(broker_constraints.max_deviation) if broker_constraints.max_deviation is not None else None,
     }
     market_snapshot = {

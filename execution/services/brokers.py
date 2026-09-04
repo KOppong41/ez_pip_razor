@@ -9,6 +9,9 @@ from execution.services.journal import log_journal_event
 from execution.services.market_hours import get_market_status
 from dataclasses import dataclass
 from functools import lru_cache
+import time
+
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,36 @@ class BrokerSymbolConstraints:
     max_deviation: Decimal | None = None
 
 
+ENTRY_CONSTRAINT_FIELDS = (
+    "point",
+    "min_lot",
+    "max_lot",
+    "lot_step",
+    "stops_level_points",
+)
+
+
+def missing_entry_constraint_fields(constraints: BrokerSymbolConstraints) -> tuple[str, ...]:
+    """Return entry-critical fields that the broker did not provide.
+
+    A numeric zero is a valid broker stop level and must not be treated as
+    missing. Point and lot values must be positive before an entry can be
+    risk-sized safely.
+    """
+    missing = []
+    for field in ENTRY_CONSTRAINT_FIELDS:
+        value = getattr(constraints, field, None)
+        if value is None:
+            missing.append(field)
+        elif field != "stops_level_points" and value <= 0:
+            missing.append(field)
+    return tuple(missing)
+
+
+def _optional_decimal(value) -> Decimal | None:
+    return None if value is None else Decimal(str(value))
+
+
 def get_broker_symbol_constraints(broker_account, symbol: str) -> BrokerSymbolConstraints:
     """
     Fetch broker-level constraints (min lot, step, stops level, freeze level, deviation) for the given symbol.
@@ -84,37 +117,75 @@ def get_broker_symbol_constraints(broker_account, symbol: str) -> BrokerSymbolCo
     if not broker_account or not symbol:
         return BrokerSymbolConstraints()
 
-    code = normalize_broker_code(getattr(broker_account, "broker", "") or "")
+    explicit_connector = getattr(broker_account, "connector", "") or ""
+    code = explicit_connector or normalize_broker_code(
+        getattr(broker_account, "broker", "") or ""
+    )
     account_id = getattr(broker_account, "id", None)
-    symbol = symbol.upper()
-    return _get_broker_constraints_cached(account_id, code, symbol)
+    # MT5 symbol names are case-sensitive. Broker suffixes such as the trailing
+    # ``m`` in XAUUSDm must be preserved exactly.
+    symbol = str(symbol).strip()
+    cache_seconds = max(
+        1,
+        int(getattr(settings, "BROKER_CONSTRAINT_CACHE_SECONDS", 60)),
+    )
+    cache_bucket = int(time.monotonic() // cache_seconds)
+    try:
+        return _get_broker_constraints_cached(
+            account_id,
+            code,
+            symbol,
+            cache_bucket,
+        )
+    except Exception as exc:
+        # Exceptions are raised inside the cached function, so failures are not
+        # retained as successful cache entries.
+        logger.warning(
+            "Broker constraints unavailable account=%s connector=%s symbol=%s: %s",
+            account_id,
+            code,
+            symbol,
+            exc,
+        )
+        return BrokerSymbolConstraints()
 
 
 @lru_cache(maxsize=256)
-def _get_broker_constraints_cached(account_id, code: str, symbol: str) -> BrokerSymbolConstraints:
-    """Cached lookup to reduce repeated symbol_info calls."""
+def _get_broker_constraints_cached(
+    account_id,
+    code: str,
+    symbol: str,
+    _cache_bucket: int,
+) -> BrokerSymbolConstraints:
+    """Cache successful MT5 lookups for one configured time bucket."""
     if code in {"mt5_local", "mt5", "exness_mt5", "icmarket_mt5"}:
-        try:
-            from brokers.models import BrokerAccount
-            from execution.connectors.mt5 import is_mt5_available
-            if not is_mt5_available():
-                return BrokerSymbolConstraints()
-            account = BrokerAccount.objects.get(pk=account_id)
-            sinfo = MT5Connector().symbol_info_for_account(account, symbol)
-            if not sinfo:
-                return BrokerSymbolConstraints()
-            return BrokerSymbolConstraints(
-                min_lot=Decimal(str(getattr(sinfo, "volume_min", None))) if getattr(sinfo, "volume_min", None) else None,
-                max_lot=Decimal(str(getattr(sinfo, "volume_max", None))) if getattr(sinfo, "volume_max", None) else None,
-                lot_step=Decimal(str(getattr(sinfo, "volume_step", None))) if getattr(sinfo, "volume_step", None) else None,
-                point=Decimal(str(getattr(sinfo, "point", None))) if getattr(sinfo, "point", None) else None,
-                tick_size=Decimal(str(getattr(sinfo, "trade_tick_size", None))) if getattr(sinfo, "trade_tick_size", None) else None,
-                stops_level_points=Decimal(str(getattr(sinfo, "stops_level", None))) if getattr(sinfo, "stops_level", None) else None,
-                freeze_level_points=Decimal(str(getattr(sinfo, "freeze_level", None))) if getattr(sinfo, "freeze_level", None) else None,
-                max_deviation=Decimal("20"),  # keep aligned with mt5 connector default
-            )
-        except Exception:
-            return BrokerSymbolConstraints()
+        from brokers.models import BrokerAccount
+        from execution.connectors.mt5 import is_mt5_available
+
+        if not is_mt5_available():
+            raise RuntimeError("MetaTrader5 Python package is unavailable")
+        account = BrokerAccount.objects.get(pk=account_id)
+        sinfo = MT5Connector().symbol_info_for_account(account, symbol)
+        if not sinfo:
+            raise RuntimeError("MT5 symbol_info returned no data")
+
+        stops_level = getattr(sinfo, "trade_stops_level", None)
+        if stops_level is None:
+            stops_level = getattr(sinfo, "stops_level", None)
+        freeze_level = getattr(sinfo, "trade_freeze_level", None)
+        if freeze_level is None:
+            freeze_level = getattr(sinfo, "freeze_level", None)
+
+        return BrokerSymbolConstraints(
+            min_lot=_optional_decimal(getattr(sinfo, "volume_min", None)),
+            max_lot=_optional_decimal(getattr(sinfo, "volume_max", None)),
+            lot_step=_optional_decimal(getattr(sinfo, "volume_step", None)),
+            point=_optional_decimal(getattr(sinfo, "point", None)),
+            tick_size=_optional_decimal(getattr(sinfo, "trade_tick_size", None)),
+            stops_level_points=_optional_decimal(stops_level),
+            freeze_level_points=_optional_decimal(freeze_level),
+            max_deviation=Decimal("20"),  # keep aligned with mt5 connector default
+        )
 
     # Placeholder for other connectors (ctrader/exness_web) when their constraint APIs are added.
     return BrokerSymbolConstraints()

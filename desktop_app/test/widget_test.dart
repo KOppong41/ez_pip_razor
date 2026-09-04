@@ -121,8 +121,15 @@ class FakeApiClient extends ApiClient {
           'session': 'london',
           'created_at': '2026-08-26T12:30:00Z',
           'summary': {
-            'market': {'last_close': '2851.96', 'tick': 68},
-            'volatility': {'bar_range': '1.23', 'atr_points': '3.47'},
+            'market': {
+              'last_close': '2851.96',
+              'tick': {'bid': 2851.95, 'ask': 2851.96},
+              'volatility': {
+                'bar_range': '1.23',
+                'atr_price': '3.47',
+                'tick_volume': 68,
+              },
+            },
             'strategies': [
               {
                 'strategy': 'trend_pullback',
@@ -390,6 +397,7 @@ void main() {
     await tester.tap(find.text('Backtesting'));
     await tester.pumpAndSettle();
     expect(find.text('STRATEGY LAB'), findsOneWidget);
+    expect(find.text('24-hour skip counts'), findsOneWidget);
     expect(find.text('Strategy decisions (2)'), findsOneWidget);
     expect(tester.takeException(), isNull);
 

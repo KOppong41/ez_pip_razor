@@ -694,6 +694,7 @@ class _DesktopShellState extends State<DesktopShell> {
     1 => MarketsPage(client: widget.client),
     2 => BotsPage(client: widget.client),
     3 => PositionsPage(client: widget.client),
+    4 => OrdersPage(client: widget.client),
     5 => HistoryPage(client: widget.client),
     6 => RiskPage(client: widget.client),
     7 => BacktestingPage(client: widget.client),
@@ -2417,6 +2418,245 @@ class _ContextPill extends StatelessWidget {
   );
 }
 
+class OrdersPage extends StatefulWidget {
+  const OrdersPage({super.key, required this.client});
+  final ApiClient client;
+
+  @override
+  State<OrdersPage> createState() => _OrdersPageState();
+}
+
+class _OrdersPageState extends State<OrdersPage> {
+  late Future<dynamic> future = widget.client.get('/api/orders/');
+  final searchController = TextEditingController();
+  String statusFilter = 'all';
+  String intentFilter = 'all';
+  String sideFilter = 'all';
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> reload() async {
+    final next = widget.client.get('/api/orders/');
+    setState(() => future = next);
+    await next;
+  }
+
+  List<Map<String, dynamic>> _filteredRows(dynamic data) {
+    dynamic raw = data;
+    if (raw is Map && raw['results'] is List) raw = raw['results'];
+    final rows = raw is List
+        ? raw.whereType<Map>().map((row) => Map<String, dynamic>.from(row))
+        : <Map<String, dynamic>>[];
+    final query = searchController.text.trim().toLowerCase();
+    return rows.where((row) {
+      final matchesStatus =
+          statusFilter == 'all' || '${row['status']}' == statusFilter;
+      final matchesIntent =
+          intentFilter == 'all' || '${row['intent']}' == intentFilter;
+      final matchesSide = sideFilter == 'all' || '${row['side']}' == sideFilter;
+      final matchesQuery =
+          query.isEmpty ||
+          [
+            row['symbol'],
+            row['client_order_id'],
+            row['status'],
+            row['intent'],
+            row['side'],
+          ].any((value) => '$value'.toLowerCase().contains(query));
+      return matchesStatus && matchesIntent && matchesSide && matchesQuery;
+    }).toList();
+  }
+
+  Widget _filter({
+    required String value,
+    required List<String> values,
+    required ValueChanged<String?> onChanged,
+  }) => SizedBox(
+    width: 150,
+    child: DropdownButtonFormField<String>(
+      initialValue: value,
+      isDense: true,
+      decoration: const InputDecoration(labelText: 'Filter'),
+      items: [
+        for (final option in values)
+          DropdownMenuItem(value: option, child: Text(label(option))),
+      ],
+      onChanged: onChanged,
+    ),
+  );
+
+  Widget _orderCard(Map<String, dynamic> row) {
+    final timestamp = row['submitted_at'] ?? row['created_at'];
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+        child: Row(
+          children: [
+            Container(
+              width: 5,
+              height: 42,
+              decoration: BoxDecoration(
+                color: statusColor(row),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            const SizedBox(width: 14),
+            SizedBox(
+              width: 150,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${row['symbol'] ?? 'Order ${row['id'] ?? '—'}'}',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    formatDateTime(timestamp),
+                    style: const TextStyle(
+                      color: muted,
+                      fontFamily: 'Consolas',
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Wrap(
+                spacing: 18,
+                runSpacing: 5,
+                children: [
+                  Text(
+                    'CLIENT ORDER ID  ${display(row['client_order_id'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                  Text(
+                    'INTENT  ${display(row['intent'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                  Text(
+                    'STATUS  ${display(row['status'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                  Text(
+                    'SIDE  ${display(row['side'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                  Text(
+                    'QTY  ${display(row['qty'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                  Text(
+                    'PRICE  ${display(row['price'] ?? row['actual_fill_price'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                  Text(
+                    'SL  ${display(row['sl'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                  Text(
+                    'TP  ${display(row['tp'])}',
+                    style: const TextStyle(color: muted, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder(
+    future: future,
+    builder: (context, snapshot) {
+      if (snapshot.hasError) {
+        return Empty(icon: Icons.cloud_off, text: snapshot.error.toString());
+      }
+      if (!snapshot.hasData) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      final rows = _filteredRows(snapshot.data);
+      return Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(28, 18, 28, 8),
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                SizedBox(
+                  width: 260,
+                  child: TextField(
+                    controller: searchController,
+                    decoration: const InputDecoration(
+                      labelText: 'Search orders',
+                      prefixIcon: Icon(Icons.search_rounded),
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+                _filter(
+                  value: statusFilter,
+                  values: const [
+                    'all',
+                    'new',
+                    'ack',
+                    'filled',
+                    'part_filled',
+                    'canceled',
+                    'rejected',
+                    'error',
+                  ],
+                  onChanged: (value) =>
+                      setState(() => statusFilter = value ?? 'all'),
+                ),
+                _filter(
+                  value: intentFilter,
+                  values: const ['all', 'entry', 'exit', 'modify'],
+                  onChanged: (value) =>
+                      setState(() => intentFilter = value ?? 'all'),
+                ),
+                _filter(
+                  value: sideFilter,
+                  values: const ['all', 'buy', 'sell'],
+                  onChanged: (value) =>
+                      setState(() => sideFilter = value ?? 'all'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: reload,
+                  icon: const Icon(Icons.refresh_rounded, size: 17),
+                  label: const Text('Reload'),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: rows.isEmpty
+                ? const Empty(
+                    icon: Icons.inbox_outlined,
+                    text: 'No orders match these filters.',
+                  )
+                : ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(14, 8, 14, 24),
+                    itemCount: rows.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 9),
+                    itemBuilder: (_, index) => _orderCard(rows[index]),
+                  ),
+          ),
+        ],
+      );
+    },
+  );
+}
+
 Map<String, String> _logHighlights(Map<String, dynamic> context) {
   const keys = [
     'outcome',
@@ -3615,29 +3855,7 @@ class _MarketsPageState extends State<MarketsPage> {
                     text:
                         'The platform asset catalogue is empty. Contact the platform administrator.',
                   )
-                : LayoutBuilder(
-                    builder: (_, constraints) {
-                      final columns = constraints.maxWidth >= 1250
-                          ? 3
-                          : constraints.maxWidth >= 760
-                          ? 2
-                          : 1;
-                      return GridView.builder(
-                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 28),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: columns,
-                          crossAxisSpacing: 10,
-                          mainAxisSpacing: 10,
-                          mainAxisExtent: 150,
-                        ),
-                        itemCount: markets.length,
-                        itemBuilder: (_, index) => _MarketAssetCard(
-                          market: markets[index],
-                          onChanged: (value) => toggle(markets[index], value),
-                        ),
-                      );
-                    },
-                  ),
+                : _MarketTable(markets: markets, onChanged: toggle),
           ),
         ],
       );
@@ -3645,6 +3863,82 @@ class _MarketsPageState extends State<MarketsPage> {
   );
 }
 
+class _MarketTable extends StatelessWidget {
+  const _MarketTable({required this.markets, required this.onChanged});
+  final List<Map<String, dynamic>> markets;
+  final Future<void> Function(Map<String, dynamic>, bool) onChanged;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    clipBehavior: Clip.antiAlias,
+    margin: const EdgeInsets.fromLTRB(24, 0, 24, 28),
+    child: SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: DataTable(
+        columnSpacing: 28,
+        headingRowHeight: 42,
+        dataRowMinHeight: 62,
+        dataRowMaxHeight: 72,
+        columns: const [
+          DataColumn(label: Text('SYMBOL')),
+          DataColumn(label: Text('STATUS')),
+          DataColumn(label: Text('BROKER SYMBOL')),
+          DataColumn(label: Text('BID')),
+          DataColumn(label: Text('ASK')),
+          DataColumn(label: Text('SPREAD')),
+          DataColumn(label: Text('REC. LOT')),
+          DataColumn(label: Text('ENABLED')),
+        ],
+        rows: [for (final market in markets) _row(market)],
+      ),
+    ),
+  );
+
+  DataRow _row(Map<String, dynamic> market) {
+    final status = '${market['trading_status'] ?? 'not_synced'}'.toLowerCase();
+    final accent = status == 'open'
+        ? green
+        : status == 'closed'
+        ? amber
+        : status == 'unavailable'
+        ? danger
+        : muted;
+    final enabled = market['enabled'] == true;
+    return DataRow(
+      cells: [
+        DataCell(
+          SizedBox(
+            width: 130,
+            child: Text(
+              '${market['canonical_symbol'] ?? market['symbol'] ?? '—'}',
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        ),
+        DataCell(
+          _StatusPill(
+            text: status.replaceAll('_', ' ').toUpperCase(),
+            color: accent,
+          ),
+        ),
+        DataCell(Text(display(market['broker_symbol']))),
+        DataCell(Text(compactNumber(market['bid']))),
+        DataCell(Text(compactNumber(market['ask']))),
+        DataCell(Text(compactNumber(market['spread']))),
+        DataCell(Text(compactNumber(market['recommended_qty']))),
+        DataCell(
+          Switch(
+            value: enabled,
+            onChanged: (value) => onChanged(market, value),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ignore: unused_element
 class _MarketAssetCard extends StatelessWidget {
   const _MarketAssetCard({required this.market, required this.onChanged});
   final Map<String, dynamic> market;
@@ -3952,46 +4246,188 @@ class _BacktestingPageState extends State<BacktestingPage> {
       final runs = listOfMaps(snapshot.data);
       return RefreshIndicator(
         onRefresh: reload,
-        child: ListView.builder(
+        child: ListView(
           padding: const EdgeInsets.fromLTRB(24, 22, 24, 30),
-          itemCount: runs.isEmpty ? 2 : runs.length + 1,
-          itemBuilder: (context, index) {
-            if (index == 0) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 14),
-                child: _WorkspaceHeader(
-                  eyebrow: 'STRATEGY LAB',
-                  title: 'Backtest evidence',
-                  description:
-                      'Review historical engine decisions, market context and strategy outcomes.',
-                  badge: '${runs.length} RUNS',
-                  action: OutlinedButton.icon(
-                    onPressed: reload,
-                    icon: const Icon(Icons.refresh_rounded, size: 17),
-                    label: const Text('Reload results'),
-                  ),
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: _WorkspaceHeader(
+                eyebrow: 'STRATEGY LAB',
+                title: 'Strategy run evidence',
+                description:
+                    'Review demo/live engine cycles and strategy outcomes.',
+                badge: '${runs.length} RUNS',
+                action: OutlinedButton.icon(
+                  onPressed: reload,
+                  icon: const Icon(Icons.refresh_rounded, size: 17),
+                  label: const Text('Reload results'),
                 ),
-              );
-            }
-            if (runs.isEmpty) {
-              return const _EmptyWorkspace(
+              ),
+            ),
+            if (runs.isEmpty)
+              const _EmptyWorkspace(
                 icon: Icons.science_outlined,
-                title: 'No backtest evidence yet',
+                title: 'No strategy-run evidence yet',
                 text:
-                    'Run a strategy simulation to populate market snapshots and decision results.',
-              );
-            }
-            return Padding(
-              padding: EdgeInsets.only(bottom: index == runs.length ? 0 : 10),
-              child: _BacktestRunCard(run: runs[index - 1]),
-            );
-          },
+                    'Run the scalper on demo to populate market snapshots and decision results.',
+              )
+            else
+              _BacktestRunTable(runs: runs),
+          ],
         ),
       );
     },
   );
 }
 
+class _BacktestRunTable extends StatelessWidget {
+  const _BacktestRunTable({required this.runs});
+  final List<Map<String, dynamic>> runs;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    clipBehavior: Clip.antiAlias,
+    child: SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: DataTable(
+        columnSpacing: 28,
+        headingRowHeight: 42,
+        dataRowMinHeight: 58,
+        dataRowMaxHeight: 72,
+        columns: const [
+          DataColumn(label: Text('BOT / SYMBOL')),
+          DataColumn(label: Text('TIME')),
+          DataColumn(label: Text('TF / SESSION')),
+          DataColumn(label: Text('LAST CLOSE')),
+          DataColumn(label: Text('ACTIONABLE')),
+          DataColumn(label: Text('SKIPPED')),
+          DataColumn(label: Text('OUTCOME')),
+          DataColumn(label: Text('STRATEGIES')),
+        ],
+        rows: [for (final run in runs) _row(run)],
+      ),
+    ),
+  );
+
+  DataRow _row(Map<String, dynamic> run) {
+    final summary = mapOf(run['summary']);
+    final market = mapOf(summary['market']);
+    final strategies = listOfMaps(summary['strategies']);
+    final skipped = strategies.where((item) => item['action'] == 'skip').length;
+    final actionable = strategies.length - skipped;
+    final outcome = '${summary['outcome'] ?? 'unknown'}';
+    final outcomeColor = outcome == 'orders_sent' ? green : muted;
+    final strategyText = strategies
+        .map((item) => label('${item['strategy'] ?? 'unknown'}'))
+        .join(', ');
+    return DataRow(
+      cells: [
+        DataCell(
+          SizedBox(
+            width: 150,
+            child: Text(
+              '${run['bot__name'] ?? 'Bot ${run['bot_id'] ?? '—'}'}',
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        ),
+        DataCell(Text(formatDateTime(run['created_at']))),
+        DataCell(Text('${run['timeframe'] ?? '—'} / ${run['session'] ?? '—'}')),
+        DataCell(Text(compactNumber(market['last_close']))),
+        DataCell(Text('$actionable', style: const TextStyle(color: green))),
+        DataCell(Text('$skipped', style: const TextStyle(color: muted))),
+        DataCell(
+          Text(
+            label(outcome),
+            style: TextStyle(color: outcomeColor, fontWeight: FontWeight.w700),
+          ),
+        ),
+        DataCell(
+          SizedBox(
+            width: 230,
+            child: Text(
+              strategyText.isEmpty ? '—' : strategyText,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: muted),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ignore: unused_element
+class _StrategyOutcomeSummary extends StatelessWidget {
+  const _StrategyOutcomeSummary({required this.runs});
+  final List<Map<String, dynamic>> runs;
+
+  @override
+  Widget build(BuildContext context) {
+    final counts = <String, int>{};
+    for (final run in runs) {
+      final summary = mapOf(run['summary']);
+      for (final event in listOfMaps(summary['strategies'])) {
+        final action = '${event['action'] ?? 'unknown'}'.toLowerCase();
+        if (action != 'skip') continue;
+        final strategy = label('${event['strategy'] ?? 'unknown strategy'}');
+        final reason = label('${event['reason'] ?? 'unspecified'}');
+        final key = '$strategy / $reason';
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+    }
+    final rows = counts.entries.toList()
+      ..sort((a, b) {
+        final byCount = b.value.compareTo(a.value);
+        return byCount != 0 ? byCount : a.key.compareTo(b.key);
+      });
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              '24-hour skip counts',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Aggregated from the ${runs.length} most recent retained runs.',
+              style: const TextStyle(color: muted, fontSize: 10),
+            ),
+            const SizedBox(height: 10),
+            if (rows.isEmpty)
+              const Text(
+                'No per-strategy skips were recorded.',
+                style: TextStyle(color: muted, fontSize: 10),
+              )
+            else
+              for (final row in rows)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          row.key,
+                          style: const TextStyle(fontSize: 10),
+                        ),
+                      ),
+                      _StatusPill(text: '${row.value}', color: muted),
+                    ],
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ignore: unused_element
 class _BacktestRunCard extends StatelessWidget {
   const _BacktestRunCard({required this.run});
   final Map<String, dynamic> run;
@@ -4000,7 +4436,10 @@ class _BacktestRunCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final summary = mapOf(run['summary']);
     final market = mapOf(summary['market']);
-    final volatility = mapOf(summary['volatility']);
+    final nestedVolatility = mapOf(market['volatility']);
+    final volatility = nestedVolatility.isNotEmpty
+        ? nestedVolatility
+        : mapOf(summary['volatility']);
     final strategies = listOfMaps(summary['strategies']);
     final skipped = strategies.where((row) => row['action'] == 'skip').length;
     final actionable = strategies.length - skipped;
@@ -4087,11 +4526,20 @@ class _BacktestRunCard extends StatelessWidget {
                     (constraints.maxWidth - ((columns - 1) * 8)) / columns;
                 final metrics = [
                   ('LAST CLOSE', compactNumber(market['last_close']), blue),
-                  ('TICK VOLUME', compactNumber(market['tick']), muted),
+                  (
+                    'TICK VOLUME',
+                    compactNumber(
+                      volatility['tick_volume'] ??
+                          (market['tick'] is Map ? null : market['tick']),
+                    ),
+                    muted,
+                  ),
                   ('BAR RANGE', compactNumber(volatility['bar_range']), amber),
                   (
-                    'ATR POINTS',
-                    compactNumber(volatility['atr_points']),
+                    'ATR PRICE',
+                    compactNumber(
+                      volatility['atr_price'] ?? volatility['atr_points'],
+                    ),
                     amber,
                   ),
                   ('ACTIONABLE', '$actionable', green),
@@ -4148,6 +4596,7 @@ class _BacktestRunCard extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 class _BacktestMetric extends StatelessWidget {
   const _BacktestMetric({
     required this.label,
@@ -4195,6 +4644,7 @@ class _BacktestMetric extends StatelessWidget {
   );
 }
 
+// ignore: unused_element
 class _BacktestStrategyRow extends StatelessWidget {
   const _BacktestStrategyRow({required this.strategy});
   final Map<String, dynamic> strategy;
@@ -4819,25 +5269,25 @@ class _RiskPageState extends State<RiskPage> {
               'risk_per_trade_pct',
               'Risk per trade',
               suffix: '%',
-              help: 'Equity at risk on one entry',
+              help: 'Maximum equity risked by each new entry',
             ),
             _riskInput(
               'max_daily_loss_pct',
               'Maximum daily loss',
               suffix: '%',
-              help: 'Stops new entries for the day',
+              help: 'Stops new entries after this daily equity loss',
             ),
             _riskInput(
               'max_account_drawdown_pct',
               'Maximum account drawdown',
               suffix: '%',
-              help: 'Hard account-level guardrail',
+              help: 'Stops new entries after this peak-to-equity decline',
             ),
             _riskInput(
               'stop_after_daily_profit_pct',
               'Daily profit lock',
               suffix: '%',
-              help: '0 disables the profit lock',
+              help: 'Stops new entries at this daily profit; 0 disables it',
             ),
           ],
         ),
@@ -4847,10 +5297,27 @@ class _RiskPageState extends State<RiskPage> {
           title: 'Exposure limits',
           description: 'Control position size and trading frequency.',
           fields: [
-            _riskInput('max_lot', 'Maximum lot size', suffix: 'lots'),
-            _riskInput('max_positions', 'Maximum open positions'),
-            _riskInput('max_positions_per_symbol', 'Positions per symbol'),
-            _riskInput('max_entry_trades_per_day', 'Entry trades per day'),
+            _riskInput(
+              'max_lot',
+              'Maximum lot size',
+              suffix: 'lots',
+              help: 'Hard cap on the volume of one order',
+            ),
+            _riskInput(
+              'max_positions',
+              'Maximum open positions',
+              help: 'Account-wide limit for simultaneous positions',
+            ),
+            _riskInput(
+              'max_positions_per_symbol',
+              'Positions per symbol',
+              help: 'Maximum simultaneous positions for one symbol',
+            ),
+            _riskInput(
+              'max_entry_trades_per_day',
+              'Entry trades per day',
+              help: 'Maximum number of filled entry trades each day',
+            ),
           ],
         ),
         const SizedBox(height: 10),
@@ -4859,11 +5326,17 @@ class _RiskPageState extends State<RiskPage> {
           title: 'Execution quality',
           description: 'Reject orders when broker conditions are unfavorable.',
           fields: [
-            _riskInput('max_spread_points', 'Maximum spread', suffix: 'points'),
+            _riskInput(
+              'max_spread_points',
+              'Maximum spread',
+              suffix: 'points',
+              help: 'Rejects entries when the broker spread is wider',
+            ),
             _riskInput(
               'deviation_points',
               'Allowed deviation',
               suffix: 'points',
+              help: 'Maximum accepted execution price deviation',
             ),
           ],
         ),

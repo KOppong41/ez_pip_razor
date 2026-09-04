@@ -173,6 +173,9 @@ class BackendManager {
       final body = await utf8.decoder.bind(response).join();
       final value = jsonDecode(body);
       return value is Map &&
+          value['status'] == 'ok' &&
+          value['db'] == true &&
+          value['worker'] == true &&
           value.containsKey('status') &&
           value.containsKey('db') &&
           value.containsKey('worker');

@@ -178,13 +178,16 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     "queue_order_strategy": "priority",
 }
 MT5_TICK_MAX_AGE_SECONDS = int(env("MT5_TICK_MAX_AGE_SECONDS", default=120))
+BROKER_CONSTRAINT_CACHE_SECONDS = int(
+    env("BROKER_CONSTRAINT_CACHE_SECONDS", default=60)
+)
 ACCOUNT_RISK_OPENING_SNAPSHOT_GRACE_SECONDS = int(
     env("ACCOUNT_RISK_OPENING_SNAPSHOT_GRACE_SECONDS", default=300)
 )
-# Some MT5 brokers expose tick epochs in broker-server time rather than UTC.
-# Accept a bounded future offset while still rejecting clearly invalid clocks.
+# MT5 documents tick epochs as UTC. Treat material future timestamps as clock
+# skew rather than accepting a broker/server timezone offset.
 MT5_TICK_FUTURE_TOLERANCE_SECONDS = int(
-    env("MT5_TICK_FUTURE_TOLERANCE_SECONDS", default=7200)
+    env("MT5_TICK_FUTURE_TOLERANCE_SECONDS", default=120)
 )
 CELERY_TASK_ROUTES = {
     # Every task that can touch the process-global MetaTrader session is pinned

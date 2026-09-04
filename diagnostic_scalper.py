@@ -1,121 +1,278 @@
+"""Read-only health report for the MT5 scalper pipeline.
+
+Run from the repository root with::
+
+    python diagnostic_scalper.py
+
+The command never creates signals, decisions, orders, or positions.
+"""
+
+from __future__ import annotations
+
 import os
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+from datetime import datetime, timedelta, timezone as dt_timezone
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+
 import django
+
 django.setup()
 
 from django.conf import settings
-from bots.models import Bot
-from execution.models import Signal, Decision, Order, Position
-from datetime import timedelta
+from django.db import connection
+from django.db.migrations.executor import MigrationExecutor
+from django.db.models import Count
 from django.utils import timezone
 
-print('=' * 70)
-print('SCALPER BOT DIAGNOSTIC REPORT')
-print('=' * 70)
-
-# 1. Check scheduler
-print('\n1. CELERY BEAT SCHEDULE:')
-schedule = settings.CELERY_BEAT_SCHEDULE
-if 'scalper-engine-45s' in schedule:
-    print('   ✓ scalper-engine-45s IS in schedule')
-    print(f'     Task: {schedule["scalper-engine-45s"]["task"]}')
-    print(f'     Schedule: {schedule["scalper-engine-45s"]["schedule"]}s')
-else:
-    print('   ✗ scalper-engine-45s NOT in schedule')
-
-# 2. Check bot config
-print('\n2. SCALPER BOT CONFIGURATION:')
-bots = Bot.objects.filter(engine_mode='scalper')
-if not bots.exists():
-    print('   ✗ NO SCALPER BOTS FOUND')
-else:
-    for bot in bots:
-        print(f'\n   Bot: {bot.name} (ID={bot.id})')
-        print(f'     Status: {bot.status}')
-        print(f'     Auto-trade: {bot.auto_trade}')
-        print(f'     Asset: {bot.asset.symbol if bot.asset else "MISSING"}')
-        print(f'     Strategies enabled: {len(bot.enabled_strategies) if bot.enabled_strategies else 0}')
-        if bot.enabled_strategies:
-            for s in bot.enabled_strategies:
-                print(f'       - {s}')
-        print(f'     Broker account: {bot.broker_account}')
-        if bot.broker_account:
-            print(f'       Account active: {bot.broker_account.is_active}')
-            print(f'       Broker: {bot.broker_account.broker}')
-        print(f'     Decision min score: {bot.decision_min_score}')
-        print(f'     Max concurrent positions: {bot.risk_max_concurrent_positions}')
-        if bot.allocation_amount and bot.allocation_amount > 0:
-            print(f'     Allocation amount: {bot.allocation_amount} (profit target {bot.allocation_profit_pct}%, loss cap {bot.allocation_loss_pct}%)')
-
-# 3. Check recent signals
-print('\n3. RECENT SIGNALS (last 24 hours):')
-recent = Signal.objects.filter(received_at__gte=timezone.now() - timedelta(hours=24)).order_by('-received_at')[:10]
-scalper_signals = recent.filter(source='scalper_engine')
-print(f'   Total signals (all sources): {recent.count()}')
-print(f'   Scalper engine signals: {scalper_signals.count()}')
-if recent.exists():
-    print(f'   Latest signal source: {recent.first().source}')
-    print(f'   Latest signal symbol: {recent.first().symbol}')
-
-# 4. Check recent decisions
-print('\n4. RECENT DECISIONS (last 24 hours):')
-decisions = Decision.objects.filter(decided_at__gte=timezone.now() - timedelta(hours=24)).order_by('-decided_at')[:10]
-print(f'   Total decisions: {decisions.count()}')
-if decisions.exists():
-    open_decisions = decisions.filter(action='open').count()
-    ignored_decisions = decisions.filter(action='ignore').count()
-    print(f'   - Opened: {open_decisions}')
-    print(f'   - Ignored: {ignored_decisions}')
-    print('\n   Recent decisions:')
-    for d in decisions[:5]:
-        print(f'     Signal {d.signal.id}: {d.signal.source} {d.signal.symbol} {d.signal.direction}')
-        print(f'       Action: {d.action}, Reason: {d.reason}')
-
-# 5. Check recent orders
-print('\n5. RECENT ORDERS (last 24 hours):')
-orders = Order.objects.filter(created_at__gte=timezone.now() - timedelta(hours=24)).order_by('-created_at')[:10]
-print(f'   Total orders: {orders.count()}')
-if orders.exists():
-    filled = orders.filter(status='filled').count()
-    new = orders.filter(status='new').count()
-    ack = orders.filter(status='ack').count()
-    print(f'   - Filled: {filled}')
-    print(f'   - Acknowledged: {ack}')
-    print(f'   - New: {new}')
-
-# 6. Check recent positions
-print('\n6. OPEN POSITIONS:')
-positions = Position.objects.filter(status='open')
-print(f'   Total open: {positions.count()}')
-if positions.exists():
-    for p in positions[:5]:
-        print(f'     {p.symbol} {p.qty} @ {p.avg_price} (opened {p.created_at})')
-
-# 7. Check if any candle fetching issues
-print('\n7. CANDLE DATA CHECK:')
-print('   Testing candle fetch for each scalper bot...')
+from bots.models import Bot
+from execution.connectors.mt5 import MT5Connector
+from execution.models import (
+    BrokerPosition,
+    Decision,
+    JournalEntry,
+    Order,
+    ScalperRunLog,
+    Signal,
+)
+from execution.services.brokers import (
+    get_broker_symbol_constraints,
+    missing_entry_constraint_fields,
+)
 from execution.services.marketdata import get_candles_for_account
-for bot in bots:
-    try:
-        if bot.asset and bot.broker_account:
-            print(f'\n   Bot: {bot.name}')
-            print(f'     Symbol: {bot.asset.symbol}')
-            print(f'     Broker: {bot.broker_account}')
-            candles = get_candles_for_account(
-                broker_account=bot.broker_account,
-                symbol=bot.asset.symbol,
-                timeframe='1m',
-                n_bars=10
-            )
-            if candles:
-                print(f'     ✓ Got {len(candles)} candles')
-                print(f'       Latest close: {candles[-1]["close"]}')
-                print(f'       Latest time: {candles[-1]["time"]}')
-            else:
-                print(f'     ✗ Got 0 candles (None returned)')
-    except Exception as e:
-        print(f'     ✗ Error: {str(e)[:100]}')
 
-print('\n' + '=' * 70)
-print('DIAGNOSTIC COMPLETE')
-print('=' * 70)
+
+WINDOW_HOURS = 24
+
+
+def _heading(title: str) -> None:
+    print(f"\n{title}")
+    print("-" * len(title))
+
+
+def _pending_migrations() -> list[str]:
+    executor = MigrationExecutor(connection)
+    plan = executor.migration_plan(executor.loader.graph.leaf_nodes())
+    return [f"{migration.app_label}.{migration.name}" for migration, _backward in plan]
+
+
+def _timestamp_from_tick(tick) -> datetime | None:
+    raw = getattr(tick, "time", None)
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=dt_timezone.utc)
+    if raw:
+        return datetime.fromtimestamp(float(raw), tz=dt_timezone.utc)
+    raw_millis = getattr(tick, "time_msc", None)
+    if raw_millis:
+        return datetime.fromtimestamp(float(raw_millis) / 1000, tz=dt_timezone.utc)
+    return None
+
+
+def _print_pipeline_totals(since: datetime) -> None:
+    scalper_signals = Signal.objects.filter(
+        source="scalper_engine",
+        received_at__gte=since,
+    )
+    scalper_decisions = Decision.objects.filter(
+        signal__source="scalper_engine",
+        decided_at__gte=since,
+    )
+    scalper_orders = Order.objects.filter(
+        bot__engine_mode="scalper",
+        created_at__gte=since,
+    )
+    print(f"Signals:   {scalper_signals.count()}")
+    print(f"Decisions: {scalper_decisions.count()}")
+    print(f"Orders:    {scalper_orders.count()}")
+    print(
+        "Order statuses:",
+        list(
+            scalper_orders.values("intent", "status")
+            .annotate(count=Count("id"))
+            .order_by("intent", "status")
+        ),
+    )
+
+
+def _print_bot_health(bot: Bot, *, now: datetime, since: datetime) -> None:
+    account = bot.broker_account
+    symbol = bot.asset.symbol if bot.asset else None
+    print(f"\nBot {bot.id}: {bot.name}")
+    print(
+        "Config:",
+        {
+            "symbol": symbol,
+            "status": bot.status,
+            "auto_trade": bot.auto_trade,
+            "broker_account_id": bot.broker_account_id,
+            "connector": getattr(account, "connector", None),
+            "account_active": getattr(account, "is_active", False),
+        },
+    )
+
+    skip_counts = list(
+        JournalEntry.objects.filter(
+            bot=bot,
+            event_type="scalper_engine_run",
+            created_at__gte=since,
+        )
+        .values("context__outcome", "context__reason")
+        .annotate(count=Count("id"))
+        .order_by("-count")
+    )
+    print("Cycle outcomes:", skip_counts)
+
+    strategy_counts: dict[tuple[str, str, str], int] = {}
+    session_strategy_counts: dict[tuple[str, str, str, str], int] = {}
+    recent_logs = ScalperRunLog.objects.filter(
+        bot=bot,
+        created_at__gte=since,
+    ).order_by("-created_at")[:1000]
+    for run in recent_logs:
+        for event in (run.summary or {}).get("strategies") or []:
+            key = (
+                str(event.get("strategy") or "unknown"),
+                str(event.get("action") or "unknown"),
+                str(event.get("reason") or "unspecified"),
+            )
+            strategy_counts[key] = strategy_counts.get(key, 0) + 1
+            session_key = (
+                str(run.session or "unknown"),
+                key[0],
+                key[1],
+                key[2],
+            )
+            session_strategy_counts[session_key] = session_strategy_counts.get(session_key, 0) + 1
+    print(
+        "Strategy outcomes:",
+        [
+            {
+                "strategy": strategy,
+                "action": action,
+                "reason": reason,
+                "count": count,
+            }
+            for (strategy, action, reason), count in sorted(
+                strategy_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ],
+    )
+    print(
+        "Strategy outcomes by session:",
+        [
+            {
+                "session": session,
+                "strategy": strategy,
+                "action": action,
+                "reason": reason,
+                "count": count,
+            }
+            for (session, strategy, action, reason), count in sorted(
+                session_strategy_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ],
+    )
+
+    if not account or not symbol:
+        print("Market data: BLOCKED (account or symbol missing)")
+        return
+
+    constraints = get_broker_symbol_constraints(account, symbol)
+    missing = missing_entry_constraint_fields(constraints)
+    print("Broker constraints:", constraints)
+    if missing:
+        print("Constraint gate: BLOCKED", list(missing))
+    else:
+        print("Constraint gate: OK")
+
+    if getattr(account, "connector", None) != "mt5_local":
+        print("MT5 clock: not applicable for connector")
+        return
+
+    try:
+        connector = MT5Connector()
+        tick = connector.tick_for_account(account, symbol)
+        tick_at = _timestamp_from_tick(tick)
+        if tick_at is None:
+            print("MT5 clock: BLOCKED (timestamp missing)")
+        else:
+            drift = (tick_at - now).total_seconds()
+            tolerance = int(
+                getattr(settings, "MT5_TICK_FUTURE_TOLERANCE_SECONDS", 120)
+            )
+            status = "BLOCKED" if drift > tolerance else "OK"
+            print(
+                "MT5 clock:",
+                status,
+                {
+                    "app_utc": now.isoformat(),
+                    "tick_utc": tick_at.isoformat(),
+                    "tick_minus_app_seconds": round(drift, 1),
+                    "future_tolerance_seconds": tolerance,
+                },
+            )
+
+        candles = get_candles_for_account(account, symbol, "1m", n_bars=10)
+        latest_candle = candles[-1]["time"] if candles else None
+        print(
+            "Latest completed M1:",
+            latest_candle.isoformat() if latest_candle else "unavailable",
+        )
+    except Exception as exc:
+        print("MT5 market-data check: BLOCKED", type(exc).__name__, str(exc)[:160])
+
+
+def main() -> None:
+    now = timezone.now()
+    since = now - timedelta(hours=WINDOW_HOURS)
+    print("=" * 72)
+    print("SCALPER BOT READ-ONLY DIAGNOSTIC")
+    print("=" * 72)
+    print("Application UTC:", now.isoformat())
+    print("Window hours:", WINDOW_HOURS)
+
+    _heading("Deployment state")
+    schedule = settings.CELERY_BEAT_SCHEDULE.get("scalper-engine-45s")
+    print("Scalper schedule:", schedule or "MISSING")
+    pending = _pending_migrations()
+    print("Pending migrations:", pending or "none")
+
+    _heading("Pipeline totals")
+    _print_pipeline_totals(since)
+
+    _heading("Authoritative live positions")
+    positions = BrokerPosition.objects.filter(status="open")
+    print("Open broker positions:", positions.count())
+    print(
+        list(
+            positions.values(
+                "id",
+                "bot_id",
+                "broker_account_id",
+                "broker_position_ticket",
+                "ownership",
+                "symbol",
+                "side",
+                "volume",
+                "sl",
+                "tp",
+                "last_reconciled_at",
+            )[:20]
+        )
+    )
+
+    _heading("Per-bot health")
+    bots = Bot.objects.filter(engine_mode="scalper").select_related(
+        "asset",
+        "broker_account",
+    )
+    print("Scalper bots:", bots.count())
+    for bot in bots:
+        _print_bot_health(bot, now=now, since=since)
+
+    print("\nDiagnostic complete. No trading actions were performed.")
+
+
+if __name__ == "__main__":
+    main()

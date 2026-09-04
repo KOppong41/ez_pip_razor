@@ -41,6 +41,39 @@ def _resolve_contract_size(order: Order, provided: Decimal | None) -> Decimal:
         return Decimal("100000")
 
 
+def _entry_execution_for_position(order: Order, broker_position_ticket: int | None):
+    """Find the opening fill associated with a broker position."""
+    if broker_position_ticket is None:
+        return None
+    execution = (
+        Execution.objects.filter(
+            order__broker_account=order.broker_account,
+            order__symbol=order.symbol,
+            order__intent="entry",
+            broker_position_ticket=broker_position_ticket,
+        )
+        .order_by("exec_time", "id")
+        .first()
+    )
+    if execution:
+        return execution
+    entry_order = (
+        Order.objects.filter(
+            broker_account=order.broker_account,
+            symbol=order.symbol,
+            intent="entry",
+            broker_position_ticket=broker_position_ticket,
+        )
+        .order_by("created_at", "id")
+        .first()
+    )
+    return (
+        Execution.objects.filter(order=entry_order).order_by("exec_time", "id").first()
+        if entry_order
+        else None
+    )
+
+
 def _apply_paper_position_fill(
     order: Order,
     qty: Decimal,
@@ -185,6 +218,10 @@ def record_fill(
 
     # Attach realized PnL to the TradeLog for this order (if any).
     if realized_pnl is not None:
+        entry_execution = _entry_execution_for_position(
+            order,
+            broker_position_ticket or getattr(exe, "broker_position_ticket", None),
+        )
         try:
             tl = TradeLog.objects.filter(order=order).latest("created_at")
         except TradeLog.DoesNotExist:
@@ -200,10 +237,14 @@ def record_fill(
                 symbol=order.symbol,
                 side=order.side,
                 qty=order.qty,
-                price=order.price,
+                price=(entry_execution.price if entry_execution else order.price),
                 status="filled",
                 pnl=None,
-                broker_ticket=getattr(order, "broker_ticket", None),
+                broker_ticket=(
+                    getattr(entry_execution, "broker_position_ticket", None)
+                    or getattr(order, "broker_position_ticket", None)
+                    or getattr(order, "broker_ticket", None)
+                ),
                 opened_at_broker=to_broker_timezone(getattr(order, "created_at", None), order.broker_account),
             )
         prior_pnl = tl.pnl or Decimal("0")
@@ -220,14 +261,22 @@ def record_fill(
         tl.closed_at_broker = to_broker_timezone(close_time, order.broker_account)
         tl.exit_price = Decimal(str(price))
         update_fields = ["pnl", "status", "closed_at", "exit_price"]
+        if tl.price is None and entry_execution is not None:
+            tl.price = entry_execution.price
+            update_fields.append("price")
         if tl.opened_at_broker is None:
             tl.opened_at_broker = to_broker_timezone(getattr(order, "created_at", None), order.broker_account)
             update_fields.append("opened_at_broker")
         if tl.closed_at_broker is not None and "closed_at_broker" not in update_fields:
             update_fields.append("closed_at_broker")
         order_ticket = getattr(order, "broker_ticket", None)
-        if order_ticket and tl.broker_ticket != order_ticket:
-            tl.broker_ticket = order_ticket
+        position_ticket = (
+            getattr(entry_execution, "broker_position_ticket", None)
+            or getattr(order, "broker_position_ticket", None)
+            or order_ticket
+        )
+        if position_ticket and tl.broker_ticket != position_ticket:
+            tl.broker_ticket = position_ticket
             update_fields.append("broker_ticket")
         tl.save(update_fields=update_fields)
 

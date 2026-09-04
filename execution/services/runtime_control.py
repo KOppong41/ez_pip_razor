@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.core import signing
-from django.db import transaction
+from django.db import OperationalError, transaction
+import time
 
 from bots.models import Bot
 from brokers.models import BrokerAccount
@@ -33,17 +34,30 @@ def runtime_stop_user_id(token: str) -> int:
     return int(payload["user_id"])
 
 
-@transaction.atomic
+def _stop_user_automation_once(user) -> dict[str, int]:
+    with transaction.atomic():
+        account_ids = list(
+            BrokerAccount.objects.filter(
+                owner=user, connector="mt5_local"
+            ).values_list("id", flat=True)
+        )
+        policies = RiskPolicy.objects.filter(broker_account_id__in=account_ids).update(
+            entries_enabled=False
+        )
+        bots = Bot.objects.filter(owner=user).exclude(status="stopped").update(
+            status="stopped"
+        )
+        return {"accounts_stopped": policies, "bots_stopped": bots}
+
+
 def stop_user_automation(user) -> dict[str, int]:
-    account_ids = list(
-        BrokerAccount.objects.filter(
-            owner=user, connector="mt5_local"
-        ).values_list("id", flat=True)
-    )
-    policies = RiskPolicy.objects.filter(broker_account_id__in=account_ids).update(
-        entries_enabled=False
-    )
-    bots = Bot.objects.filter(owner=user).exclude(status="stopped").update(
-        status="stopped"
-    )
-    return {"accounts_stopped": policies, "bots_stopped": bots}
+    """Stop automation, tolerating brief SQLite contention during app shutdown."""
+    for attempt in range(3):
+        try:
+            return _stop_user_automation_once(user)
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 2:
+                raise
+            time.sleep(0.5)
+
+    raise RuntimeError("Automation stop did not complete")

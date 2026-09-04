@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone as dt_timezone
 from typing import Optional
 
+from django.conf import settings
 from django.utils import timezone
 
 from execution.connectors.mt5 import MT5Connector, is_mt5_available
@@ -179,6 +180,20 @@ def _probe_mt5_market(
 
             if tick_dt:
                 age = (now - tick_dt).total_seconds()
+                future_tolerance = int(
+                    getattr(settings, "MT5_TICK_FUTURE_TOLERANCE_SECONDS", 120)
+                )
+                if age < -future_tolerance:
+                    return MarketStatus(
+                        is_open=False,
+                        reason="clock_skew",
+                        checked_at=now,
+                        source="mt5",
+                        details={
+                            "tick_age_seconds": int(age),
+                            "clock_skew_seconds": int(-age),
+                        },
+                    )
                 if age > 1800:  # >30 minutes without ticks
                     return MarketStatus(
                         is_open=False,
