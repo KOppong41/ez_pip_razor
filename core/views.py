@@ -91,8 +91,14 @@ def health(_request):
     )
 
 def metrics(_request):
-    from execution.models import Position
+    from execution.models import BrokerPosition, Position
     from core.metrics import open_positions_gauge
     # live gauge snapshot
-    open_positions_gauge.set(Position.objects.filter(status="open").count())
+    open_positions_gauge.set(
+        Position.objects.filter(
+            status="open",
+            broker_account__connector="paper",
+        ).count()
+        + BrokerPosition.objects.filter(status="open").count()
+    )
     return HttpResponse(generate_latest(), content_type=CONTENT_TYPE_LATEST)

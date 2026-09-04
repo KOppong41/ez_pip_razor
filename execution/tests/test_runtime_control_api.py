@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from unittest.mock import patch
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
@@ -64,3 +65,20 @@ class RuntimeControlApiTest(TestCase):
         self.assertEqual(response.status_code, 400)
         self.bot.refresh_from_db()
         self.assertEqual(self.bot.status, "active")
+
+    @patch("execution.tasks.kill_switch_monitor_task.apply_async")
+    def test_emergency_stop_schedules_serialized_kill_sequence(self, apply_async):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/api/personal/control/",
+                data={"action": "emergency_stop", "broker_account_id": self.account.id},
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.policy.refresh_from_db()
+        self.bot.refresh_from_db()
+        self.assertTrue(self.policy.emergency_stop)
+        self.assertFalse(self.policy.entries_enabled)
+        self.assertEqual(self.bot.status, "stopped")
+        apply_async.assert_called_once_with(queue="mt5_execution", priority=0)

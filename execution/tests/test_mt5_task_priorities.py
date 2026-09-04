@@ -71,6 +71,16 @@ class MT5TaskPriorityTests(TestCase):
             MT5_PRIORITY_EMERGENCY,
         )
 
+    @patch.object(execute_mt5_order_task, "apply_async", side_effect=RuntimeError("redis unavailable"))
+    def test_publish_failure_is_persisted_and_not_reported_as_queued(self, _apply_async):
+        with self.assertRaisesRegex(RuntimeError, "redis unavailable"):
+            enqueue_mt5_order(self.entry)
+
+        self.entry.refresh_from_db()
+        self.assertIsNone(self.entry.execution_queued_at)
+        self.assertIsNotNone(self.entry.dispatch_publish_failed_at)
+        self.assertEqual(self.entry.dispatch_publish_error, "redis unavailable")
+
     @patch("execution.mt5_tasks.dispatch_place_order")
     def test_worker_records_start_time_before_dispatch(self, dispatch):
         execute_mt5_order_task.run(self.entry.id)

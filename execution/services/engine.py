@@ -6,6 +6,7 @@ from typing import Literal, Optional, List
 import logging
 
 from execution.services.marketdata import Candle
+from execution.services.engine_types import EngineDecision
 
 
 Action = Literal["open", "skip", "close"]
@@ -13,22 +14,6 @@ Direction = Literal["buy", "sell"]
 Trend = Literal["up", "down", "flat"]
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class EngineDecision:
-    """
-    Unified decision object returned by the internal engine.
-    """
-    action: Action
-    direction: Optional[Direction] = None
-    sl: Optional[Decimal] = None
-    tp: Optional[Decimal] = None
-    reason: str = ""
-    strategy: str = ""   
-    trend: Trend = "flat"
-    score: float = 0.0
-    metadata: Optional[dict] = None   
 
 
 @dataclass

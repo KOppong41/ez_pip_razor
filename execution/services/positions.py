@@ -1,6 +1,6 @@
 from datetime import timedelta
 from django.utils import timezone
-from execution.models import Position, Decision
+from execution.models import BrokerPosition, Position, Decision
 from execution.services.orchestrator import create_close_order_for_position
 from execution.services.brokers import dispatch_place_order
 from execution.services.fanout import fanout_orders
@@ -53,14 +53,27 @@ def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> bool:
     if max_flips > 0 and _flip_count_today(bot, symbol) >= max_flips:
         return False
 
-    try:
-        pos = Position.objects.get(
+    if bot.broker_account.connector == "mt5_local":
+        positions = BrokerPosition.objects.filter(
             broker_account=bot.broker_account,
             symbol=symbol,
             status="open",
+            ownership="ez_trade",
         )
-    except Position.DoesNotExist:
-        return False
+        if positions.count() != 1:
+            return False
+        pos = positions.get()
+        close_params = {"broker_position_id": pos.id}
+    else:
+        try:
+            pos = Position.objects.get(
+                broker_account=bot.broker_account,
+                symbol=symbol,
+                status="open",
+            )
+        except Position.DoesNotExist:
+            return False
+        close_params = {"position_id": pos.id}
 
     # Create a synthetic "close" decision tied to the open decision's signal
     close_decision = Decision.objects.create(
@@ -69,7 +82,7 @@ def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> bool:
         action="close",
         reason="flip_close",
         score=open_decision.score,
-        params={"position_id": pos.id},
+        params=close_params,
     )
 
     # Create close order idempotently and dispatch

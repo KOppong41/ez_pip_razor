@@ -1,5 +1,8 @@
 # Scalper Signal Engine Implementation
 
+> **Historical architecture note.** Consult `DEPLOYMENT_CHECKLIST.md` and
+> `LIVE_TRADING_RUNBOOK.md` for current safety behavior and live-trading status.
+
 ## Overview
 
 The **Scalper Signal Engine** is a new high-frequency signal generation system that powers the bot's ability to pick trades automatically on tight timeframes (M1/1-minute). Unlike the Harami engine (which uses 5m+ candlesticks), the Scalper engine scans tick/M1 data continuously and emits trade signals based on enabled price-action strategies.

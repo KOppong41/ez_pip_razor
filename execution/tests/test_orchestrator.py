@@ -1,6 +1,6 @@
 from django.test import TestCase
 from django.urls import reverse
-from bots.models import Bot
+from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.models import Signal, Decision, Order
 from django.contrib.auth import get_user_model
@@ -9,11 +9,11 @@ class OrchestratorTest(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_superuser("orch-admin", "orch@example.com", "pw")
         self.client.force_login(self.user)
-        self.bot = Bot.objects.create(name="BotA", status="active")
-        self.ba = BrokerAccount.objects.create(name="Paper", broker="paper", connector="paper", account_ref="acc1")
-        self.sig = Signal.objects.create(source="test", symbol="EURUSD", timeframe="5m", direction="buy",
+        self.ba = BrokerAccount.objects.create(owner=self.user, name="Paper", broker="paper", connector="paper", account_ref="acc1")
+        self.bot = Bot.objects.create(owner=self.user, name="BotA", status="active", broker_account=self.ba, asset=Asset.objects.create(symbol="ORCHEURUSD"))
+        self.sig = Signal.objects.create(owner=self.user, bot=self.bot, source="test", symbol="EURUSD", timeframe="5m", direction="buy",
                                          payload={"x":1}, dedupe_key="k1")
-        self.dec = Decision.objects.create(bot=self.bot, signal=self.sig, action="open", reason="t", score=0.5, params={"sl": "1.0", "tp": "1.2"})
+        self.dec = Decision.objects.create(owner=self.user, bot=self.bot, signal=self.sig, action="open", reason="t", score=0.5, params={"sl": "1.0", "tp": "1.2"})
 
     def test_create_order_from_decision_idempotent(self):
         url = "/api/orders/from-decision/"

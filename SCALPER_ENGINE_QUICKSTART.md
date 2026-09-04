@@ -1,5 +1,9 @@
 # Scalper Engine – Quick Start Guide
 
+> **Demo-only quick start.** Do not add `--auto-trade` for a live-money account
+> until every gate in `DEPLOYMENT_CHECKLIST.md` is complete. Strategy targets in
+> this historical guide are goals, not verified performance.
+
 ## What Just Happened
 
 You now have a **high-frequency scalper signal engine** that:

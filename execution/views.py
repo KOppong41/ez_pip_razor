@@ -70,14 +70,14 @@ class OrderViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
     @action(detail=False, methods=["post"], url_path="quick-create")
     def quick_create(self, request):
-        ser = QuickOrderCreateSerializer(data=request.data)
+        ser = QuickOrderCreateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         order = ser.save()
-        return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
+        return Response(OrderSerializer(order, context={"request": request}).data, status=status.HTTP_201_CREATED)
     
     @action(detail=False, methods=["post"], url_path="from-decision")
     def from_decision(self, request):
-        ser = OrderCreateFromDecisionSerializer(data=request.data)
+        ser = OrderCreateFromDecisionSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         decision = ser.validated_data["decision"]
         broker_account = ser.validated_data["broker_account"]

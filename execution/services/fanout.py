@@ -91,8 +91,22 @@ def fanout_orders(decision: Decision, master_qty: str | None) -> List[Tuple[Orde
         return []
 
     if decision.action == "close":
-        # Close decision should carry a position reference via params["position_id"], else we can't proceed
-        pos_id = (decision.params or {}).get("position_id")
+        params = decision.params or {}
+        broker_pos_id = params.get("broker_position_id")
+        pos_id = params.get("position_id")
+        if broker_pos_id:
+            try:
+                from execution.models import BrokerPosition
+                pos = BrokerPosition.objects.get(
+                    id=broker_pos_id,
+                    broker_account=bot.broker_account,
+                    status="open",
+                    ownership="ez_trade",
+                )
+            except BrokerPosition.DoesNotExist:
+                return []
+            order, created = create_close_order_for_position(pos, bot.broker_account)
+            return [(order, created)]
         if not pos_id:
             return []
         try:

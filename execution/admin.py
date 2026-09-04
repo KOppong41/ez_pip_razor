@@ -394,6 +394,11 @@ class PositionAdmin(OwnedAdmin):
     search_fields = ("symbol", "broker_account__name")
     ordering = ("-updated_at",)
 
+    def get_queryset(self, request):
+        # Position is the paper-simulator ledger. Live MT5 state is displayed
+        # through BrokerPosition and must not be mixed into this view.
+        return super().get_queryset(request).filter(broker_account__connector="paper")
+
 @admin.register(TradeLog)
 class TradeLogAdmin(OwnedAdmin):
     
@@ -542,7 +547,7 @@ class ExecutionSettingAdmin(admin.ModelAdmin):
         "orders": (Order, _("Execution Orders")),
         "executions": (Execution, _("Execution Fills")),
         "trades": (TradeLog, _("Trade Logs")),
-        "positions": (Position, _("Execution Positions")),
+        "positions": (Position, _("Paper Position Ledger")),
         "journal": (JournalEntry, _("Journal Entries")),
     }
     

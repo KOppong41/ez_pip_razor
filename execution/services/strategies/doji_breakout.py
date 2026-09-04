@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import List, Optional, Literal
 
 from execution.services.marketdata import Candle
-from execution.services.engine import EngineDecision  # circular-safe: only the dataclass is used here
+from execution.services.engine_types import EngineDecision
 
 PinType = Literal["bullish", "bearish"]
 

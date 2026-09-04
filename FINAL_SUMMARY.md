@@ -1,6 +1,11 @@
 # Trading Bot - All Critical Issues Fixed ✅
 
-## Final Status: BOT IS OPERATIONAL
+> **Historical record only — not a live-trading approval.** This 2025 summary
+> predates the current broker-authority, ownership, kill-switch, and deployment
+> controls. Use `DEPLOYMENT_CHECKLIST.md`; the current status is not approved
+> for unattended live trading.
+
+## Historical status at the time: basic flow was operational
 
 **Date**: November 20, 2025  
 **Time**: 04:00 UTC  
@@ -178,7 +183,7 @@ celery@IkobTek-01 v5.5.3
 - [x] Redis connection working
 - [x] Django database migrations applied
 
-**BOT STATUS**: 🟢 **PRODUCTION READY**
+**CURRENT STATUS**: Superseded — see `DEPLOYMENT_CHECKLIST.md` (not approved for unattended live trading).
 
 ---
 

@@ -40,6 +40,60 @@ def _resolve_contract_size(order: Order, provided: Decimal | None) -> Decimal:
     except Exception:
         return Decimal("100000")
 
+
+def _apply_paper_position_fill(
+    order: Order,
+    qty: Decimal,
+    price: Decimal,
+    fee: Decimal,
+    contract_size: Decimal | None,
+):
+    """Update the simulator ledger. Live MT5 truth lives in BrokerPosition."""
+    pos, _ = Position.objects.select_for_update().get_or_create(
+        broker_account=order.broker_account,
+        symbol=order.symbol,
+        defaults={
+            "qty": Decimal("0"),
+            "avg_price": Decimal("0"),
+            "owner": getattr(order, "owner", None),
+        },
+    )
+    old_qty = pos.qty
+    old_avg = pos.avg_price
+    delta = qty if order.side == "buy" else -qty
+    new_qty = old_qty + delta
+    if old_qty == 0:
+        pos.avg_price = price
+    elif (old_qty > 0 and delta > 0) or (old_qty < 0 and delta < 0):
+        total = abs(old_qty) + abs(delta)
+        pos.avg_price = (old_avg * abs(old_qty) + price * abs(delta)) / total
+    elif new_qty == 0:
+        pos.avg_price = Decimal("0")
+    elif (old_qty > 0 and new_qty > 0) or (old_qty < 0 and new_qty < 0):
+        pos.avg_price = old_avg
+    else:
+        pos.avg_price = price
+    pos.qty = new_qty
+    pos.status = "closed" if new_qty == 0 else "open"
+    if new_qty == 0:
+        pos.sl = None
+        pos.tp = None
+
+    realized_pnl = None
+    closing_qty = None
+    if old_qty != 0 and ((old_qty > 0 and delta < 0) or (old_qty < 0 and delta > 0)):
+        closing_qty = min(abs(old_qty), abs(delta))
+        if closing_qty > 0:
+            direction = Decimal("1") if old_qty > 0 else Decimal("-1")
+            realized_pnl = (
+                (price - old_avg)
+                * closing_qty
+                * direction
+                * _resolve_contract_size(order, contract_size)
+            ) - Decimal(str(fee or 0))
+    pos.save()
+    return pos, realized_pnl, closing_qty
+
 @transaction.atomic
 def record_fill(
     order: Order,
@@ -101,87 +155,33 @@ def record_fill(
         },
     )
 
-    # --- existing position logic, keep as-is ---
-    pos, _ = Position.objects.select_for_update().get_or_create(
-        broker_account=order.broker_account,
-        symbol=order.symbol,
-        defaults={"qty": Decimal("0"), "avg_price": Decimal("0"), "owner": getattr(order, "owner", None)},
-    )
-
-    # Snapshot before applying this fill to detect closed/flip events
-    old_qty = pos.qty
-    old_avg = pos.avg_price
-
-    # Update position qty/avg_price with side-aware math
-    delta = qty if order.side == "buy" else -qty
-    new_qty = pos.qty + delta
-
-    # Same-direction additions change the weighted average. Reductions retain
-    # the original entry; only excess volume that crosses zero opens at the
-    # new fill price.
-    if old_qty == 0:
-        pos.avg_price = price
-    elif (old_qty > 0 and delta > 0) or (old_qty < 0 and delta < 0):
-        total = abs(old_qty) + abs(delta)
-        pos.avg_price = (old_avg * abs(old_qty) + price * abs(delta)) / total
-    elif new_qty == 0:
-        pos.avg_price = Decimal("0")
-    elif (old_qty > 0 and new_qty > 0) or (old_qty < 0 and new_qty < 0):
-        pos.avg_price = old_avg
-    else:
-        # Cross-zero: the excess quantity is a new opposite position.
-        pos.avg_price = price
-
-    pos.qty = new_qty
-
-    # Maintain status/cleanup when flat
-    if pos.qty == 0:
-        pos.avg_price = Decimal("0")
-        pos.sl = None
-        pos.tp = None
-        pos.status = "closed"
-    else:
-        pos.status = "open"
-
-    # Detect realized PnL when reducing or closing an existing position.
+    pos = None
     realized_pnl = None
     closing_qty = None
-    eff_contract = _resolve_contract_size(order, contract_size)
-    if old_qty != 0:
-        # Position direction before this fill
-        if (old_qty > 0 and delta < 0) or (old_qty < 0 and delta > 0):
-            # This fill is reducing/closing a position in the opposite direction.
-            closing_qty = min(abs(old_qty), abs(delta))
-            if closing_qty > 0:
-                if broker_profit is not None:
-                    realized_pnl = (
-                        Decimal(str(broker_profit))
-                        + Decimal(str(commission or 0))
-                        + Decimal(str(swap or 0))
-                    )
-                elif getattr(order.broker_account, "broker", "") == "paper":
-                    direction = Decimal("1") if old_qty > 0 else Decimal("-1")
-                    realized_pnl = (
-                        (Decimal(str(price)) - Decimal(str(old_avg)))
-                        * closing_qty
-                        * direction
-                        * eff_contract
-                    ) - Decimal(str(fee or 0))
-
-    pos.save()
-    log_journal_event(
-        "position.updated",
-        position=pos,
-        bot=order.bot,
-        broker_account=order.broker_account,
-        symbol=order.symbol,
-        message=f"qty {pos.qty} avg {pos.avg_price}",
-        context={
-            "status": pos.status,
-            "sl": str(pos.sl) if pos.sl is not None else None,
-            "tp": str(pos.tp) if pos.tp is not None else None,
-        },
-    )
+    if getattr(order.broker_account, "connector", "") == "paper":
+        pos, realized_pnl, closing_qty = _apply_paper_position_fill(
+            order,
+            Decimal(str(qty)),
+            Decimal(str(price)),
+            Decimal(str(fee or 0)),
+            contract_size,
+        )
+        log_journal_event(
+            "position.updated",
+            position=pos,
+            bot=order.bot,
+            broker_account=order.broker_account,
+            symbol=order.symbol,
+            message=f"qty {pos.qty} avg {pos.avg_price}",
+            context={"status": pos.status, "ledger": "paper"},
+        )
+    elif order.intent == "exit" and broker_profit is not None:
+        realized_pnl = (
+            Decimal(str(broker_profit))
+            + Decimal(str(commission or 0))
+            + Decimal(str(swap or 0))
+        )
+        closing_qty = Decimal(str(qty))
 
     # Attach realized PnL to the TradeLog for this order (if any).
     if realized_pnl is not None:
@@ -242,7 +242,7 @@ def record_fill(
             context={
                 "pnl": str(realized_pnl),
                 "closing_qty": str(closing_qty) if closing_qty is not None else None,
-                "new_position_qty": str(pos.qty),
+                "new_position_qty": str(pos.qty) if pos is not None else None,
             },
         )
 

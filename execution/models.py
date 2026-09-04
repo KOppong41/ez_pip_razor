@@ -166,6 +166,8 @@ class Order(models.Model):
     order_send_called_at = models.DateTimeField(null=True, blank=True)
     broker_response_received_at = models.DateTimeField(null=True, blank=True)
     execution_recorded_at = models.DateTimeField(null=True, blank=True)
+    dispatch_publish_failed_at = models.DateTimeField(null=True, blank=True)
+    dispatch_publish_error = models.TextField(blank=True, default="")
     last_error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1007,9 +1009,9 @@ def default_scalper_profile_config() -> dict:
                 "trail_trigger_r": 1.5,
                 "trail_mode": "ema",
                 "max_spread_points": 15,
-                "max_spread_unit": "pips",
+                "max_spread_unit": "points",
                 "max_slippage_points": 5,
-                "max_slippage_unit": "pips",
+                "max_slippage_unit": "points",
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
             },
@@ -1024,9 +1026,9 @@ def default_scalper_profile_config() -> dict:
                 "trail_trigger_r": 1.5,
                 "trail_mode": "ema",
                 "max_spread_points": 18,
-                "max_spread_unit": "pips",
+                "max_spread_unit": "points",
                 "max_slippage_points": 6,
-                "max_slippage_unit": "pips",
+                "max_slippage_unit": "points",
                 "allow_countertrend": False,
                 "risk_pct": 0.5,
             },

@@ -38,7 +38,7 @@ if not BROKER_CREDS_KEY and DEBUG and not TESTING:
 
     BROKER_CREDS_KEY = load_or_create_broker_creds_key()
 RUNTIME_STOP_TOKEN_MAX_AGE_SECONDS = int(
-    env("RUNTIME_STOP_TOKEN_MAX_AGE_SECONDS", default=2592000)
+    env("RUNTIME_STOP_TOKEN_MAX_AGE_SECONDS", default=3600)
 )
 
 # Optional HMAC for dedupe hashing

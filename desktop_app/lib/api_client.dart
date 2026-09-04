@@ -20,6 +20,7 @@ class ApiClient {
   void Function()? onSessionExpired;
   bool _sessionExpired = false;
   Timer? _expiryTimer;
+  Timer? _runtimeSessionRefreshTimer;
   Future<void>? _refreshInFlight;
 
   Future<bool> needsDesktopSetup() async {
@@ -58,7 +59,7 @@ class ApiClient {
     _scheduleSessionExpiry();
   }
 
-  Future<void> openRuntimeSession() async {
+  Future<void> _requestRuntimeStopToken() async {
     final value = await post('/api/personal/runtime/session/');
     if (value is! Map || value['stop_token'] == null) {
       throw const ApiException(
@@ -68,7 +69,27 @@ class ApiClient {
     runtimeStopToken = value['stop_token'].toString();
   }
 
+  Future<void> openRuntimeSession() async {
+    await _requestRuntimeStopToken();
+    _runtimeSessionRefreshTimer?.cancel();
+    // Server tokens expire after one hour. Refresh while the authenticated
+    // desktop session is open so an all-day session still stops safely on exit.
+    _runtimeSessionRefreshTimer = Timer.periodic(
+      const Duration(minutes: 30),
+      (_) async {
+        try {
+          await _requestRuntimeStopToken();
+        } catch (_) {
+          // Keep the last still-valid stop token; normal API health handling
+          // reports the connectivity/authentication failure to the UI.
+        }
+      },
+    );
+  }
+
   Future<void> stopRuntimeOnExit() async {
+    _runtimeSessionRefreshTimer?.cancel();
+    _runtimeSessionRefreshTimer = null;
     final token = runtimeStopToken;
     if (token == null || token.isEmpty) return;
     await request(
@@ -83,6 +104,8 @@ class ApiClient {
 
   void logout() {
     _expiryTimer?.cancel();
+    _runtimeSessionRefreshTimer?.cancel();
+    _runtimeSessionRefreshTimer = null;
     accessToken = null;
     refreshToken = null;
     _sessionExpired = false;

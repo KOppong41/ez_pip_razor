@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import List
 
-from execution.services.engine import EngineDecision
+from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
 from execution.services.indicators import fractals
 
@@ -67,7 +67,7 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
 
     # Simple slope check: EMA rising/falling over last 5 bars
     lookback = min(cfg.slope_lookback, len(emas) - 1)
-    ema_prev = emas[-lookback]
+    ema_prev = emas[-(lookback + 1)]
     slope = ema_now - ema_prev
     slope_pct = (slope / last_close) if last_close else Decimal("0")
 
@@ -117,6 +117,34 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
             metadata={"reason": "rejection", "ratio": float(rejection), "min": float(cfg.wick_rejection_ratio)},
         )
 
+    if cfg.require_fractal_confirmation:
+        # A fractal is only confirmed after ``period`` later candles close, so
+        # the newest usable marker is period+1 bars from the end—not the last
+        # candle, whose marker is necessarily unconfirmed.
+        confirmed_index = len(fractal_markers) - cfg.fractal_period - 1
+        if confirmed_index < 0:
+            return EngineDecision(
+                action="skip",
+                reason="trend_pullback_no_fractal",
+                strategy="trend_pullback",
+                metadata={"reason": "fractal_unconfirmed"},
+            )
+        latest_confirmed = fractal_markers[confirmed_index]
+        if bull_trend and not latest_confirmed.get("up"):
+            return EngineDecision(
+                action="skip",
+                reason="trend_pullback_no_fractal",
+                strategy="trend_pullback",
+                metadata={"reason": "fractal_missing", "direction": "buy"},
+            )
+        if bear_trend and not latest_confirmed.get("down"):
+            return EngineDecision(
+                action="skip",
+                reason="trend_pullback_no_fractal",
+                strategy="trend_pullback",
+                metadata={"reason": "fractal_missing", "direction": "sell"},
+            )
+
     confidence = min(
         Decimal("1"),
         max(Decimal("0"), (abs(slope_pct) / cfg.min_trend_slope_pct) * Decimal("0.5"))
@@ -164,19 +192,3 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
                 "rejection_ratio": float(rejection),
             },
         )
-    if cfg.require_fractal_confirmation:
-        latest_marker = fractal_markers[-1]
-        if bull_trend and not latest_marker.get("up"):
-            return EngineDecision(
-                action="skip",
-                reason="trend_pullback_no_fractal",
-                strategy="trend_pullback",
-                metadata={"reason": "fractal_missing", "direction": "buy"},
-            )
-        if bear_trend and not latest_marker.get("down"):
-            return EngineDecision(
-                action="skip",
-                reason="trend_pullback_no_fractal",
-                strategy="trend_pullback",
-                metadata={"reason": "fractal_missing", "direction": "sell"},
-            )

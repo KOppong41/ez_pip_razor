@@ -2,8 +2,6 @@
 from execution.connectors.paper import PaperConnector
 from execution.models import Order
 from execution.connectors.mt5 import MT5Connector
-from execution.connectors.exness_web import ExnessWebConnector
-from execution.connectors.ctrader import CTraderConnector
 from decimal import Decimal
 from datetime import datetime
 import logging
@@ -26,8 +24,6 @@ _mt5_connector = MT5Connector()
 CONNECTORS = {
     "paper": PaperConnector(),
     "mt5_local": _mt5_connector,
-    "exness_web": ExnessWebConnector(),
-    "ctrader_api": CTraderConnector(),
 }
 # Legacy aliases still map to MT5 desktop unless an explicit connector is set on the account.
 for _alias in BROKER_ALIASES:
@@ -153,6 +149,7 @@ def validate_order_conditions(order: Order) -> tuple:
             asset_category=asset_category,
             broker_account=getattr(order, "broker_account", None),
             use_mt5_probe=True,
+            side=getattr(order, "side", None),
         )
         if market_status and not market_status.is_open:
             return False, f"market_closed:{market_status.reason}"
@@ -172,6 +169,7 @@ def _resolve_connector(order: Order):
         connector = CONNECTORS.get(explicit)
         if connector:
             return connector, explicit
+        return None, explicit
     # Fallback to legacy broker codes so existing accounts keep working.
     raw_code = account.broker
     normalized = normalize_broker_code(raw_code)
@@ -180,13 +178,14 @@ def _resolve_connector(order: Order):
         connector = CONNECTORS.get("paper")
         if connector:
             return connector, "paper"
-    # Default MT5 desktop
-    connector = CONNECTORS.get("mt5_local")
-    return connector, "mt5_local"
+    return None, normalized or raw_code or "unknown"
 
 
 def dispatch_place_order(order: Order) -> None:
     """Place order with pre-flight validation."""
+    from execution.services.orchestrator import validate_order_account_scope
+
+    validate_order_account_scope(order)
     connector, connector_key = _resolve_connector(order)
     if not connector:
         raise ValueError(f"No connector for broker adapter '{connector_key}'")
@@ -213,6 +212,9 @@ def dispatch_place_order(order: Order) -> None:
     connector.place_order(order)
 
 def dispatch_cancel_order(order: Order) -> None:
+    from execution.services.orchestrator import validate_order_account_scope
+
+    validate_order_account_scope(order)
     connector, connector_key = _resolve_connector(order)
     if not connector:
         raise ValueError(f"No connector for broker adapter '{connector_key}'")

@@ -20,6 +20,7 @@ from execution.utils.symbols import canonical_symbol
 from bots.models import Asset
 from execution.services.equity import update_equity_high_water
 from execution.services.latency import mark_order_timestamp
+from execution.services.market_hours import trade_mode_status
 from execution.task_priorities import (
     MT5_PRIORITY_HIGH,
     MT5_PRIORITY_LOW,
@@ -47,11 +48,27 @@ def execute_mt5_order_task(self, order_id: int):
 def enqueue_mt5_order(order: Order, *, emergency: bool = False):
     """Queue an order with persisted enqueue time and risk-aware priority."""
     mark_order_timestamp(order, "execution_queued_at")
-    return execute_mt5_order_task.apply_async(
-        args=[order.id],
-        queue="mt5_execution",
-        priority=priority_for_order(order, emergency=emergency),
-    )
+    try:
+        result = execute_mt5_order_task.apply_async(
+            args=[order.id],
+            queue="mt5_execution",
+            priority=priority_for_order(order, emergency=emergency),
+        )
+    except Exception as exc:
+        failed_at = timezone.now()
+        Order.objects.filter(pk=order.pk).update(
+            execution_queued_at=None,
+            dispatch_publish_failed_at=failed_at,
+            dispatch_publish_error=str(exc)[:2000],
+        )
+        order.execution_queued_at = None
+        order.dispatch_publish_failed_at = failed_at
+        order.dispatch_publish_error = str(exc)[:2000]
+        raise
+    if order.dispatch_publish_error:
+        Order.objects.filter(pk=order.pk).update(dispatch_publish_error="")
+        order.dispatch_publish_error = ""
+    return result
 
 
 @shared_task(bind=True, queue="mt5_execution", priority=MT5_PRIORITY_HIGH)
@@ -168,7 +185,7 @@ def refresh_mt5_markets_task(self, broker_account_id: int):
             mapping.bid = bid
             mapping.ask = ask
             mapping.spread = ask - bid
-            mapping.trading_status = "open" if getattr(info, "trade_mode", 0) not in {0, 1} else "closed"
+            mapping.trading_status = trade_mode_status(getattr(info, "trade_mode", None))
             mapping.last_tick_at = tick_at
             mapping.last_resolved_at = timezone.now()
             mapping.last_error = ""

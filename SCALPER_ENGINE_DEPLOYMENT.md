@@ -1,6 +1,11 @@
 # Scalper Engine Implementation – Complete Summary
 
-## Status: ✅ READY TO DEPLOY
+> **Historical implementation note — demo use only.** “Ready to deploy” below
+> means the old code path was assembled; it does not mean approved for real
+> money or unattended operation. Follow `DEPLOYMENT_CHECKLIST.md` and
+> `LIVE_TRADING_RUNBOOK.md` for the current gates and supported Windows topology.
+
+## Historical status: implementation assembled; live approval not granted
 
 The scalper bot now has a **fully implemented M1 high-frequency signal engine** that feeds aggressive trading setups into the execution layer.
 
@@ -350,7 +355,7 @@ If issues occur:
 
 ## Summary
 
-The **Scalper Signal Engine is complete and ready to deploy**. 
+The historical implementation was assembled, but it is **not a live-trading approval**.
 
 ### Key Achievements:
 - ✅ **No signal starvation** – 80+ opportunities per hour per bot

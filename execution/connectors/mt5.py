@@ -69,6 +69,31 @@ mt5 = _MT5Proxy()
 logger = logging.getLogger(__name__)
 
 
+def execution_quality_metadata(
+    *,
+    requested_price,
+    fill_price,
+    side: str,
+    point,
+    max_deviation_points,
+) -> dict:
+    requested = Decimal(str(requested_price))
+    filled = Decimal(str(fill_price))
+    point_value = Decimal(str(point))
+    if point_value <= 0:
+        raise ValueError("Broker point must be positive")
+    signed_slippage = filled - requested if side == "buy" else requested - filled
+    slippage_points = signed_slippage / point_value
+    return {
+        "requested_price": str(requested),
+        "fill_price": str(filled),
+        "signed_slippage_price": str(signed_slippage),
+        "signed_slippage_points": str(slippage_points),
+        "adverse_slippage_points": str(max(Decimal("0"), slippage_points)),
+        "max_deviation_points": int(max_deviation_points),
+    }
+
+
 def _coerce_ticket(value):
     if value in (None, "", 0):
         return None
@@ -1184,6 +1209,8 @@ class MT5Connector(BaseConnector):
                 broker_positions=broker_positions,
             )
             qty_dec = risk_result.volume
+            order.requested_price = risk_result.entry_price
+            order.save(update_fields=["requested_price"])
             mark_order_timestamp(order, "risk_validation_completed_at")
         except RiskRejected as exc:
             msg = f"Order {order.id} risk rejected: {exc}"
@@ -1515,6 +1542,41 @@ class MT5Connector(BaseConnector):
                         deal_metadata = _safe_mt5_metadata(broker_deal)
                 except Exception:
                     logger.warning("Unable to load MT5 deal economics for order %s", order.id, exc_info=True)
+
+            try:
+                quality = execution_quality_metadata(
+                    requested_price=order.requested_price,
+                    fill_price=fill_price,
+                    side=order.side,
+                    point=getattr(sinfo, "point", 0),
+                    max_deviation_points=risk_result.deviation_points,
+                )
+                deal_metadata = {**(deal_metadata or {}), "execution_quality": quality}
+                if Decimal(quality["adverse_slippage_points"]) > Decimal(
+                    str(risk_result.deviation_points)
+                ):
+                    logger.warning(
+                        "Order %s adverse slippage %s points exceeded requested deviation %s",
+                        order.id,
+                        quality["adverse_slippage_points"],
+                        risk_result.deviation_points,
+                    )
+                    log_journal_event(
+                        "order.slippage_exceeded",
+                        severity="warning",
+                        order=order,
+                        bot=order.bot,
+                        broker_account=order.broker_account,
+                        symbol=order.symbol,
+                        message="Realized slippage exceeded requested deviation",
+                        context=quality,
+                    )
+            except Exception:
+                logger.warning(
+                    "Unable to calculate execution quality for order %s",
+                    order.id,
+                    exc_info=True,
+                )
 
             record_fill(
                 order=order,

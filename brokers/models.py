@@ -16,10 +16,10 @@ DEFAULT_BROKER_CHOICES = [
 
 BROKER_CONNECTOR_CHOICES = [
     ("mt5_local", "MetaTrader 5 Desktop (local terminal)"),
-    ("exness_web", "Exness Web Terminal API"),
-    ("ctrader_api", "cTrader Open API"),
     ("paper", "Paper Simulator"),
 ]
+
+SUPPORTED_BROKER_CONNECTORS = {code for code, _label in BROKER_CONNECTOR_CHOICES}
 
 def get_broker_choices():
     """
@@ -172,6 +172,11 @@ class BrokerAccount(models.Model):
 
         if not owner and not testing:
             raise ValidationError("Owner is required for broker accounts.")
+
+        if self.connector not in SUPPORTED_BROKER_CONNECTORS:
+            raise ValidationError(
+                {"connector": f"Connector '{self.connector}' is not available in this release."}
+            )
 
         # Enforce allowed brokers if configured in settings (keeps admin forms in sync without migrations).
         allowed_brokers = [code for code, _ in get_broker_choices()] or []

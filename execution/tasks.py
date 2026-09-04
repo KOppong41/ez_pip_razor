@@ -28,7 +28,11 @@ from execution.models import (
     ScalperRunLog,
     Signal,
 )
-from execution.services.brokers import dispatch_place_order, get_broker_symbol_constraints
+from execution.services.brokers import (
+    dispatch_cancel_order,
+    dispatch_place_order,
+    get_broker_symbol_constraints,
+)
 from execution.services.order_guard import GuardInputs, apply_order_guards
 from execution.services.decision import make_decision_from_signal
 from execution.services.daily_risk import (
@@ -49,7 +53,6 @@ from execution.services.monitor import (
     close_position_now,
     should_trigger_kill_switch,
     unrealized_pnl,
-    manage_scalper_position,
 )
 from execution.services.prices import get_price
 from execution.services.psychology import bot_is_available_for_trading
@@ -58,6 +61,7 @@ from execution.services.market_hours import (
     maybe_pause_bot_for_market,
     maybe_unpause_crypto_for_open_market,
     is_crypto_symbol,
+    trade_mode_allows_entry,
 )
 from execution.tasks_market_guard import apply_market_guard
 from execution.services.scalper_config import (
@@ -68,6 +72,7 @@ from execution.services.scalper_config import (
 from execution.services.runtime_config import get_runtime_config
 from execution.services.journal import log_journal_event
 from execution.services.orchestrator import create_close_order_for_position, update_order_status
+from execution.services.position_management import plan_scalper_position
 from execution.services.portfolio import record_fill
 from execution.services.equity import update_equity_high_water
 from execution.services.trade_constraints import distance_to_price
@@ -110,6 +115,59 @@ def _queue_or_dispatch_order(order: Order, *, emergency: bool = False) -> str:
         return "queued"
     dispatch_place_order(order)
     return "executed"
+
+
+def _cancel_outstanding_entry_orders(broker_account) -> dict:
+    """Cancel local and broker-submitted entries before any emergency flatten."""
+    canceled_local = []
+    cancellation_requested = []
+    failures = []
+    outstanding = Order.objects.filter(
+        broker_account=broker_account,
+        intent="entry",
+        status__in=["new", "ack", "part_filled"],
+    ).select_related("broker_account", "bot", "decision__signal")
+    for order in outstanding:
+        try:
+            has_submission_evidence = bool(
+                order.submitted_at
+                or order.broker_order_ticket
+                or order.attempts.filter(
+                    status__in=["submitting", "ambiguous", "accepted", "partial"]
+                ).exists()
+            )
+            if order.status == "new" and not has_submission_evidence:
+                update_order_status(
+                    order,
+                    "canceled",
+                    error_msg="Canceled locally by account kill switch before submission",
+                )
+                canceled_local.append(order.id)
+                continue
+            dispatch_cancel_order(order)
+            cancellation_requested.append(order.id)
+        except Exception as exc:
+            failures.append({"order_id": order.id, "error": str(exc)})
+            Order.objects.filter(pk=order.pk).update(
+                last_error=f"Kill-switch cancellation failed: {str(exc)[:1800]}"
+            )
+            log_journal_event(
+                "kill_switch.cancel_failed",
+                severity="error",
+                order=order,
+                bot=order.bot,
+                broker_account=broker_account,
+                symbol=order.symbol,
+                message="Kill switch could not cancel outstanding entry",
+                context={"error": str(exc)},
+            )
+            task_failures_total.labels(task="kill_switch_monitor_task").inc()
+            logger.exception("Kill switch could not cancel order=%s", order.id)
+    return {
+        "canceled_local_order_ids": canceled_local,
+        "broker_cancel_order_ids": cancellation_requested,
+        "cancel_failures": failures,
+    }
 
 def _json_safe(val):
     """
@@ -432,16 +490,32 @@ def trail_positions_task(self):
     try:
         runtime_cfg = get_runtime_config()
         moved_ids = []
+        closed_ids = []
         connector = MT5Connector()
         for pos in BrokerPosition.objects.filter(
             status="open",
             ownership="ez_trade",
-        ).select_related("broker_account"):
+            broker_account__connector="mt5_local",
+        ).select_related(
+            "broker_account",
+            "originating_order__decision",
+        ):
             tick = connector.tick_for_account(pos.broker_account, pos.symbol)
             bid = Decimal(str(getattr(tick, "bid", 0) or 0))
             ask = Decimal(str(getattr(tick, "ask", 0) or 0))
             market = bid if pos.side == "buy" else ask
             if market <= 0:
+                continue
+
+            scalper_plan = plan_scalper_position(pos, market)
+            if scalper_plan is not None:
+                if scalper_plan.close:
+                    order, _ = create_close_order_for_position(pos, pos.broker_account)
+                    _queue_or_dispatch_order(order, emergency=True)
+                    closed_ids.append(pos.id)
+                elif scalper_plan.new_sl is not None:
+                    connector.modify_broker_position(pos, sl=scalper_plan.new_sl)
+                    moved_ids.append(pos.id)
                 continue
 
             info = connector.symbol_info_for_account(pos.broker_account, pos.symbol)
@@ -501,7 +575,7 @@ def trail_positions_task(self):
                 continue
             connector.modify_broker_position(pos, sl=requested_sl)
             moved_ids.append(pos.id)
-        return {"moved": moved_ids}
+        return {"moved": moved_ids, "closed": closed_ids}
     except Exception as e:
         task_failures_total.labels(task="trail_positions_task").inc()
         raise
@@ -960,7 +1034,7 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
     orders_info = []
     dispatch_errors = []
     for order, created in fanout_orders(decision, master_qty=None):
-        should_dispatch = created or order.status in ("new", "ack")
+        should_dispatch = order.status == "new" and order.submitted_at is None
         if should_dispatch:
             # Apply unit-aware, broker-aware guards before dispatch
             try:
@@ -968,7 +1042,10 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
             except Exception:
                 constraints = None
             point = getattr(constraints, "point", None) if constraints else None
-            spread = (decision.signal.payload or {}).get("spread_points") if decision.signal and decision.signal.payload else None
+            spread = (
+                (decision.signal.payload or {}).get("spread_price")
+                or (decision.signal.payload or {}).get("spread_points")
+            ) if decision.signal and decision.signal.payload else None
             min_stop_pts = getattr(constraints, "stops_level_points", None) if constraints else None
             entry_hint = None
             try:
@@ -1177,6 +1254,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             auto_trade=True,
             status="active",
             engine_mode="scalper",
+            broker_account__connector="mt5_local",
         )
     )
     
@@ -1297,6 +1375,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     - Emits to broker if decision passes risk checks
     """
     from bots.models import Bot
+    cycle_started_at = timezone.now()
     bot = Bot.objects.select_related("broker_account", "asset").get(id=bot_id)
     session_label = _session_label()
     symbol = getattr(getattr(bot, "asset", None), "symbol", None)
@@ -1324,6 +1403,16 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         _log_skip("bot_auto_trade_disabled")
         return {"status": "skipped", "reason": "bot_auto_trade_disabled"}
 
+    broker_account = getattr(bot, "broker_account", None)
+    if not broker_account or not getattr(broker_account, "is_active", False):
+        logger.info("[ScalperTrade] bot=%s has no active broker account, skipping", bot.id)
+        _log_skip("no_active_broker")
+        return {"status": "skipped", "reason": "no_active_broker"}
+    if getattr(broker_account, "connector", None) != "mt5_local":
+        logger.warning("[ScalperTrade] bot=%s uses unsupported scalper connector", bot.id)
+        _log_skip("unsupported_connector")
+        return {"status": "skipped", "reason": "unsupported_connector"}
+
     market_status = get_market_status_for_bot(bot, use_mt5_probe=True)
     if market_status and not market_status.is_open:
         maybe_pause_bot_for_market(bot, market_status)
@@ -1342,12 +1431,6 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         logger.info("[ScalperTrade] bot=%s unavailable (status/paused/allocation), skipping", bot.id)
         _log_skip("bot_unavailable")
         return {"status": "skipped", "reason": "bot_unavailable"}
-
-    broker_account = getattr(bot, "broker_account", None)
-    if not broker_account or not getattr(broker_account, "is_active", False):
-        logger.info("[ScalperTrade] bot=%s has no active broker account, skipping", bot.id)
-        _log_skip("no_active_broker")
-        return {"status": "skipped", "reason": "no_active_broker"}
 
     if not getattr(bot, "asset", None) or not getattr(bot.asset, "symbol", None):
         logger.info("[ScalperTrade] bot=%s has no asset configured, skipping", bot.id)
@@ -1442,7 +1525,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             return {"status": "ok", "reason": "no_enabled_strategies"}
     
     tick_snapshot = None
-    spread_points = None
+    spread_price = None
     # Get M1 candles
     try:
         # Validate broker-authoritative symbol/tick state before evaluating a new entry.
@@ -1450,7 +1533,9 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         try:
             connector = MT5Connector()
             info = connector.symbol_info_for_account(broker_account, symbol)
-            if not getattr(info, "visible", False) or getattr(info, "trade_mode", 0) in {0, 1}:
+            if not getattr(info, "visible", False) or not trade_mode_allows_entry(
+                getattr(info, "trade_mode", None)
+            ):
                 _log_skip(
                     "market_closed_or_symbol_not_tradable",
                     {"trade_mode": getattr(info, "trade_mode", None), "strategy_profile": strategy_profile_key},
@@ -1465,7 +1550,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             if bid is None or ask is None or Decimal(str(bid)) <= 0 or Decimal(str(ask)) <= 0:
                 _log_skip("market_data_unavailable", {"strategy_profile": strategy_profile_key})
                 return {"status": "skipped", "reason": "market_data_unavailable"}
-            spread_points = Decimal(str(ask)) - Decimal(str(bid))
+            spread_price = Decimal(str(ask)) - Decimal(str(bid))
             tick_snapshot = {
                 "bid": float(bid),
                 "ask": float(ask),
@@ -1534,10 +1619,10 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     bar_range = last_entry["high"] - last_entry["low"]
 
     volatility_snapshot = {
-        "atr_points": str(entry_atr_points),
+        "atr_price": str(entry_atr_points),
         "bar_range": str(bar_range),
         "tick_volume": last_entry.get("tick_volume"),
-        "spread_points": str(spread_points) if spread_points is not None else None,
+        "spread_price": str(spread_price) if spread_price is not None else None,
     }
     broker_snapshot = {
         "min_lot": str(broker_constraints.min_lot) if broker_constraints.min_lot is not None else None,
@@ -1559,6 +1644,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     signals_created = []
     decisions_made = []
     orders_placed = []
+    dispatch_failures = []
     strategy_events = []
 
     # Optional HTF bias (15m) to filter countertrend M1 entries
@@ -1635,10 +1721,10 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             available=available_pool,
             symbol=canonical_sym,
             context={
-                "atr_points": entry_atr_points,
+                "atr_price": entry_atr_points,
                 "bar_range": bar_range,
                 "last_close": last_entry["close"],
-                "spread_points": spread_points,
+                "spread_price": spread_price,
                 "session": session_label,
                 "htf_bias": htf_bias,
             },
@@ -1746,9 +1832,9 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 "generated_at": timezone.now().isoformat(),
                 "session": session_label,
                 "close": str(last_entry.get("close")),
-                "atr_points": str(entry_atr_points),
+                "atr_price": str(entry_atr_points),
                 "tick_volume": last_entry.get("tick_volume"),
-                "spread_points": str(spread_points) if spread_points is not None else None,
+                "spread_price": str(spread_price) if spread_price is not None else None,
                 "point": str(broker_point) if broker_point is not None else None,
                 "min_stop_points": str(broker_min_stop_points) if broker_min_stop_points else None,
                 "lot_step": str(broker_lot_step) if broker_lot_step is not None else None,
@@ -1818,7 +1904,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         # Fanout to orders and dispatch
         try:
             for order, created in fanout_orders(decision, master_qty=None):
-                should_dispatch = created or order.status in ("new", "ack")
+                should_dispatch = order.status == "new" and order.submitted_at is None
                 if should_dispatch:
                     # Apply unit-aware, broker-aware guards before dispatch
                     try:
@@ -1829,7 +1915,10 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                     min_stop_pts = getattr(constraints, "stops_level_points", None) if constraints else None
                     spread = None
                     try:
-                        spread = (decision.signal.payload or {}).get("spread_points") if decision.signal and decision.signal.payload else None
+                        spread = (
+                            (decision.signal.payload or {}).get("spread_price")
+                            or (decision.signal.payload or {}).get("spread_points")
+                        ) if decision.signal and decision.signal.payload else None
                     except Exception:
                         spread = None
                     entry_hint = None
@@ -1891,6 +1980,9 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                         _queue_or_dispatch_order(order)
                         orders_placed.append((order.id, order.symbol, order.side))
                     except Exception as e:
+                        dispatch_failures.append(
+                            {"order_id": order.id, "strategy": strategy_name, "error": str(e)}
+                        )
                         log_journal_event(
                             "order.dispatch_error",
                             severity="error",
@@ -1913,6 +2005,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                             e,
                         )
         except Exception as e:
+            dispatch_failures.append({"strategy": strategy_name, "error": str(e)})
             logger.exception(
                 "[ScalperTrade] bot=%s strategy=%s fanout failed: %s",
                 bot.id,
@@ -1930,6 +2023,11 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         outcome = "signals_generated_no_decisions"
     else:
         outcome = "no_signals"
+
+    cycle_duration_ms = max(
+        0,
+        int((timezone.now() - cycle_started_at).total_seconds() * 1000),
+    )
 
     log_journal_event(
         "scalper_engine_run",
@@ -1951,6 +2049,8 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             "signals": len(signals_created),
             "decisions": len(decisions_made),
             "orders": len(orders_placed),
+            "dispatch_failures": dispatch_failures,
+            "cycle_duration_ms": cycle_duration_ms,
             "strategy_context": strategy_context,
         },
     )
@@ -1965,24 +2065,34 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         len(orders_placed),
     )
     
-    if not signals_created:
-        summary = {
-            "outcome": "no_signals",
-            "strategies": strategy_events,
-            "market": market_snapshot,
-            "htf_bias": htf_bias,
-            "htf_bias_detail": htf_bias_detail,
-            "generated_at": timezone.now().isoformat(),
-        }
-        try:
-            ScalperRunLog.objects.create(
-                bot=bot,
-                timeframe=timeframe,
-                session=session_label,
-                summary=_json_safe(summary),
-            )
-        except Exception:
-            logger.exception("[ScalperTrade] failed to persist run log bot=%s", bot.id)
+    summary = {
+        "outcome": outcome,
+        "cycle_duration_ms": cycle_duration_ms,
+        "signals": len(signals_created),
+        "decisions": len(decisions_made),
+        "orders": len(orders_placed),
+        "dispatch_failures": dispatch_failures,
+        "strategies": strategy_events,
+        "market": market_snapshot,
+        "htf_bias": htf_bias,
+        "htf_bias_detail": htf_bias_detail,
+        "generated_at": timezone.now().isoformat(),
+    }
+    try:
+        ScalperRunLog.objects.create(
+            bot=bot,
+            timeframe=timeframe,
+            session=session_label,
+            summary=_json_safe(summary),
+        )
+    except Exception:
+        logger.exception("[ScalperTrade] failed to persist run log bot=%s", bot.id)
+
+    if dispatch_failures:
+        task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
+        raise ConnectorError(
+            f"{len(dispatch_failures)} scalper order dispatch/fanout operation(s) failed"
+        )
 
     return {
         "status": "ok",
@@ -2086,7 +2196,13 @@ def kill_switch_monitor_task(self):
     connector = MT5Connector()
     triggered = []
     closed = []
-    for policy in RiskPolicy.objects.select_related("broker_account").all():
+    canceled_local = []
+    broker_cancels = []
+    cancel_failures = []
+    flatten_failures = []
+    for policy in RiskPolicy.objects.select_related("broker_account").filter(
+        broker_account__connector="mt5_local"
+    ):
         account = policy.broker_account
         if not account.is_active:
             continue
@@ -2134,6 +2250,10 @@ def kill_switch_monitor_task(self):
                 "daily_baseline_locked": risk_day.baseline_locked,
             },
         )
+        cancellation = _cancel_outstanding_entry_orders(account)
+        canceled_local.extend(cancellation["canceled_local_order_ids"])
+        broker_cancels.extend(cancellation["broker_cancel_order_ids"])
+        cancel_failures.extend(cancellation["cancel_failures"])
         if policy.emergency_close_owned_positions:
             for position in BrokerPosition.objects.filter(
                 broker_account=account,
@@ -2144,10 +2264,30 @@ def kill_switch_monitor_task(self):
                     order, _ = create_close_order_for_position(position, account)
                     _queue_or_dispatch_order(order, emergency=True)
                     closed.append(position.broker_position_ticket)
-                except Exception:
+                except Exception as exc:
+                    flatten_failures.append(
+                        {
+                            "broker_position_ticket": position.broker_position_ticket,
+                            "error": str(exc),
+                        }
+                    )
                     task_failures_total.labels(task="kill_switch_monitor_task").inc()
                     logger.exception("Kill switch could not close owned ticket=%s", position.broker_position_ticket)
-    return {"triggered": triggered, "closed_owned_tickets": closed}
+    result = {
+        "triggered": triggered,
+        "canceled_local_order_ids": canceled_local,
+        "broker_cancel_order_ids": broker_cancels,
+        "cancel_failures": cancel_failures,
+        "flatten_failures": flatten_failures,
+        "closed_owned_tickets": closed,
+    }
+    if cancel_failures or flatten_failures:
+        raise ConnectorError(
+            "Kill switch has "
+            f"{len(cancel_failures)} cancellation and "
+            f"{len(flatten_failures)} flatten failure(s)"
+        )
+    return result
 
 
 @shared_task(

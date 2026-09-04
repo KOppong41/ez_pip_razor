@@ -18,7 +18,7 @@ def _volatility_ratio(context: Mapping[str, Any]) -> Decimal:
     Approximate volatility as ATR or bar range divided by last price.
     Falls back to zero if data is missing.
     """
-    atr = _to_decimal(context.get("atr_points") or context.get("bar_range") or 0)
+    atr = _to_decimal(context.get("atr_price") or context.get("atr_points") or context.get("bar_range") or 0)
     last = _to_decimal(context.get("last_close") or 0)
     if atr <= 0 or last <= 0:
         return Decimal("0")
@@ -44,7 +44,7 @@ def select_ai_strategies(
     canon_symbol = canonical_symbol(symbol)
 
     vol_ratio = _volatility_ratio(context)
-    spread = _to_decimal(context.get("spread_points") or 0)
+    spread = _to_decimal(context.get("spread_price") or context.get("spread_points") or 0)
     bias = (context.get("htf_bias") or "").lower()
 
     # Session hint: bias toward breakouts during London/NY, more selective in Asia/quiet.

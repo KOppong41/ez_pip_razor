@@ -3,8 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from django.test import TestCase
+from django.contrib.auth import get_user_model
 
-from bots.models import Bot
+from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.models import BrokerPosition, Execution, Order, Position
 from execution.tasks import _reconcile_missing_owned_position
@@ -12,20 +13,26 @@ from execution.tasks import _reconcile_missing_owned_position
 
 class BrokerPositionReconciliationTests(TestCase):
     def test_imports_broker_stop_exit_and_flattens_local_position(self):
+        user = get_user_model().objects.create_user("reconcile-owner", password="pw")
         account = BrokerAccount.objects.create(
+            owner=user,
             name="MT5 demo",
             broker="mt5",
             connector="mt5_local",
             account_ref="reconcile-demo",
             is_verified=True,
         )
+        asset, _ = Asset.objects.get_or_create(symbol="XAUUSDm")
         bot = Bot.objects.create(
+            owner=user,
             name="Gold bot",
             status="active",
             auto_trade=True,
             broker_account=account,
+            asset=asset,
         )
         entry = Order.objects.create(
+            owner=user,
             bot=bot,
             broker_account=account,
             client_order_id="entry-reconcile-test",
@@ -37,12 +44,6 @@ class BrokerPositionReconciliationTests(TestCase):
             intent="entry",
             status="filled",
             broker_position_ticket=333,
-        )
-        Position.objects.create(
-            broker_account=account,
-            symbol="XAUUSDm",
-            qty=Decimal("0.01"),
-            avg_price=Decimal("4617.206"),
         )
         broker_position = BrokerPosition.objects.create(
             broker_account=account,
@@ -79,9 +80,7 @@ class BrokerPositionReconciliationTests(TestCase):
         broker_position.refresh_from_db()
         self.assertEqual(broker_position.status, "closed")
         self.assertEqual(broker_position.volume, Decimal("0"))
-        local_position = Position.objects.get(broker_account=account, symbol="XAUUSDm")
-        self.assertEqual(local_position.qty, Decimal("0"))
-        self.assertEqual(local_position.status, "closed")
+        self.assertFalse(Position.objects.filter(broker_account=account).exists())
         close_order = Order.objects.get(intent="exit", broker_position_ticket=333)
         self.assertEqual(close_order.status, "filled")
         self.assertEqual(close_order.broker_deal_ticket, 444)

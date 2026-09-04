@@ -16,6 +16,35 @@ logger = logging.getLogger(__name__)
 FX_WEEKLY_OPEN_UTC = time(22, 0)
 FX_WEEKLY_CLOSE_UTC = time(22, 0)
 
+# MetaTrader 5 SYMBOL_TRADE_MODE values. Keeping the numeric protocol here
+# lets calendar tests run without importing the Windows-only MetaTrader5 SDK.
+SYMBOL_TRADE_MODE_DISABLED = 0
+SYMBOL_TRADE_MODE_LONGONLY = 1
+SYMBOL_TRADE_MODE_SHORTONLY = 2
+SYMBOL_TRADE_MODE_CLOSEONLY = 3
+SYMBOL_TRADE_MODE_FULL = 4
+
+
+def trade_mode_allows_entry(trade_mode, side: str | None = None) -> bool:
+    """Return whether a symbol trade mode permits this entry direction."""
+    if trade_mode == SYMBOL_TRADE_MODE_FULL:
+        return True
+    if trade_mode == SYMBOL_TRADE_MODE_LONGONLY:
+        return side in (None, "buy")
+    if trade_mode == SYMBOL_TRADE_MODE_SHORTONLY:
+        return side in (None, "sell")
+    return False
+
+
+def trade_mode_status(trade_mode) -> str:
+    return {
+        SYMBOL_TRADE_MODE_DISABLED: "disabled",
+        SYMBOL_TRADE_MODE_LONGONLY: "long_only",
+        SYMBOL_TRADE_MODE_SHORTONLY: "short_only",
+        SYMBOL_TRADE_MODE_CLOSEONLY: "close_only",
+        SYMBOL_TRADE_MODE_FULL: "open",
+    }.get(trade_mode, "unknown")
+
 
 def _is_crypto_symbol(symbol: str | None) -> bool:
     if not symbol:
@@ -86,7 +115,12 @@ def _calendar_status(now: datetime, asset_category: str | None, symbol: str | No
     return MarketStatus(is_open=True, reason="session_open", checked_at=now, source="calendar")
 
 
-def _probe_mt5_market(symbol: str, broker_account, now: datetime) -> Optional[MarketStatus]:
+def _probe_mt5_market(
+    symbol: str,
+    broker_account,
+    now: datetime,
+    side: str | None = None,
+) -> Optional[MarketStatus]:
     """
     Optional MT5-level probe to refine market state using live symbol info/ticks.
     Returns MarketStatus if a definitive state was determined, otherwise None.
@@ -118,11 +152,10 @@ def _probe_mt5_market(symbol: str, broker_account, now: datetime) -> Optional[Ma
                 )
 
         trade_mode = getattr(info, "trade_mode", None)
-        # MetaTrader defines DISABLED as zero and CLOSEONLY as one.
-        if trade_mode in {0, 1}:
+        if not trade_mode_allows_entry(trade_mode, side):
             return MarketStatus(
                 is_open=False,
-                reason="trade_mode_closed",
+                reason=f"trade_mode_{trade_mode_status(trade_mode)}",
                 checked_at=now,
                 next_open=_next_weekly_open(now),
                 source="mt5",
@@ -181,6 +214,7 @@ def get_market_status(
     *,
     now: datetime | None = None,
     use_mt5_probe: bool = False,
+    side: str | None = None,
 ) -> MarketStatus:
     """
     Determine whether a symbol's market is open.
@@ -202,14 +236,20 @@ def get_market_status(
         return status
 
     if use_mt5_probe and broker_account:
-        probe = _probe_mt5_market(symbol, broker_account, current_utc)
+        probe = _probe_mt5_market(symbol, broker_account, current_utc, side=side)
         if probe:
             return probe
 
     return MarketStatus(is_open=True, reason="open", checked_at=current_utc)
 
 
-def get_market_status_for_bot(bot, *, now: datetime | None = None, use_mt5_probe: bool = False) -> MarketStatus:
+def get_market_status_for_bot(
+    bot,
+    *,
+    now: datetime | None = None,
+    use_mt5_probe: bool = False,
+    side: str | None = None,
+) -> MarketStatus:
     """
     Convenience wrapper to fetch market status using Bot attributes.
     """
@@ -223,6 +263,7 @@ def get_market_status_for_bot(bot, *, now: datetime | None = None, use_mt5_probe
         broker_account=broker_account,
         now=now,
         use_mt5_probe=use_mt5_probe,
+        side=side,
     )
 
 

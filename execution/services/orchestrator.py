@@ -10,12 +10,71 @@ from core.metrics import orders_created_total, order_status_total
 from decimal import Decimal
 import logging
 
+from brokers.models import SUPPORTED_BROKER_CONNECTORS
+
 logger = logging.getLogger(__name__)
 
 VALID_STATUSES = {s for (s, _) in Order.STATUS}
 
 # Canonical statuses used everywhere
 OrderStatus = Literal["new", "ack", "filled", "part_filled", "canceled", "rejected", "error"]
+
+
+def validate_decision_account_scope(decision: Decision, broker_account: BrokerAccount) -> int:
+    """Validate that a decision, bot, signal, and account form one ownership boundary."""
+    bot = decision.bot
+    signal = decision.signal
+    if bot is None:
+        raise ValueError("Decision must be attached to a bot")
+    if bot.broker_account_id != broker_account.id:
+        raise ValueError("Decision bot is not configured for this broker account")
+    if signal.bot_id and signal.bot_id != bot.id:
+        raise ValueError("Decision signal belongs to a different bot")
+
+    owner_ids = {
+        owner_id
+        for owner_id in (
+            broker_account.owner_id,
+            bot.owner_id,
+            decision.owner_id,
+            signal.owner_id,
+        )
+        if owner_id is not None
+    }
+    if len(owner_ids) != 1:
+        if not owner_ids:
+            raise ValueError("Trading objects must have an owner")
+        raise ValueError("Decision, bot, signal, and broker account owners do not match")
+
+    connector = getattr(broker_account, "connector", "") or ""
+    if connector not in SUPPORTED_BROKER_CONNECTORS:
+        raise ValueError(f"Connector '{connector or 'unknown'}' is not available")
+    return next(iter(owner_ids))
+
+
+def validate_order_account_scope(order: Order) -> int:
+    """Apply the ownership boundary again immediately before broker dispatch."""
+    account = order.broker_account
+    bot = order.bot
+    if bot.broker_account_id != account.id:
+        raise ValueError("Order bot is not configured for this broker account")
+    owner_ids = {
+        owner_id
+        for owner_id in (order.owner_id, bot.owner_id, account.owner_id)
+        if owner_id is not None
+    }
+    if order.decision_id:
+        validate_decision_account_scope(order.decision, account)
+        if order.decision.owner_id:
+            owner_ids.add(order.decision.owner_id)
+    if len(owner_ids) != 1:
+        if not owner_ids:
+            raise ValueError("Order, bot, and broker account must have an owner")
+        raise ValueError("Order, bot, and broker account owners do not match")
+    connector = getattr(account, "connector", "") or ""
+    if connector not in SUPPORTED_BROKER_CONNECTORS:
+        raise ValueError(f"Connector '{connector or 'unknown'}' is not available")
+    return next(iter(owner_ids))
 
 def make_client_order_id(decision: Decision, broker_account: BrokerAccount) -> str:
     base = f"{decision.id}|{broker_account.id}|{decision.signal.symbol}|{decision.action}"
@@ -131,6 +190,37 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
     """
     Idempotently create a close order sized to flatten the given position.
     """
+    if getattr(broker_account, "connector", "") == "paper":
+        if getattr(position, "broker_account_id", None) != broker_account.id:
+            raise ValueError("Position does not belong to this broker account")
+        if getattr(position, "status", None) != "open" or not hasattr(position, "qty"):
+            raise ValueError("Paper close requires an open paper position")
+        bot = Bot.objects.filter(
+            broker_account=broker_account,
+            asset__symbol=position.symbol,
+        ).first() or Bot.objects.filter(broker_account=broker_account).first()
+        if bot is None:
+            raise ValueError("Cannot close a paper position without its bot")
+        side = "sell" if position.qty > 0 else "buy"
+        qty = abs(position.qty)
+        client_id = make_close_order_id(position, broker_account)
+        order, created = Order.objects.get_or_create(
+            client_order_id=client_id,
+            defaults={
+                "bot": bot,
+                "owner_id": bot.owner_id,
+                "broker_account": broker_account,
+                "symbol": position.symbol,
+                "side": side,
+                "qty": qty,
+                "remaining_qty": qty,
+                "intent": "exit",
+                "status": "new",
+            },
+        )
+        validate_order_account_scope(order)
+        return order, created
+
     broker_position = position if isinstance(position, BrokerPosition) else None
     if broker_position is None:
         candidates = BrokerPosition.objects.filter(
@@ -145,6 +235,8 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
             )
         broker_position = candidates.get()
 
+    if broker_position.broker_account_id != broker_account.id:
+        raise ValueError("Broker position does not belong to this broker account")
     if not broker_position.is_manageable:
         raise ValueError("Manual or unknown MT5 positions cannot be managed automatically")
 
@@ -168,6 +260,7 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
 
     defaults = {
         "bot": bot,
+        "owner_id": bot.owner_id,
         "broker_account": broker_account,
         "symbol": broker_position.symbol,
         "side": side,
@@ -182,6 +275,7 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
         client_order_id=client_id,
         defaults=defaults,
     )
+    validate_order_account_scope(order)
 
     # Never recycle a resolved close order into a fresh submission. Ambiguous
     # retries must reconcile this deterministic order before another send.
@@ -234,6 +328,8 @@ def create_order_from_decision(
     if decision.action not in ("open", "close"):
         raise ValueError("Decision action must be 'open' or 'close' to create an order")
 
+    owner_id = validate_decision_account_scope(decision, broker_account)
+
     symbol = decision.signal.symbol
     side = "buy" if decision.signal.direction == "buy" else "sell"
     client_id = make_client_order_id(decision, broker_account)
@@ -258,7 +354,7 @@ def create_order_from_decision(
         "remaining_qty": qty_decimal,
         "intent": "entry" if decision.action == "open" else "exit",
         "status": "new",
-        "owner": getattr(decision, "owner", None) or getattr(decision.bot, "owner", None),
+        "owner_id": owner_id,
     }
 
     # Create or reuse an existing order (idempotent)
@@ -266,6 +362,7 @@ def create_order_from_decision(
         client_order_id=client_id,
         defaults=defaults,
     )
+    validate_order_account_scope(order)
 
     # The strategy/decision must define protection. Order creation never fetches
     # MT5 data or invents fallback stops from an API/view process.

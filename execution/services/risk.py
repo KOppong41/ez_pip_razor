@@ -31,8 +31,8 @@ class ScalperRiskContext:
     reentry_count: int = 0
     minutes_since_last_same_direction: int | None = None
     minutes_since_last_loss: int | None = None
-    spread_points: Decimal | None = None
-    slippage_points: Decimal | None = None
+    spread_price: Decimal | None = None
+    slippage_price: Decimal | None = None
     floating_symbol_risk_pct: Decimal | None = None
     scale_in_allowed: bool = False
     allow_scale_in_default: bool = False
@@ -128,22 +128,22 @@ def _check_scalper_limits(
     except Exception:
         point = None
 
-    if ctx.spread_points is not None:
+    if ctx.spread_price is not None:
         allowed_spread_price = distance_to_price(
             sym_cfg.max_spread_points,
             getattr(sym_cfg, "max_spread_unit", "points"),
             point,
         )
-        if allowed_spread_price > 0 and ctx.spread_points > allowed_spread_price:
+        if allowed_spread_price > 0 and ctx.spread_price > allowed_spread_price:
             return False, "scalper:spread_exceeded"
 
-    if ctx.slippage_points is not None:
+    if ctx.slippage_price is not None:
         allowed_slippage_price = distance_to_price(
             sym_cfg.max_slippage_points,
             getattr(sym_cfg, "max_slippage_unit", "points"),
             point,
         )
-        if allowed_slippage_price > 0 and ctx.slippage_points > allowed_slippage_price:
+        if allowed_slippage_price > 0 and ctx.slippage_price > allowed_slippage_price:
             return False, "scalper:slippage_exceeded"
 
     if (

@@ -3,9 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
+from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from bots.models import Bot
+from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector, _MT5Proxy
@@ -16,7 +17,9 @@ from execution.services.orchestrator import create_order_from_decision
 
 class MT5ConnectorTest(TestCase):
     def setUp(self):
+        self.user = get_user_model().objects.create_user("mt5-connector-owner", password="pw")
         self.account = BrokerAccount.objects.create(
+            owner=self.user,
             name="MT5 demo",
             broker="mt5",
             connector="mt5_local",
@@ -24,10 +27,12 @@ class MT5ConnectorTest(TestCase):
             is_verified=True,
         )
         self.bot = Bot.objects.create(
+            owner=self.user,
             name="MT5 bot",
             status="active",
             auto_trade=True,
             broker_account=self.account,
+            asset=Asset.objects.create(symbol="MT5EURUSD"),
         )
         signal = Signal.objects.create(
             bot=self.bot,

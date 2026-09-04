@@ -237,14 +237,16 @@ def personal_control(request):
         policy.emergency_stop = True
         policy.save(update_fields=["entries_enabled", "emergency_stop", "updated_at"])
         bots.update(status="stopped")
-        if bool(request.data.get("close_owned_positions")) and policy.emergency_close_owned_positions:
-            for position in BrokerPosition.objects.filter(
-                broker_account=account,
-                ownership="ez_trade",
-                status="open",
-            ):
-                order, _ = create_close_order_for_position(position, account)
-                enqueue_mt5_order(order, emergency=True)
+        # The serialized MT5 worker cancels outstanding entries first, then
+        # flattens owned positions only when the policy explicitly opts in.
+        from execution.tasks import kill_switch_monitor_task
+
+        transaction.on_commit(
+            lambda: kill_switch_monitor_task.apply_async(
+                queue="mt5_execution",
+                priority=0,
+            )
+        )
     else:
         return Response({"detail": "action must be start, stop, or emergency_stop"}, status=400)
     return Response({"action": action, "entries_enabled": policy.entries_enabled, "emergency_stop": policy.emergency_stop})

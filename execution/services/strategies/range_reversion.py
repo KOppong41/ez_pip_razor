@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import List
 
-from execution.services.engine import EngineDecision
+from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
 
 

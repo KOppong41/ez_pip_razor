@@ -1,5 +1,10 @@
 # Strategy Fixes Applied - November 20, 2025
 
+> **Historical and unvalidated.** Performance percentages and expected win-rate
+> statements below were estimates, not measured evidence. Do not use them for a
+> funding decision. Validate with the current checklist, cost-aware out-of-sample
+> tests, and demo forward testing.
+
 ## Changes Summary
 
 This document records the critical strategy improvements applied to fix losing trades.

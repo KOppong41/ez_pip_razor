@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from django.db import transaction
 
-from execution.models import Signal, Decision, Position, Order
+from execution.models import BrokerPosition, Signal, Decision, Position, Order
 from .strategy import naive_strategy, StrategyDecision
 from .risk import RiskConfig, check_risk, ScalperRiskContext
 from core.metrics import decisions_total
@@ -46,23 +46,46 @@ def _log_scalper_trace(signal: Signal | None, stage: str, action: str, reason: s
 
 
 def count_open_positions(symbol: str) -> int:
-    return Position.objects.filter(symbol=symbol, status="open").count()
+    return (
+        Position.objects.filter(
+            symbol=symbol,
+            status="open",
+            broker_account__connector="paper",
+        ).count()
+        + BrokerPosition.objects.filter(symbol=symbol, status="open").count()
+    )
 
 
 def count_total_open_positions() -> int:
-    return Position.objects.filter(status="open").count()
+    return (
+        Position.objects.filter(status="open", broker_account__connector="paper").count()
+        + BrokerPosition.objects.filter(status="open").count()
+    )
 
 
 def count_total_open_positions_for_bot(bot) -> int:
-    qs = Position.objects.filter(status="open")
-    if bot and bot.broker_account_id:
-        qs = qs.filter(broker_account=bot.broker_account)
-    return qs.count()
+    if not bot or not bot.broker_account_id:
+        return count_total_open_positions()
+    if bot.broker_account.connector == "mt5_local":
+        return BrokerPosition.objects.filter(
+            broker_account=bot.broker_account,
+            status="open",
+        ).count()
+    return Position.objects.filter(
+        broker_account=bot.broker_account,
+        status="open",
+    ).count()
 
 def count_open_positions_for_bot(bot, symbol: str | None = None) -> int:
-    qs = Position.objects.filter(status="open")
-    if bot and bot.broker_account_id:
-        qs = qs.filter(broker_account=bot.broker_account)
+    if bot and bot.broker_account_id and bot.broker_account.connector == "mt5_local":
+        qs = BrokerPosition.objects.filter(
+            broker_account=bot.broker_account,
+            status="open",
+        )
+    else:
+        qs = Position.objects.filter(status="open")
+        if bot and bot.broker_account_id:
+            qs = qs.filter(broker_account=bot.broker_account)
     if symbol:
         qs = qs.filter(symbol=symbol)
     return qs.count()
@@ -94,7 +117,9 @@ def detect_position_conflict(
     if not bot or not bot.broker_account_id:
         return None
 
-    positions = Position.objects.filter(
+    live_account = bot.broker_account.connector == "mt5_local"
+    position_model = BrokerPosition if live_account else Position
+    positions = position_model.objects.filter(
         broker_account=bot.broker_account,
         symbol=symbol,
         status="open",
@@ -103,7 +128,13 @@ def detect_position_conflict(
         return None
 
     # If multiple exist, just look at aggregate sign for simplicity
-    total_qty = sum((p.qty for p in positions), Decimal("0"))
+    if live_account:
+        total_qty = sum(
+            (p.volume if p.side == "buy" else -p.volume for p in positions),
+            Decimal("0"),
+        )
+    else:
+        total_qty = sum((p.qty for p in positions), Decimal("0"))
     existing_dir = _position_direction(total_qty)
     if existing_dir is None:
         return None
@@ -372,8 +403,8 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
     if last_loss:
         minutes_since_last_loss = max(0, int((now - last_loss.decided_at).total_seconds() // 60))
 
-    spread_points = _parse_decimal(payload, "spread_points", "spread")
-    slippage_points = _parse_decimal(payload, "slippage_points", "slippage")
+    spread_price = _parse_decimal(payload, "spread_price", "spread_points", "spread")
+    slippage_price = _parse_decimal(payload, "slippage_price", "slippage_points", "slippage")
     floating_risk_pct = _parse_decimal(payload, "floating_symbol_risk_pct", "symbol_risk_pct")
 
     floating_pnl_points = _parse_decimal(payload, "floating_pnl_points")
@@ -403,8 +434,8 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
         reentry_count=reentry_count,
         minutes_since_last_same_direction=minutes_since_last_same,
         minutes_since_last_loss=minutes_since_last_loss,
-        spread_points=spread_points,
-        slippage_points=slippage_points,
+        spread_price=spread_price,
+        slippage_price=slippage_price,
         floating_symbol_risk_pct=floating_risk_pct,
         scale_in_allowed=scale_in_allowed,
         allow_scale_in_default=bool(

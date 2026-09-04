@@ -132,7 +132,16 @@ def _estimate_sl_distance_points(symbol_cfg: SymbolConfig, payload: dict[str, An
             except Exception:
                 continue
     atr_points = None
-    for key in ("atr_points", "atr", "atr_m1_points"):
+    atr_price = _parse_decimal(payload, "atr_price", "atr")
+    if atr_price and atr_price > 0:
+        atr_points = _from_price_delta(
+            atr_price,
+            getattr(symbol_cfg, "sl_points_unit", "points"),
+            point,
+        )
+    for key in ("atr_points", "atr_m1_points"):
+        if atr_points is not None:
+            break
         if key in payload and payload[key]:
             try:
                 atr_points = Decimal(str(payload[key]))
@@ -260,7 +269,7 @@ def _score_components(
     total += structure_weight
     components["structure"] = float(structure_weight)
 
-    spread_points = _parse_decimal(payload, "spread_points", "spread")
+    spread_points = _parse_decimal(payload, "spread_price", "spread_points", "spread")
     market_weight = DEFAULT_MARKET_WEIGHT
     if spread_points is not None:
         allowed_spread = _to_price_delta(symbol_cfg.max_spread_points, symbol_cfg.max_spread_unit, point)
@@ -269,7 +278,16 @@ def _score_components(
             market_weight *= Decimal("0.4")
     else:
         market_weight *= Decimal("0.85")
-    atr_points = _parse_decimal(payload, "atr_points")
+    atr_price = _parse_decimal(payload, "atr_price")
+    atr_points = (
+        _from_price_delta(
+            atr_price,
+            getattr(symbol_cfg, "sl_points_unit", "points"),
+            point,
+        )
+        if atr_price is not None
+        else _parse_decimal(payload, "atr_points")
+    )
     if atr_points is not None and atr_points < symbol_cfg.sl_points_min:
         market_weight *= Decimal("0.6")
     total += market_weight
@@ -348,7 +366,7 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     sl_delta = distance_to_price(sl_points, sl_unit, point)
     if sl_delta <= 0:
         return StrategyDecision(action="ignore", reason="scalper:invalid_sl")
-    spread_price = _parse_decimal(payload, "spread_points", "spread")
+    spread_price = _parse_decimal(payload, "spread_price", "spread_points", "spread")
     if spread_price is not None and spread_price > 0 and sl_delta < spread_price * Decimal("2"):
         return StrategyDecision(action="ignore", reason="scalper:sl_below_spread_guard")
 

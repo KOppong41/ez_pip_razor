@@ -2,7 +2,6 @@ from rest_framework import serializers
 from .models import Decision, Signal, Order
 from bots.models import Bot
 from brokers.models import BrokerAccount
-from .models import Signal, Order
 from django.conf import settings
 from bots.services_config import get as cfg_get
 import json, hashlib, hmac
@@ -15,13 +14,34 @@ class SignalSerializer(serializers.ModelSerializer):
     class Meta:
         model = Signal
         fields = "__all__"
-        read_only_fields = ("received_at",)
+        read_only_fields = ("owner", "received_at")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+        if request and not request.user.is_superuser:
+            self.fields["bot"].queryset = Bot.objects.filter(owner=request.user)
+
+    def validate_bot(self, bot):
+        request = self.context.get("request")
+        if bot and request and not request.user.is_superuser and bot.owner_id != request.user.id:
+            raise serializers.ValidationError("Bot does not belong to the authenticated user.")
+        return bot
+
+    def create(self, validated_data):
+        request = self.context.get("request")
+        bot = validated_data.get("bot")
+        owner = bot.owner if bot else getattr(request, "user", None)
+        if not owner or not owner.is_authenticated:
+            raise serializers.ValidationError("An authenticated owner is required.")
+        return Signal.objects.create(owner=owner, **validated_data)
 
 class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = "__all__"
         read_only_fields = (
+            "owner",
             "status",
             "created_at",
             "updated_at",
@@ -31,6 +51,8 @@ class OrderSerializer(serializers.ModelSerializer):
             "order_send_called_at",
             "broker_response_received_at",
             "execution_recorded_at",
+            "dispatch_publish_failed_at",
+            "dispatch_publish_error",
         )
 
 class QuickOrderCreateSerializer(serializers.Serializer):
@@ -39,6 +61,30 @@ class QuickOrderCreateSerializer(serializers.Serializer):
     symbol = serializers.CharField()
     side = serializers.ChoiceField(choices=[("buy","buy"),("sell","sell")])
     qty = serializers.DecimalField(max_digits=20, decimal_places=8)
+    sl = serializers.DecimalField(max_digits=20, decimal_places=8, required=False)
+    tp = serializers.DecimalField(max_digits=20, decimal_places=8, required=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+        if request and not request.user.is_superuser:
+            self.fields["bot_id"].queryset = Bot.objects.filter(owner=request.user)
+            self.fields["broker_account_id"].queryset = BrokerAccount.objects.filter(owner=request.user)
+
+    def validate(self, attrs):
+        bot = attrs["bot"]
+        account = attrs["broker_account"]
+        request = self.context.get("request")
+        if bot.broker_account_id != account.id:
+            raise serializers.ValidationError("Bot is not configured for this broker account.")
+        owner_ids = {value for value in (bot.owner_id, account.owner_id) if value is not None}
+        if len(owner_ids) != 1:
+            raise serializers.ValidationError("Bot and broker account owners must match.")
+        if request and not request.user.is_superuser and request.user.id not in owner_ids:
+            raise serializers.ValidationError("Trading objects do not belong to the authenticated user.")
+        if account.connector == "mt5_local" and (attrs.get("sl") is None or attrs.get("tp") is None):
+            raise serializers.ValidationError("Live entries require both SL and TP.")
+        return attrs
 
     def create(self, validated):
         from .models import Order
@@ -50,6 +96,9 @@ class QuickOrderCreateSerializer(serializers.Serializer):
             symbol=validated["symbol"],
             side=validated["side"],
             qty=validated["qty"],
+            sl=validated.get("sl"),
+            tp=validated.get("tp"),
+            owner_id=validated["bot"].owner_id,
         )
 
 
@@ -142,6 +191,26 @@ class OrderCreateFromDecisionSerializer(serializers.Serializer):
     decision_id = serializers.PrimaryKeyRelatedField(queryset=Decision.objects.all(), source="decision")
     broker_account_id = serializers.PrimaryKeyRelatedField(queryset=BrokerAccount.objects.all(), source="broker_account")
     qty = serializers.DecimalField(max_digits=20, decimal_places=8)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+        if request and not request.user.is_superuser:
+            self.fields["decision_id"].queryset = Decision.objects.filter(owner=request.user)
+            self.fields["broker_account_id"].queryset = BrokerAccount.objects.filter(owner=request.user)
+
+    def validate(self, attrs):
+        from execution.services.orchestrator import validate_decision_account_scope
+
+        try:
+            validate_decision_account_scope(attrs["decision"], attrs["broker_account"])
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        request = self.context.get("request")
+        owner_id = attrs["broker_account"].owner_id
+        if request and not request.user.is_superuser and request.user.id != owner_id:
+            raise serializers.ValidationError("Broker account does not belong to the authenticated user.")
+        return attrs
 
 class OrderTransitionSerializer(serializers.Serializer):
     to_status = serializers.ChoiceField(choices=[("ack","ack"),("filled","filled"),("part_filled","part_filled"),("canceled","canceled"),("error","error")])
