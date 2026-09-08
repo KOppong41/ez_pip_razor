@@ -7,15 +7,41 @@ String _backtestUtc(dynamic value) {
 }
 
 String _decodeCandleCsv(List<int> bytes) {
-  if (bytes.length >= 2 &&
-      ((bytes[0] == 0xff && bytes[1] == 0xfe) ||
-          (bytes[0] == 0xfe && bytes[1] == 0xff))) {
+  final hasLittleEndianBom =
+      bytes.length >= 2 && bytes[0] == 0xff && bytes[1] == 0xfe;
+  final hasBigEndianBom =
+      bytes.length >= 2 && bytes[0] == 0xfe && bytes[1] == 0xff;
+  // Some MT5 builds/export paths produce UTF-16 without a BOM. ASCII column
+  // names then decode as UTF-8 with embedded NULs, making a valid header look
+  // invalid to the backend. Detect the alternating NUL pattern explicitly.
+  final sampleLength = bytes.length.clamp(0, 512);
+  var evenZeros = 0;
+  var oddZeros = 0;
+  for (var i = 0; i < sampleLength; i++) {
+    if (bytes[i] == 0) {
+      if (i.isEven) {
+        evenZeros++;
+      } else {
+        oddZeros++;
+      }
+    }
+  }
+  final pairs = sampleLength ~/ 2;
+  final looksLittleEndian = pairs >= 4 && oddZeros > pairs * 0.35;
+  final looksBigEndian = pairs >= 4 && evenZeros > pairs * 0.35;
+  if (hasLittleEndianBom ||
+      hasBigEndianBom ||
+      looksLittleEndian ||
+      looksBigEndian) {
     if (bytes.length.isOdd) {
       throw const FormatException('Incomplete UTF-16 CSV.');
     }
-    final littleEndian = bytes[0] == 0xff;
+    final littleEndian =
+        hasLittleEndianBom ||
+        (!hasBigEndianBom && looksLittleEndian && !looksBigEndian);
+    final start = hasLittleEndianBom || hasBigEndianBom ? 2 : 0;
     return String.fromCharCodes([
-      for (var i = 2; i < bytes.length; i += 2)
+      for (var i = start; i < bytes.length; i += 2)
         littleEndian
             ? bytes[i] | (bytes[i + 1] << 8)
             : (bytes[i] << 8) | bytes[i + 1],
@@ -103,6 +129,8 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
   int previewRequest = 0;
   int defaultsRequest = 0;
   String defaultsMessage = 'Loading instrument defaults...';
+  int maxCsvBytes = 25000000;
+  int maxBars = 150000;
 
   @override
   bool get wantKeepAlive => true;
@@ -121,8 +149,15 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
 
   Future<dynamic> _loadOptions() async {
     final value = await widget.client.get('/api/personal/backtests/options/');
-    final bots = listOfMaps(mapOf(value)['bots']);
-    if (mounted && bots.isNotEmpty && botId == null) _selectBot(bots.first);
+    final root = mapOf(value);
+    final bots = listOfMaps(root['bots']);
+    if (mounted) {
+      setState(() {
+        maxCsvBytes = (root['max_csv_bytes'] as num?)?.toInt() ?? maxCsvBytes;
+        maxBars = (root['max_bars'] as num?)?.toInt() ?? maxBars;
+      });
+      if (bots.isNotEmpty && botId == null) _selectBot(bots.first);
+    }
     return value;
   }
 
@@ -252,9 +287,9 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                 ],
               ));
       if (file == null || !mounted) return;
-      if (await file.length() > 1000000) {
-        throw const ApiException(
-          'Choose a CSV smaller than 1 MB (up to 10,000 candles).',
+      if (await file.length() > maxCsvBytes) {
+        throw ApiException(
+          'Choose a CSV smaller than ${maxCsvBytes ~/ 1000000} MB (up to $maxBars candles).',
         );
       }
       final contents = _decodeCandleCsv(await file.readAsBytes());
@@ -584,9 +619,11 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                   ],
                 ),
                 const SizedBox(height: 6),
-                const SelectableText(
-                  'Bid prices: time,open,high,low,close,tick_volume. MT5 tab-separated exports are accepted. Up to 10,000 completed candles / 1 MB.',
-                  style: TextStyle(color: muted, fontSize: 11),
+                SelectableText(
+                  'Bid prices: time,open,high,low,close,tick_volume. MT5 tab-separated exports are accepted. '
+                  'Upload the original export; Excel may display it in one column, but do not resave it there. '
+                  'Up to $maxBars completed candles / ${maxCsvBytes ~/ 1000000} MB.',
+                  style: const TextStyle(color: muted, fontSize: 11),
                 ),
                 const SizedBox(height: 18),
                 if (csvPreview != null)

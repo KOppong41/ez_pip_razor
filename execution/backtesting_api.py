@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from bots.models import Bot
 from execution.models import HistoricalBacktest
 from execution.services.historical_backtest import (
-    MAX_BARS, MAX_CSV_BYTES, TIMEFRAMES, int_field, json_safe, parse_csv,
+    MAX_BARS, MAX_CSV_BYTES, MAX_REPLAY_WORK, TIMEFRAMES, int_field, json_safe, parse_csv,
     run_simulation, validate_config,
 )
 from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
@@ -152,7 +152,7 @@ def historical_backtests(request):
             return Response({"detail": "Bot not found."}, status=404)
         config = validate_config(request.data)
         bars, dataset = parse_csv(request.data.get("csv"), config)
-        if (dataset["last_index"] - dataset["first_index"] + 1) * config["warmup"] > 2_000_000:
+        if (dataset["last_index"] - dataset["first_index"] + 1) * config["warmup"] > MAX_REPLAY_WORK:
             raise ValueError("Reduce the date range or warmup: this request exceeds the replay work limit.")
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=400)

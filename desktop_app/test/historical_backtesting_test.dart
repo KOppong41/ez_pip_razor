@@ -210,6 +210,13 @@ Uint8List testCsvBytes() => Uint8List.fromList([
           .codeUnits) ...[code & 0xff, code >> 8],
 ]);
 
+Uint8List testBomlessUtf16CsvBytes() => Uint8List.fromList([
+  for (final code
+      in '<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\r\n'
+              '2025.01.06\t10:00:00\t100\t102\t98\t100\t80'
+          .codeUnits) ...[code & 0xff, code >> 8],
+]);
+
 Future<void> submit(WidgetTester tester) async {
   await tester.tap(find.text('Import candle CSV'));
   await tester.pumpAndSettle();
@@ -222,6 +229,32 @@ Future<void> submit(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('decodes a BOM-less UTF-16 MT5 export without embedded NULs', (
+    tester,
+  ) async {
+    final client = HistoricalClient();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BacktestingPage(
+            client: client,
+            pickCsv: () async => XFile.fromData(
+              testBomlessUtf16CsvBytes(),
+              name: 'mt5-no-bom.csv',
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import candle CSV'));
+    await tester.pumpAndSettle();
+    final decoded = '${client.previewed?['csv']}';
+    expect(decoded, startsWith('<DATE>\t<TIME>\t<OPEN>'));
+    expect(decoded, isNot(contains('\u0000')));
+    expect(decoded, contains('2025.01.06\t10:00:00'));
+  });
+
   testWidgets('switching bots resets symbol-specific defaults', (tester) async {
     await mount(tester, HistoricalClient());
     await tester.ensureVisible(field('Contract size per lot'));

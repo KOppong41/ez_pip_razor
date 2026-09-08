@@ -11,6 +11,7 @@ from brokers.models import BrokerAccount
 from execution.models import HistoricalBacktest, Order, Signal
 from execution.services.engine_types import EngineDecision
 from execution.services.historical_backtest import parse_csv, run_simulation, validate_config
+from execution.services.historical_backtest import MAX_BARS, MAX_CSV_BYTES, MAX_EQUITY_POINTS
 
 
 def payload(**overrides):
@@ -160,6 +161,49 @@ class HistoricalReplayTests(SimpleTestCase):
         self.assertEqual(bars[0]["time"].hour, 10)
         self.assertEqual(bars[0]["tick_volume"], 50)
 
+    def test_mt5_export_accepts_leading_blank_lines_and_bomless_utf16_text(self):
+        rows = ["<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>"]
+        at = datetime(2025, 1, 6, 12)
+        for i in range(35):
+            stamp = at + timedelta(minutes=i)
+            rows.append(f"{stamp:%Y.%m.%d}\t{stamp:%H:%M:%S}\t100\t102\t98\t100\t50\t0\t10")
+        source = "\r\n" + "\r\n".join(rows)
+        nul_interleaved = "".join(f"{character}\x00" for character in source)
+        bars, dataset = parse_csv(nul_interleaved, validate_config(payload()))
+        self.assertEqual(len(bars), 35)
+        self.assertEqual(dataset["first_index"], 30)
+        self.assertEqual(bars[0]["tick_volume"], 50)
+
+    def test_semicolon_and_friendly_header_aliases_are_accepted(self):
+        at = datetime(2025, 1, 6, 12, tzinfo=timezone.utc)
+        rows = ["Timestamp;Open;High;Low;Close;Tick Volume"]
+        rows.extend(
+            f"{(at + timedelta(minutes=i)).isoformat()};100;102;98;100;50"
+            for i in range(35)
+        )
+        bars, _ = parse_csv("\n".join(rows), validate_config(payload()))
+        self.assertEqual(len(bars), 35)
+        self.assertEqual(bars[0]["tick_volume"], 50)
+
+    def test_excel_wrapped_mt5_tab_rows_are_recovered(self):
+        rows = ['"<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>"']
+        at = datetime(2025, 1, 6, 12)
+        for i in range(35):
+            stamp = at + timedelta(minutes=i)
+            rows.append(f'"{stamp:%Y.%m.%d}\t{stamp:%H:%M:%S}\t100\t102\t98\t100\t50\t0\t10"')
+        bars, _ = parse_csv("\n".join(rows), validate_config(payload()))
+        self.assertEqual(len(bars), 35)
+        self.assertEqual(bars[-1]["tick_volume"], 50)
+
+    def test_irrecoverably_collapsed_mt5_rows_give_export_instructions(self):
+        source = "<DATE><TIME><OPEN><HIGH><LOW><CLOSE><TICKVOL><VOL><SPREAD>\n2025.01.0612:00:001001029810050010"
+        with self.assertRaisesRegex(ValueError, "collapsed into one column.*without opening and resaving it in Excel"):
+            parse_csv(source, validate_config(payload()))
+
+    def test_bad_header_reports_detected_columns_and_export_guidance(self):
+        with self.assertRaisesRegex(ValueError, "Detected columns: bid, ask.*Export MT5 Bars, not Ticks"):
+            parse_csv("bid,ask\n100,101", validate_config(payload()))
+
     def test_missing_volume_and_wrong_timeframe_are_rejected(self):
         no_volume = "\n".join(",".join(row.split(",")[:-1]) for row in csv_data().splitlines())
         with self.assertRaisesRegex(ValueError, "needs tick_volume"):
@@ -172,6 +216,18 @@ class HistoricalReplayTests(SimpleTestCase):
             parse_csv(csv_data(), validate_config(payload(start_date="2025-02-01")))
         with self.assertRaisesRegex(ValueError, "future or has not completed"):
             parse_csv(csv_data(), validate_config(payload()), now=datetime(2025, 1, 6, 10, 30, tzinfo=timezone.utc))
+
+    def test_large_replay_downsamples_only_the_display_curve(self):
+        cfg = validate_config(payload(warmup=30))
+        bars, dataset = parse_csv(csv_data(6000), cfg)
+        result = run_simulation(
+            bars, cfg, dataset, "BTCUSDm",
+            runner=lambda _window: EngineDecision(action="skip", reason="none"),
+        )
+        self.assertEqual(result["summary"]["evaluated_bars"], 5970)
+        self.assertLessEqual(len(result["equity"]), MAX_EQUITY_POINTS + 1)
+        self.assertEqual(result["equity"][-1]["time"], bars[-1]["time"].isoformat())
+        self.assertIn("summary drawdown still evaluates every candle", " ".join(result["assumptions"]))
 
 
 class HistoricalBacktestApiTests(TestCase):
@@ -300,11 +356,23 @@ class HistoricalBacktestApiTests(TestCase):
 
     def test_options_and_submission_are_owner_scoped(self):
         self.client.force_login(self.other)
-        self.assertEqual(self.client.get("/api/personal/backtests/options/").json()["bots"], [])
+        options = self.client.get("/api/personal/backtests/options/").json()
+        self.assertEqual(options["bots"], [])
+        self.assertEqual(options["max_bars"], MAX_BARS)
+        self.assertEqual(options["max_csv_bytes"], MAX_CSV_BYTES)
         response = self.client.post("/api/personal/backtests/", {
             **payload(), "bot_id": self.bot.id, "csv": csv_data(),
         }, content_type="application/json")
         self.assertEqual(response.status_code, 404)
+        self.assertEqual(HistoricalBacktest.objects.count(), 0)
+
+    @patch("execution.backtesting_api.MAX_REPLAY_WORK", 100)
+    def test_replay_work_limit_remains_enforced(self):
+        response = self.client.post("/api/personal/backtests/", {
+            **payload(warmup=30), "bot_id": self.bot.id, "csv": csv_data(),
+        }, content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("replay work limit", response.json()["detail"])
         self.assertEqual(HistoricalBacktest.objects.count(), 0)
 
     def test_validation_errors_are_actionable(self):

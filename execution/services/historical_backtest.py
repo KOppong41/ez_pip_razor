@@ -7,6 +7,7 @@ portfolio, news, automatic strategy selection, trailing, or partial-exit layers.
 import csv
 import hashlib
 import io
+import re
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -14,8 +15,10 @@ from decimal import Decimal, InvalidOperation
 
 from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
 
-MAX_CSV_BYTES = 1_000_000
-MAX_BARS = 10_000
+MAX_CSV_BYTES = 25_000_000
+MAX_BARS = 150_000
+MAX_REPLAY_WORK = 15_000_000
+MAX_EQUITY_POINTS = 5_000
 TIMEFRAMES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
 ZERO = Decimal("0")
 
@@ -108,17 +111,64 @@ def parse_csv(text, config, *, now=None):
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Choose a CSV file containing historical bid candles.")
     if len(text.encode("utf-8")) > MAX_CSV_BYTES:
-        raise ValueError("CSV exceeds the 1 MB limit. Select a smaller date range.")
-    delimiter = "\t" if "\t" in text.splitlines()[0] else ","
-    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")), delimiter=delimiter)
+        raise ValueError(f"CSV exceeds the {MAX_CSV_BYTES // 1_000_000} MB limit. Select a smaller date range.")
+    # Also tolerate a BOM-less UTF-16 file decoded by an older client as UTF-8;
+    # its ASCII content arrives with a NUL between every character.
+    source = text.replace("\x00", "").lstrip("\ufeff\r\n ")
+
+    # Excel can open an MT5 tab export as one cell per row and, when saved,
+    # surround that entire cell with quotes. Recover the still-present tabs;
+    # never try to infer separators if Excel has actually deleted them.
+    source_lines = source.splitlines()
+    if source_lines and source_lines[0].startswith('"') and source_lines[0].endswith('"'):
+        unwrapped_header = source_lines[0][1:-1].replace('""', '"')
+        if any(separator in unwrapped_header for separator in ("\t", ";", "|")):
+            source_lines = [
+                line[1:-1].replace('""', '"')
+                if line.startswith('"') and line.endswith('"')
+                else line
+                for line in source_lines
+            ]
+            source = "\n".join(source_lines)
+    first_line = source.splitlines()[0]
+
+    def normalize(key):
+        if not isinstance(key, str):
+            return ""
+        value = key.replace("\x00", "").strip().strip("<>").strip().lower()
+        value = re.sub(r"[\s-]+", "_", value)
+        aliases = {
+            "datetime": "time", "date_time": "time", "timestamp": "time",
+            "tickvolume": "tick_volume", "tick_vol": "tick_volume",
+            "tickvol": "tick_volume",
+        }
+        return aliases.get(value, value)
+
+    required = {"time", "open", "high", "low", "close"}
+    candidates = []
+    for candidate in ("\t", ",", ";", "|"):
+        parsed_header = next(csv.reader([first_line], delimiter=candidate))
+        normalized = [normalize(key) for key in parsed_header]
+        candidates.append((len(required.intersection(normalized)), len(normalized), candidate))
+    _score, _columns, delimiter = max(candidates)
+    reader = csv.DictReader(io.StringIO(source), delimiter=delimiter)
     if not reader.fieldnames:
         raise ValueError("CSV header is missing.")
-    normalize = lambda key: key.strip().strip("<>").lower() if isinstance(key, str) else ""
     fields = [normalize(key) for key in reader.fieldnames]
     if len(fields) != len(set(fields)):
         raise ValueError("CSV has duplicate column names.")
-    if not {"time", "open", "high", "low", "close"}.issubset(fields):
-        raise ValueError("CSV requires time,open,high,low,close and optional tick_volume (MT5 exports also supported).")
+    if not required.issubset(fields):
+        compact_header = re.sub(r"\s+", "", first_line.upper())
+        if len(fields) == 1 and all(f"<{name}>" in compact_header for name in ("TIME", "OPEN", "HIGH", "LOW", "CLOSE")):
+            raise ValueError(
+                "The MT5 headers are present, but every field was collapsed into one column and no usable delimiter remains. "
+                "Export Bars from MT5 again and upload the original file without opening and resaving it in Excel."
+            )
+        visible = ", ".join(field or "(blank)" for field in fields[:12])
+        raise ValueError(
+            "CSV requires time,open,high,low,close and optional tick_volume. "
+            f"Detected columns: {visible}. Export MT5 Bars, not Ticks."
+        )
     now = now or datetime.now(timezone.utc)
     step = timedelta(minutes=TIMEFRAMES[config["timeframe"]])
     csv_zone = timezone(timedelta(minutes=config["csv_utc_offset_minutes"]))
@@ -191,6 +241,7 @@ def run_simulation(bars, config, dataset, symbol, *, runner=None):
     trades, equity, reasons = [], [], Counter()
     position = None
     evaluated, opens = 0, 0
+    equity_sample_every = max(1, ((last - first + 1) + MAX_EQUITY_POINTS - 1) // MAX_EQUITY_POINTS)
 
     def close_position(bar, exit_price, reason):
         nonlocal balance, position
@@ -261,7 +312,8 @@ def run_simulation(bars, config, dataset, symbol, *, runner=None):
         dd = peak - mark
         dd_pct = dd / peak * 100 if peak > 0 else ZERO
         max_dd, max_dd_pct = max(max_dd, dd), max(max_dd_pct, dd_pct)
-        equity.append({"time": bar["time"], "balance": balance, "equity": mark, "drawdown_pct": dd_pct})
+        if (i - first) % equity_sample_every == 0 or i == last:
+            equity.append({"time": bar["time"], "balance": balance, "equity": mark, "drawdown_pct": dd_pct})
 
     wins = [t["pnl"] for t in trades if t["pnl"] > 0]
     losses = [t["pnl"] for t in trades if t["pnl"] < 0]
@@ -293,6 +345,7 @@ def run_simulation(bars, config, dataset, symbol, *, runner=None):
             "Signals use completed candles; entries fill at the next available open.",
             "One fixed-size position; strategy SL/TP; round-trip commission per lot; no swap, margin liquidation or currency conversion.",
             "Drawdown uses candle-close liquidation equity, not intrabar tick equity.",
+            f"The displayed equity curve is sampled to at most {MAX_EQUITY_POINTS:,} candle-close points; summary drawdown still evaluates every candle.",
             "Standalone strategy replay: live HTF gate, news, portfolio risk, automatic selection, trailing and partial exits are not simulated.",
             "Timestamp offsets are converted to UTC. Gaps are preserved; no candles are invented.",
         ],

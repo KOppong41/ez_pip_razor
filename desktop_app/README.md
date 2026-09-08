@@ -47,15 +47,25 @@ to UTC; for timestamps without offsets, enter the CSV's UTC offset in minutes
 (for example, `120` for UTC+2). Gaps are retained and counted. Volume is required
 for the volume-dependent breakout and momentum strategies.
 
-Imports are limited to 1 MB / 10,000 candles. Importing validates the CSV and
+Upload the original MT5 export. Excel commonly displays a tab-separated MT5
+file entirely in column A; this does not damage the file until it is resaved.
+The importer accepts BOM-less UTF-16 and can recover rows that Excel wrapped as
+one quoted tab-delimited cell. If the separator characters were actually
+removed, the prices cannot be split unambiguously and the UI asks for a fresh
+MT5 Bars export.
+
+Imports are limited to 25 MB / 150,000 candles, enough for roughly 100,000 M1
+candles in a two-month continuous-market export. Importing validates the CSV and
 shows its UTC coverage and first tradable candle after warmup (100 by default).
 The date pickers default to that first tradable day and the last CSV day
 (inclusive), and are bounded by those dates. Earlier CSV candles remain available
 for warmup when selecting a narrower period. Dates do not download or generate
 additional data. Changing timeframe, strategy, timezone offset or warmup clears
 the date preview; use **Use full CSV date range** to validate it again. Running
-also revalidates if needed. Very large history-window/date-range combinations
-are rejected with a request to reduce the range.
+also revalidates if needed. Replay work is capped at 15 million candle-window
+evaluations; with the default 100-bar warmup, all 150,000 imported candles can
+be replayed. The saved equity curve is sampled to at most 5,000 display points
+to keep results responsive, while summary drawdown still evaluates every candle.
 
 Each run saves its source data hash, CSV, strategy defaults, replay settings,
 performance summary, equity curve, skip counts, and simulated trades. Select a
