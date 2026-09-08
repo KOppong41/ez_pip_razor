@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
 
 import 'api_client.dart';
 import 'backend_manager.dart';
+
+part 'historical_backtesting.dart';
 
 void main() => runApp(EzTradeApp(backendManager: BackendManager()));
 
@@ -3863,33 +3866,71 @@ class _MarketsPageState extends State<MarketsPage> {
   );
 }
 
-class _MarketTable extends StatelessWidget {
+class _MarketTable extends StatefulWidget {
   const _MarketTable({required this.markets, required this.onChanged});
   final List<Map<String, dynamic>> markets;
   final Future<void> Function(Map<String, dynamic>, bool) onChanged;
 
   @override
+  State<_MarketTable> createState() => _MarketTableState();
+}
+
+class _MarketTableState extends State<_MarketTable> {
+  final _verticalController = ScrollController();
+  final _horizontalController = ScrollController();
+
+  @override
+  void dispose() {
+    _verticalController.dispose();
+    _horizontalController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => Card(
     clipBehavior: Clip.antiAlias,
     margin: const EdgeInsets.fromLTRB(24, 0, 24, 28),
-    child: SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: DataTable(
-        columnSpacing: 28,
-        headingRowHeight: 42,
-        dataRowMinHeight: 62,
-        dataRowMaxHeight: 72,
-        columns: const [
-          DataColumn(label: Text('SYMBOL')),
-          DataColumn(label: Text('STATUS')),
-          DataColumn(label: Text('BROKER SYMBOL')),
-          DataColumn(label: Text('BID')),
-          DataColumn(label: Text('ASK')),
-          DataColumn(label: Text('SPREAD')),
-          DataColumn(label: Text('REC. LOT')),
-          DataColumn(label: Text('ENABLED')),
-        ],
-        rows: [for (final market in markets) _row(market)],
+    child: ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+      child: Scrollbar(
+        controller: _verticalController,
+        thumbVisibility: true,
+        scrollbarOrientation: ScrollbarOrientation.right,
+        notificationPredicate: (notification) =>
+            notification.metrics.axis == Axis.vertical,
+        child: Scrollbar(
+          controller: _horizontalController,
+          thumbVisibility: true,
+          scrollbarOrientation: ScrollbarOrientation.bottom,
+          notificationPredicate: (notification) =>
+              notification.metrics.axis == Axis.horizontal,
+          child: SingleChildScrollView(
+            controller: _horizontalController,
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.only(right: 12),
+            child: SingleChildScrollView(
+              controller: _verticalController,
+              padding: const EdgeInsets.only(bottom: 12),
+              child: DataTable(
+                columnSpacing: 28,
+                headingRowHeight: 42,
+                dataRowMinHeight: 62,
+                dataRowMaxHeight: 72,
+                columns: const [
+                  DataColumn(label: Text('SYMBOL')),
+                  DataColumn(label: Text('STATUS')),
+                  DataColumn(label: Text('BROKER SYMBOL')),
+                  DataColumn(label: Text('BID')),
+                  DataColumn(label: Text('ASK')),
+                  DataColumn(label: Text('SPREAD')),
+                  DataColumn(label: Text('REC. LOT')),
+                  DataColumn(label: Text('ENABLED')),
+                ],
+                rows: [for (final market in widget.markets) _row(market)],
+              ),
+            ),
+          ),
+        ),
       ),
     ),
   );
@@ -3930,7 +3971,7 @@ class _MarketTable extends StatelessWidget {
         DataCell(
           Switch(
             value: enabled,
-            onChanged: (value) => onChanged(market, value),
+            onChanged: (value) => widget.onChanged(market, value),
           ),
         ),
       ],
@@ -4216,15 +4257,15 @@ class _PositionsPageState extends State<PositionsPage> {
   );
 }
 
-class BacktestingPage extends StatefulWidget {
-  const BacktestingPage({super.key, required this.client});
+class RunEvidencePage extends StatefulWidget {
+  const RunEvidencePage({super.key, required this.client});
   final ApiClient client;
 
   @override
-  State<BacktestingPage> createState() => _BacktestingPageState();
+  State<RunEvidencePage> createState() => _RunEvidencePageState();
 }
 
-class _BacktestingPageState extends State<BacktestingPage> {
+class _RunEvidencePageState extends State<RunEvidencePage> {
   late Future<dynamic> future = widget.client.get('/api/personal/backtesting/');
 
   Future<void> reload() async {
@@ -4270,9 +4311,12 @@ class _BacktestingPageState extends State<BacktestingPage> {
                 title: 'No strategy-run evidence yet',
                 text:
                     'Run the scalper on demo to populate market snapshots and decision results.',
-              )
-            else
+              ),
+            if (runs.isNotEmpty) ...[
+              _StrategyOutcomeSummary(runs: runs),
+              const SizedBox(height: 10),
               _BacktestRunTable(runs: runs),
+            ],
           ],
         ),
       );
@@ -4358,7 +4402,6 @@ class _BacktestRunTable extends StatelessWidget {
   }
 }
 
-// ignore: unused_element
 class _StrategyOutcomeSummary extends StatelessWidget {
   const _StrategyOutcomeSummary({required this.runs});
   final List<Map<String, dynamic>> runs;

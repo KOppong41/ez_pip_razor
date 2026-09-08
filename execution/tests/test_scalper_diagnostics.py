@@ -14,7 +14,7 @@ class ScalperDashboardDiagnosticsTests(TestCase):
             connector="mt5_local",
             account_ref="diagnostics-account",
         )
-        self.asset = Asset.objects.create(symbol="XAUUSDm")
+        self.asset, _created = Asset.objects.get_or_create(symbol="XAUUSDm")
         self.bot = Bot.objects.create(
             name="Diagnostics bot",
             engine_mode="scalper",

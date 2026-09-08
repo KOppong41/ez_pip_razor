@@ -198,10 +198,16 @@ def _print_bot_health(bot: Bot, *, now: datetime, since: datetime) -> None:
             print("MT5 clock: BLOCKED (timestamp missing)")
         else:
             drift = (tick_at - now).total_seconds()
-            tolerance = int(
+            future_tolerance = int(
                 getattr(settings, "MT5_TICK_FUTURE_TOLERANCE_SECONDS", 120)
             )
-            status = "BLOCKED" if drift > tolerance else "OK"
+            max_age = int(getattr(settings, "MT5_TICK_MAX_AGE_SECONDS", 120))
+            if drift > future_tolerance:
+                status = "BLOCKED (host/broker clock skew)"
+            elif drift < -max_age:
+                status = "BLOCKED (stale tick)"
+            else:
+                status = "OK"
             print(
                 "MT5 clock:",
                 status,
@@ -209,7 +215,8 @@ def _print_bot_health(bot: Bot, *, now: datetime, since: datetime) -> None:
                     "app_utc": now.isoformat(),
                     "tick_utc": tick_at.isoformat(),
                     "tick_minus_app_seconds": round(drift, 1),
-                    "future_tolerance_seconds": tolerance,
+                    "max_tick_age_seconds": max_age,
+                    "future_tolerance_seconds": future_tolerance,
                 },
             )
 

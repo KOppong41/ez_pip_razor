@@ -1,10 +1,13 @@
 import 'package:ez_trade_desktop/api_client.dart';
 import 'package:ez_trade_desktop/main.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class FakeApiClient extends ApiClient {
-  FakeApiClient() : super('http://127.0.0.1:8000');
+  FakeApiClient({this.markets}) : super('http://127.0.0.1:8000');
+
+  final List<Map<String, dynamic>>? markets;
 
   @override
   Future<dynamic> get(String path) async {
@@ -149,22 +152,23 @@ class FakeApiClient extends ApiClient {
       ];
     }
     if (path == '/api/personal/markets/') {
-      return [
-        {
-          'asset_id': 1,
-          'canonical_symbol': 'XAUUSD',
-          'symbol': 'XAUUSDm',
-          'display_name': 'Gold',
-          'category': 'commodities',
-          'broker_symbol': 'XAUUSDm',
-          'enabled': true,
-          'bid': '3375.10',
-          'ask': '3375.30',
-          'spread': '0.20',
-          'recommended_qty': '0.01',
-          'trading_status': 'open',
-        },
-      ];
+      return markets ??
+          [
+            {
+              'asset_id': 1,
+              'canonical_symbol': 'XAUUSD',
+              'symbol': 'XAUUSDm',
+              'display_name': 'Gold',
+              'category': 'commodities',
+              'broker_symbol': 'XAUUSDm',
+              'enabled': true,
+              'bid': '3375.10',
+              'ask': '3375.30',
+              'spread': '0.20',
+              'recommended_qty': '0.01',
+              'trading_status': 'open',
+            },
+          ];
     }
     if (path == '/api/personal/logs/') {
       return [
@@ -318,6 +322,64 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('markets scrolls to the last asset and its enabled control', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(810, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final markets = List.generate(
+      24,
+      (index) => <String, dynamic>{
+        'canonical_symbol': 'ASSET$index',
+        'broker_symbol': 'ASSET${index}m',
+        'enabled': false,
+        'trading_status': 'open',
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark().copyWith(platform: TargetPlatform.windows),
+        home: Scaffold(
+          body: MarketsPage(client: FakeApiClient(markets: markets)),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('ASSET23').hitTestable(), findsNothing);
+    await tester.sendEventToBinding(
+      PointerScrollEvent(
+        kind: PointerDeviceKind.mouse,
+        position: tester.getCenter(find.text('ASSET0')),
+        scrollDelta: const Offset(0, 3000),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('ASSET23').hitTestable(), findsOneWidget);
+
+    final lastSwitch = find.byType(Switch).last;
+    expect(lastSwitch.hitTestable(), findsNothing);
+    final horizontalBar = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollbar &&
+          widget.scrollbarOrientation == ScrollbarOrientation.bottom,
+    );
+    final barBounds = tester.getRect(horizontalBar);
+    await tester.dragFrom(
+      Offset(barBounds.left + 24, barBounds.bottom - 4),
+      Offset(barBounds.width, 0),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(lastSwitch.hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('renders a compact searchable operations journal', (
     tester,
   ) async {
@@ -368,6 +430,36 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('shows aggregate strategy skip counts and run details', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: RunEvidencePage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('24-hour skip counts'), findsOneWidget);
+    expect(
+      find.text('Trend Pullback / Trend Pullback No Trend'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Breakout Retest / Breakout Retest No Break'),
+      findsOneWidget,
+    );
+    expect(find.text('LAST CLOSE'), findsOneWidget);
+    expect(find.text('ACTIONABLE'), findsOneWidget);
+    expect(find.text('SKIPPED'), findsOneWidget);
+    expect(find.text('STRATEGIES'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('renders polished trading workspaces without raw records', (
     tester,
   ) async {
@@ -397,8 +489,6 @@ void main() {
     await tester.tap(find.text('Backtesting'));
     await tester.pumpAndSettle();
     expect(find.text('STRATEGY LAB'), findsOneWidget);
-    expect(find.text('24-hour skip counts'), findsOneWidget);
-    expect(find.text('Strategy decisions (2)'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.text('Markets'));

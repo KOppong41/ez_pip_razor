@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import SignalViewSet, OrderViewSet, alert_webhook, decision_fanout
+from .backtesting_api import backtest_options, historical_backtests, historical_backtest_detail
 from .personal_api import (
     personal_account_test,
     personal_accounts,
@@ -38,6 +39,9 @@ urlpatterns = [
     path("personal/history/", personal_history, name="personal-history"),
     path("personal/logs/", personal_logs, name="personal-logs"),
     path("personal/backtesting/", personal_backtesting, name="personal-backtesting"),
+    path("personal/backtests/options/", backtest_options, name="backtest-options"),
+    path("personal/backtests/", historical_backtests, name="historical-backtests"),
+    path("personal/backtests/<int:run_id>/", historical_backtest_detail, name="historical-backtest-detail"),
     path("personal/accounts/", personal_accounts, name="personal-accounts"),
     path("personal/accounts/test/", personal_account_test, name="personal-account-test"),
 ]

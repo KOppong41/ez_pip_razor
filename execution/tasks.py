@@ -1,10 +1,8 @@
 import logging
 import os
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
-from typing import Callable
 
 from celery import shared_task
 from django.conf import settings
@@ -77,19 +75,8 @@ from execution.services.position_management import plan_scalper_position
 from execution.services.portfolio import record_fill
 from execution.services.equity import update_equity_high_water
 from execution.services.trade_constraints import distance_to_price
-from execution.services.strategies.breakout_retest import (
-    BreakoutRetestConfig,
-    run_breakout_retest,
-)
-from execution.services.strategies.doji_breakout import DojiBreakoutConfig, run_doji_breakout
 from execution.services.strategies.harami import detect_harami
-from execution.services.strategies.momentum_ignition import (
-    MomentumIgnitionConfig,
-    run_momentum_ignition,
-)
-from execution.services.strategies.price_action_pinbar import PinBarConfig, run_price_action_pinbar
-from execution.services.strategies.range_reversion import RangeReversionConfig, run_range_reversion
-from execution.services.strategies.trend_pullback import TrendPullbackConfig, run_trend_pullback
+from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
 from execution.utils.symbols import canonical_symbol
 
 
@@ -284,43 +271,6 @@ def _analyze_htf_bias(candles) -> dict | None:
 def _compute_bias_from_htf(candles) -> str | None:
     info = _analyze_htf_bias(candles)
     return info.get("bias") if info else None
-
-
-@dataclass(frozen=True)
-class ScalperStrategyEntry:
-    runner: Callable
-    config_factory: Callable[[], object]
-    requires_symbol: bool = False
-
-
-SCALPER_STRATEGY_REGISTRY: dict[str, ScalperStrategyEntry] = {
-    "price_action_pinbar": ScalperStrategyEntry(
-        runner=run_price_action_pinbar,
-        config_factory=PinBarConfig,
-        requires_symbol=True,
-    ),
-    "trend_pullback": ScalperStrategyEntry(
-        runner=run_trend_pullback,
-        config_factory=TrendPullbackConfig,
-    ),
-    "doji_breakout": ScalperStrategyEntry(
-        runner=run_doji_breakout,
-        config_factory=DojiBreakoutConfig,
-        requires_symbol=True,
-    ),
-    "range_reversion": ScalperStrategyEntry(
-        runner=run_range_reversion,
-        config_factory=RangeReversionConfig,
-    ),
-    "breakout_retest": ScalperStrategyEntry(
-        runner=run_breakout_retest,
-        config_factory=BreakoutRetestConfig,
-    ),
-    "momentum_ignition": ScalperStrategyEntry(
-        runner=run_momentum_ignition,
-        config_factory=MomentumIgnitionConfig,
-    ),
-}
 
 
 def _atr_like(candles, period: int = 14):

@@ -645,6 +645,26 @@ class TradeLog(models.Model):
         return f"TradeLog order={self.order_id} {self.symbol} {self.side} {self.qty} {self.status}"
 
 
+class HistoricalBacktest(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    bot = models.ForeignKey("bots.Bot", null=True, on_delete=models.SET_NULL)
+    bot_name = models.CharField(max_length=255)
+    symbol = models.CharField(max_length=32)
+    status = models.CharField(max_length=16, default="running")
+    source_name = models.CharField(max_length=255)
+    source_csv = models.TextField()
+    config = models.JSONField(default=dict)
+    dataset = models.JSONField(default=dict)
+    result = models.JSONField(default=dict)
+    error = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["owner", "created_at"], name="backtest_owner_created_idx")]
+
+
 class ScalperRunLog(models.Model):
     bot = models.ForeignKey("bots.Bot", on_delete=models.CASCADE, related_name="scalper_run_logs")
     timeframe = models.CharField(max_length=8, default="1m")
