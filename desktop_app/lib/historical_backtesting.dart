@@ -97,6 +97,12 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
   bool busy = false;
   int historyPage = 1;
   Map<String, dynamic>? selectedResult;
+  Map<String, dynamic>? csvPreview;
+  bool previewBusy = false;
+  bool defaultsBusy = false;
+  int previewRequest = 0;
+  int defaultsRequest = 0;
+  String defaultsMessage = 'Loading instrument defaults...';
 
   @override
   bool get wantKeepAlive => true;
@@ -124,6 +130,104 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
     botId = '${bot['id']}';
     timeframe = '${bot['timeframe'] ?? '1m'}';
     fields['quantity']!.text = '${bot['quantity'] ?? '0.01'}';
+    _invalidatePreview();
+    _loadDefaults();
+  }
+
+  Future<void> _loadDefaults() async {
+    final request = ++defaultsRequest;
+    final selectedBot = botId;
+    final baseline = <String, String>{
+      'contract_size': '',
+      'point_size': '',
+      'currency': '',
+      'spread_points': '0',
+      'slippage_points': '0',
+      'commission_per_lot': '0',
+    };
+    for (final entry in baseline.entries) {
+      fields[entry.key]!.text = entry.value;
+    }
+    defaultsBusy = true;
+    defaultsMessage = 'Loading instrument defaults...';
+    try {
+      final value = mapOf(
+        await widget.client.get(
+          '/api/personal/backtests/defaults/$selectedBot/',
+        ),
+      );
+      if (!mounted || request != defaultsRequest) return;
+      setState(() {
+        for (final entry in mapOf(value['values']).entries) {
+          // Preserve edits made while the optional request was in flight.
+          if (baseline.containsKey(entry.key) &&
+              fields[entry.key]!.text == baseline[entry.key]) {
+            fields[entry.key]!.text = '${entry.value}';
+          }
+        }
+        defaultsMessage =
+            '${value['message'] ?? 'Review instrument specifications before running.'}';
+        if (value['as_of'] != null) {
+          defaultsMessage += ' As of ${_backtestUtc(value['as_of'])} UTC.';
+        }
+      });
+    } catch (_) {
+      if (!mounted || request != defaultsRequest) return;
+      setState(
+        () => defaultsMessage =
+            'Defaults could not load. Copy Contract size, Point and Profit currency from MT5 Symbol Specification. You can still enter them manually.',
+      );
+    } finally {
+      if (mounted && request == defaultsRequest) {
+        setState(() => defaultsBusy = false);
+      }
+    }
+  }
+
+  void _invalidatePreview() {
+    previewRequest++;
+    csvPreview = null;
+    previewBusy = false;
+    fields['start_date']!.clear();
+    fields['end_date']!.clear();
+  }
+
+  Future<bool> _previewCsv() async {
+    if (csvText == null) return false;
+    final request = ++previewRequest;
+    setState(() {
+      previewBusy = true;
+      error = null;
+    });
+    try {
+      final value = mapOf(
+        await widget.client.post('/api/personal/backtests/preview/', {
+          'csv': csvText,
+          'timeframe': timeframe,
+          'strategy': strategy,
+          'warmup': fields['warmup']!.text.trim(),
+          'csv_utc_offset_minutes': fields['csv_utc_offset_minutes']!.text
+              .trim(),
+        }),
+      );
+      if (!mounted || request != previewRequest) return false;
+      setState(() {
+        csvPreview = value;
+        fields['start_date']!.text = '${value['start_date']}';
+        fields['end_date']!.text = '${value['end_date']}';
+      });
+      return true;
+    } catch (e) {
+      if (mounted && request == previewRequest) {
+        setState(() => csvPreview = null);
+        _showError('CSV date range: $e');
+      }
+      return false;
+    } finally {
+      if (mounted && request == previewRequest) {
+        setState(() => previewBusy = false);
+      }
+    }
   }
 
   @override
@@ -156,21 +260,24 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
       final contents = _decodeCandleCsv(await file.readAsBytes());
       if (!mounted) return;
       setState(() {
+        _invalidatePreview();
         csvText = contents;
         sourceName = file.name;
         error = null;
       });
+      await _previewCsv();
     } catch (e) {
       _showError('CSV import: $e');
     }
   }
 
   Future<void> _submit() async {
-    if (!_form.currentState!.validate()) return;
     if (csvText == null) {
       _showError('Choose a historical candle CSV before running.');
       return;
     }
+    if (csvPreview == null && !await _previewCsv()) return;
+    if (!mounted || !_form.currentState!.validate()) return;
     setState(() {
       busy = true;
       error = null;
@@ -235,17 +342,104 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
     bool optional = false,
   }) => TextFormField(
     controller: fields[key],
-    decoration: InputDecoration(labelText: title, helperText: hint),
+    decoration: InputDecoration(
+      labelText: title,
+      helperText: hint,
+      helperMaxLines: 5,
+      errorMaxLines: 3,
+    ),
+    onChanged: (value) {
+      if (key == 'warmup' || key == 'csv_utc_offset_minutes') {
+        setState(_invalidatePreview);
+      }
+    },
     validator: (value) {
       final text = value?.trim() ?? '';
       if (text.isEmpty) return optional ? null : 'Required';
-      if (key.endsWith('_date')) {
-        if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(text)) {
-          return 'Use YYYY-MM-DD';
+      if (key == 'currency') {
+        if (!RegExp(r'^[a-zA-Z]{3}$').hasMatch(text)) {
+          return 'Use a three-letter currency, e.g. USD';
         }
-      } else if (key != 'currency') {
+      } else {
         final number = double.tryParse(text);
         if (number == null || !number.isFinite) return 'Enter a finite number';
+        if ([
+              'quantity',
+              'contract_size',
+              'point_size',
+              'initial_balance',
+            ].contains(key) &&
+            number <= 0) {
+          return 'Must be greater than zero';
+        }
+        if ([
+              'spread_points',
+              'slippage_points',
+              'commission_per_lot',
+              'min_score',
+            ].contains(key) &&
+            number < 0) {
+          return 'Cannot be negative';
+        }
+        if (key == 'warmup' &&
+            (int.tryParse(text) == null || number < 30 || number > 1000)) {
+          return 'Enter a whole number from 30 to 1,000';
+        }
+        if (key == 'csv_utc_offset_minutes' &&
+            (int.tryParse(text) == null || number < -840 || number > 840)) {
+          return 'Enter whole minutes from -840 to 840';
+        }
+      }
+      return null;
+    },
+  );
+
+  Widget _dateField(String key, String title) => TextFormField(
+    key: ValueKey('backtest-$key'),
+    controller: fields[key],
+    readOnly: true,
+    enabled: csvPreview != null && !previewBusy,
+    decoration: InputDecoration(
+      labelText: title,
+      hintText: 'Import and check CSV first',
+      helperText: key == 'start_date'
+          ? 'First UTC day to test. Earlier CSV candles supply warmup.'
+          : 'Last UTC day to test, including all its available candles.',
+      helperMaxLines: 4,
+      errorMaxLines: 3,
+      suffixIcon: const Icon(Icons.calendar_month_outlined),
+    ),
+    onTap: () async {
+      final first = DateTime.parse('${csvPreview!['start_date']}');
+      final last = DateTime.parse('${csvPreview!['end_date']}');
+      var initial = DateTime.tryParse(fields[key]!.text) ?? first;
+      if (initial.isBefore(first)) initial = first;
+      if (initial.isAfter(last)) initial = last;
+      final selected = await showDatePicker(
+        context: context,
+        initialDate: initial,
+        firstDate: first,
+        lastDate: last,
+        helpText: key == 'start_date'
+            ? 'First test day (UTC)'
+            : 'Last test day (UTC, inclusive)',
+      );
+      if (selected != null && mounted) {
+        setState(
+          () => fields[key]!.text =
+              '${selected.year.toString().padLeft(4, '0')}-${selected.month.toString().padLeft(2, '0')}-${selected.day.toString().padLeft(2, '0')}',
+        );
+      }
+    },
+    validator: (value) {
+      if (csvPreview == null) return 'Check the CSV date range first';
+      final date = value ?? '';
+      if (date.compareTo('${csvPreview!['start_date']}') < 0 ||
+          date.compareTo('${csvPreview!['end_date']}') > 0) {
+        return 'Choose a date within the CSV test range';
+      }
+      if (key == 'end_date' && date.compareTo(fields['start_date']!.text) < 0) {
+        return 'End date must be on or after start date';
       }
       return null;
     },
@@ -341,7 +535,10 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                           ),
                         ),
                     ],
-                    onChanged: (value) => setState(() => strategy = value!),
+                    onChanged: (value) => setState(() {
+                      strategy = value!;
+                      _invalidatePreview();
+                    }),
                   ),
                   DropdownButtonFormField<String>(
                     key: ValueKey('backtest-tf-$timeframe'),
@@ -355,14 +552,18 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                       for (final name in timeframes)
                         DropdownMenuItem(value: name, child: Text(name)),
                     ],
-                    onChanged: (value) => setState(() => timeframe = value!),
+                    onChanged: (value) => setState(() {
+                      timeframe = value!;
+                      _invalidatePreview();
+                    }),
                     validator: (value) =>
                         value == null ? 'Select a timeframe' : null,
                   ),
                   _field(
                     'csv_utc_offset_minutes',
                     'CSV UTC offset (minutes)',
-                    hint: 'Naive times: +120 for UTC+2',
+                    hint:
+                        '0 assumes UTC for times without a zone; 120 means UTC+2. Explicit CSV time zones take precedence. Confirm the export timezone.',
                   ),
                 ]),
                 const SizedBox(height: 18),
@@ -388,39 +589,112 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                   style: TextStyle(color: muted, fontSize: 11),
                 ),
                 const SizedBox(height: 18),
+                if (csvPreview != null)
+                  SelectableText(
+                    'CSV: ${csvPreview!['bars']} candles, ${_backtestUtc(csvPreview!['first_at'])} to ${_backtestUtc(csvPreview!['last_at'])} UTC. '
+                    'First test candle after ${csvPreview!['warmup']} warmup bars: ${_backtestUtc(csvPreview!['first_tradable_at'])} UTC. '
+                    '${csvPreview!['gap_count']} gaps; dates do not create missing candles.',
+                    style: const TextStyle(color: muted, fontSize: 12),
+                  )
+                else
+                  const Text(
+                    'Import a CSV to select dates. Defaults use its full available test period after warmup, not dates relative to today.',
+                    style: TextStyle(color: muted, fontSize: 12),
+                  ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: csvText == null || previewBusy
+                        ? null
+                        : _previewCsv,
+                    icon: const Icon(Icons.date_range_outlined),
+                    label: Text(
+                      previewBusy
+                          ? 'Checking CSV dates...'
+                          : 'Use full CSV date range',
+                    ),
+                  ),
+                ),
                 _fieldsWrap([
+                  _dateField('start_date', 'Start date (UTC)'),
+                  _dateField('end_date', 'End date (UTC, inclusive)'),
                   _field(
-                    'start_date',
-                    'Start date (UTC)',
-                    hint: 'YYYY-MM-DD · blank uses CSV',
-                    optional: true,
+                    'quantity',
+                    'Fixed quantity (lots)',
+                    hint:
+                        'Starts from the bot quantity. Each trade uses this many lots; 0.01 is one hundredth of a lot.',
                   ),
                   _field(
-                    'end_date',
-                    'End date (UTC, inclusive)',
-                    hint: 'YYYY-MM-DD · blank uses CSV',
-                    optional: true,
+                    'initial_balance',
+                    'Initial balance',
+                    hint:
+                        'Simulation starting cash in Profit currency. Default 10,000; use the amount you want to evaluate.',
                   ),
-                  _field('quantity', 'Fixed quantity (lots)'),
-                  _field('initial_balance', 'Initial balance'),
+                ]),
+                const SizedBox(height: 18),
+                Text(
+                  defaultsMessage,
+                  style: const TextStyle(color: muted, fontSize: 12),
+                ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: defaultsBusy
+                        ? null
+                        : () => setState(() {
+                            _loadDefaults();
+                          }),
+                    icon: const Icon(Icons.refresh),
+                    label: Text(
+                      defaultsBusy
+                          ? 'Loading defaults...'
+                          : 'Reload instrument defaults',
+                    ),
+                  ),
+                ),
+                const Text(
+                  'Broker values or your last completed run supply defaults when available. Missing sizes are not guessed. '
+                  'Cost defaults of 0 mean no cost is simulated, not that your broker charges nothing.',
+                  style: TextStyle(color: muted, fontSize: 12),
+                ),
+                const SizedBox(height: 14),
+                _fieldsWrap([
                   _field(
                     'contract_size',
                     'Contract size per lot',
-                    hint: 'Units of the instrument in one lot',
+                    hint:
+                        'Underlying units in 1 lot, from MT5 Specification > Contract size. Example: if 1 lot = 1 BTC, enter 1. Broker-specific.',
                   ),
                   _field(
                     'point_size',
                     'Point size',
-                    hint: 'Price value of one broker point',
+                    hint:
+                        'Price change for 1 broker point, not money per point or a pip. Example: point 0.01 means 100 points = 1.00 in price.',
                   ),
                   _field(
                     'currency',
                     'Profit currency',
-                    hint: 'Prices and costs use this currency',
+                    hint:
+                        'MT5 Specification > Profit currency, e.g. USD. Balance, P&L and commission use this currency; no FX conversion.',
                   ),
-                  _field('spread_points', 'Spread (points)'),
-                  _field('slippage_points', 'Slippage per side (points)'),
-                  _field('commission_per_lot', 'Round-trip commission / lot'),
+                  _field(
+                    'spread_points',
+                    'Spread (points)',
+                    hint:
+                        '(Ask - Bid) / Point size. Example: price gap 0.50 / point 0.01 = 50. Fixed for the test; CSV spread is not used.',
+                  ),
+                  _field(
+                    'slippage_points',
+                    'Slippage per side (points)',
+                    hint:
+                        'Adverse fill movement at entry and exit. Example: 2 points with point 0.01 = 0.02 each side. Default 0 assumes perfect fills.',
+                  ),
+                  _field(
+                    'commission_per_lot',
+                    'Round-trip commission / lot',
+                    hint:
+                        'Opening + closing fee for 1 lot in Profit currency. Example: 3.50 each side = 7; at 0.01 lot, cost is 0.07. Default 0 excludes fees.',
+                  ),
                 ]),
                 const SizedBox(height: 10),
                 ExpansionTile(
@@ -474,7 +748,9 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                 Align(
                   alignment: Alignment.centerLeft,
                   child: FilledButton.icon(
-                    onPressed: busy ? null : _submit,
+                    onPressed: busy || previewBusy || defaultsBusy
+                        ? null
+                        : _submit,
                     icon: busy
                         ? const SizedBox(
                             width: 16,

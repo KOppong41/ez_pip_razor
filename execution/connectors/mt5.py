@@ -465,6 +465,28 @@ class MT5Connector(BaseConnector):
     def account_info_for_account(self, broker_account):
         return self._call_for_account(broker_account, lambda: mt5.account_info())
 
+    def current_symbol_info_for_account(self, broker_account, symbol: str):
+        """Read specifications without login, terminal startup, or trading changes.
+
+        Used for optional simulation defaults. An unavailable/different session
+        is not a reason to initialize or switch the real trading terminal.
+        """
+        with _MT5Session.serialized():
+            def matches():
+                account = mt5.account_info()
+                return (
+                    account is not None
+                    and str(getattr(account, "login", "")) == str(broker_account.mt5_login)
+                    and str(getattr(account, "server", "")) == str(broker_account.mt5_server)
+                )
+
+            if not matches():
+                raise ConnectorError("Connect the selected account in the app to read symbol specifications.")
+            info = mt5.symbol_info(symbol)
+            if info is None or not matches():
+                raise ConnectorError("Symbol specifications are unavailable for the selected account.")
+            return info
+
     def symbol_info_for_account(self, broker_account, symbol: str):
         def operation():
             info = mt5.symbol_info(symbol)

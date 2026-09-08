@@ -22,8 +22,22 @@ In Historical backtests, select a bot (for its instrument identity), one of the
 six supported candle strategies, and the CSV timeframe. Import historical **bid**
 OHLC candles, then enter the contract size, point size, fixed lot quantity,
 initial balance, symbol profit currency, spread, slippage, and round-trip
-commission per lot. Broker economics must be supplied explicitly; the replay
-does not connect to MT5 to guess them. Currency conversion is not simulated.
+commission per lot. Instrument defaults first reuse your latest completed run
+for the same bot and symbol; otherwise, a read-only lookup of the matching
+connected MT5 account supplies available contract size, point size, profit
+currency, and current spread. This lookup never starts the terminal, logs in,
+switches accounts, enables trading, or places orders. If specifications are
+unavailable, unknown sizes/currency remain blank for manual entry. The source
+and read/save time appear above the fields. Reloading defaults resets instrument
+inputs; switching bots also resets them to avoid carrying another symbol's sizes.
+Currency conversion is not simulated.
+
+Every economic input has visible help and examples. Point size is the price
+change for one broker point (not pip size or cash per point). Spread in points
+is `(ask - bid) / point_size`; commission is the opening plus closing fee per
+lot in the profit currency. Current broker spread is only a snapshot, not a
+historical average. Slippage and commission default to zero unless restored
+from your saved run; zero explicitly excludes that cost and must be reviewed.
 
 CSV columns: `time,open,high,low,close,tick_volume`. MT5 tab-separated exports with
 `<DATE>`, `<TIME>`, `<OPEN>`, `<HIGH>`, `<LOW>`, `<CLOSE>`, and `<TICKVOL>` are also
@@ -33,10 +47,15 @@ to UTC; for timestamps without offsets, enter the CSV's UTC offset in minutes
 (for example, `120` for UTC+2). Gaps are retained and counted. Volume is required
 for the volume-dependent breakout and momentum strategies.
 
-Imports are limited to 1 MB / 10,000 candles. Start and end dates are optional
-UTC dates; the end date is inclusive. Include sufficient earlier candles for
-warmup (100 by default). Very large history-window/date-range combinations are
-rejected with a request to reduce the range.
+Imports are limited to 1 MB / 10,000 candles. Importing validates the CSV and
+shows its UTC coverage and first tradable candle after warmup (100 by default).
+The date pickers default to that first tradable day and the last CSV day
+(inclusive), and are bounded by those dates. Earlier CSV candles remain available
+for warmup when selecting a narrower period. Dates do not download or generate
+additional data. Changing timeframe, strategy, timezone offset or warmup clears
+the date preview; use **Use full CSV date range** to validate it again. Running
+also revalidates if needed. Very large history-window/date-range combinations
+are rejected with a request to reduce the range.
 
 Each run saves its source data hash, CSV, strategy defaults, replay settings,
 performance summary, equity curve, skip counts, and simulated trades. Select a

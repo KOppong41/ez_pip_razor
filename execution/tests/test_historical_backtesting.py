@@ -1,11 +1,13 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 
 from bots.models import Asset, Bot
+from brokers.models import BrokerAccount
 from execution.models import HistoricalBacktest, Order, Signal
 from execution.services.engine_types import EngineDecision
 from execution.services.historical_backtest import parse_csv, run_simulation, validate_config
@@ -30,6 +32,24 @@ def csv_data(count=35):
 
 
 class HistoricalReplayTests(SimpleTestCase):
+    @patch("execution.connectors.mt5.mt5")
+    def test_specification_read_never_initializes_or_changes_terminal(self, api):
+        from execution.connectors.mt5 import MT5Connector
+        from execution.connectors.base import ConnectorError
+        account = SimpleNamespace(mt5_login="123", mt5_server="Demo")
+        api.account_info.return_value = SimpleNamespace(login=123, server="Demo")
+        connector = MT5Connector()
+        self.assertIs(connector.current_symbol_info_for_account(account, "BTCUSDm"), api.symbol_info.return_value)
+        api.symbol_info.assert_called_once_with("BTCUSDm")
+        api.account_info.return_value = SimpleNamespace(login=456, server="Demo")
+        with self.assertRaises(ConnectorError):
+            connector.current_symbol_info_for_account(account, "BTCUSDm")
+        api.account_info.side_effect = [SimpleNamespace(login=123, server="Demo"), SimpleNamespace(login=456, server="Demo")]
+        with self.assertRaises(ConnectorError):
+            connector.current_symbol_info_for_account(account, "BTCUSDm")
+        for method in (api.initialize, api.login, api.shutdown, api.symbol_select, api.order_send):
+            method.assert_not_called()
+
     def simulate(self, config=None, change=None, direction="buy"):
         cfg = validate_config(config or payload())
         bars, dataset = parse_csv(csv_data(), cfg)
@@ -161,6 +181,103 @@ class HistoricalBacktestApiTests(TestCase):
         asset, _ = Asset.objects.get_or_create(symbol="EURUSD")
         self.bot = Bot.objects.create(owner=self.user, name="Replay bot", asset=asset)
         self.client.force_login(self.user)
+
+    def test_preview_suggests_csv_dates_after_warmup_without_saving(self):
+        source = csv_data(1450)
+        response = self.client.post("/api/personal/backtests/preview/", {
+            "csv": source, "warmup": 100, "timeframe": "1m",
+        }, content_type="application/json")
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertEqual(data["start_date"], "2025-01-06")
+        self.assertEqual(data["end_date"], "2025-01-07")
+        self.assertEqual(data["first_tradable_at"], "2025-01-06T11:40:00+00:00")
+        self.assertEqual(data["bars"], 1450)
+        self.assertEqual(HistoricalBacktest.objects.count(), 0)
+
+    def test_preview_honors_timezone_and_warmup_crossing_midnight(self):
+        at = datetime(2025, 1, 6, 23, 45)
+        source = "time,open,high,low,close,tick_volume\n" + "\n".join(
+            f"{(at + timedelta(minutes=i)).isoformat()},100,102,98,100,100" for i in range(150)
+        )
+        response = self.client.post("/api/personal/backtests/preview/", {
+            "csv": source, "warmup": 30, "csv_utc_offset_minutes": 0,
+        }, content_type="application/json")
+        self.assertEqual(response.json()["start_date"], "2025-01-07")
+        response = self.client.post("/api/personal/backtests/preview/", {
+            "csv": source, "warmup": 30, "csv_utc_offset_minutes": 120,
+        }, content_type="application/json")
+        self.assertEqual(response.json()["start_date"], "2025-01-06")
+
+    def test_preview_rejects_invalid_csv_and_requires_authentication(self):
+        response = self.client.post("/api/personal/backtests/preview/", {
+            "csv": csv_data(), "warmup": 100,
+        }, content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("102", response.json()["detail"])
+        self.client.logout()
+        response = self.client.post("/api/personal/backtests/preview/", {}, content_type="application/json")
+        self.assertIn(response.status_code, (401, 403))
+
+    def attach_account(self):
+        self.bot.broker_account = BrokerAccount.objects.create(
+            owner=self.user, name="Backtest demo", broker="mt5", connector="mt5_local",
+            account_ref="backtest-demo", mt5_login="123", mt5_server="Demo",
+        )
+        self.bot.save(update_fields=["broker_account"])
+
+    @patch("execution.connectors.mt5.MT5Connector.current_symbol_info_for_account")
+    def test_defaults_use_broker_specs_with_source_and_do_not_guess_costs(self, lookup):
+        self.attach_account()
+        lookup.return_value = SimpleNamespace(
+            trade_contract_size=100000, point=0.00001, currency_profit="USD", spread=12,
+        )
+        response = self.client.get(f"/api/personal/backtests/defaults/{self.bot.id}/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["source"], "broker_snapshot")
+        self.assertEqual(data["values"], {
+            "contract_size": "100000", "point_size": "0.00001", "currency": "USD", "spread_points": "12",
+        })
+        lookup.assert_called_once_with(self.bot.broker_account, "EURUSD")
+        self.assertIn("not a historical average", data["message"])
+        self.assertEqual(HistoricalBacktest.objects.count(), 0)
+
+    @patch("execution.connectors.mt5.MT5Connector.current_symbol_info_for_account")
+    def test_defaults_fail_safely_and_do_not_read_another_users_account(self, lookup):
+        self.attach_account()
+        lookup.side_effect = RuntimeError("private connection error")
+        response = self.client.get(f"/api/personal/backtests/defaults/{self.bot.id}/")
+        self.assertEqual(response.json()["values"], {})
+        self.assertNotIn("private connection error", response.content.decode())
+        lookup.reset_mock()
+        self.bot.broker_account.owner = self.other
+        self.bot.broker_account.save(update_fields=["owner"])
+        self.client.get(f"/api/personal/backtests/defaults/{self.bot.id}/")
+        lookup.assert_not_called()
+        self.client.force_login(self.other)
+        self.assertEqual(self.client.get(f"/api/personal/backtests/defaults/{self.bot.id}/").status_code, 404)
+
+    @patch("execution.connectors.mt5.MT5Connector.current_symbol_info_for_account")
+    def test_defaults_reuse_only_own_completed_same_symbol_run(self, lookup):
+        self.attach_account()
+        HistoricalBacktest.objects.create(
+            owner=self.other, bot=self.bot, symbol="EURUSD", status="completed",
+            config={"contract_size": "999"},
+        )
+        HistoricalBacktest.objects.create(
+            owner=self.user, bot=self.bot, symbol="EURUSD", status="completed",
+            config={"contract_size": "100000", "point_size": "0.00001", "commission_per_lot": "7"},
+        )
+        HistoricalBacktest.objects.create(
+            owner=self.user, bot=self.bot, symbol="BTCUSDm", status="completed",
+            config={"contract_size": "1"},
+        )
+        data = self.client.get(f"/api/personal/backtests/defaults/{self.bot.id}/").json()
+        self.assertEqual(data["source"], "saved_backtest")
+        self.assertEqual(data["values"]["commission_per_lot"], "7")
+        self.assertEqual(data["values"]["contract_size"], "100000")
+        lookup.assert_not_called()
 
     def test_run_persists_results_without_creating_trading_records(self):
         before = (Signal.objects.count(), Order.objects.count())

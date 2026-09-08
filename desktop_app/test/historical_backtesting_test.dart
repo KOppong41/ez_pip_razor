@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -71,10 +72,19 @@ Map<String, dynamic> savedRun({bool noTrades = false}) => {
 };
 
 class HistoricalClient extends ApiClient {
-  HistoricalClient({this.failRun = false, this.noTrades = false})
-    : super('http://localhost');
+  HistoricalClient({
+    this.failRun = false,
+    this.noTrades = false,
+    this.failPreview = false,
+    this.missingDefaults = false,
+    this.defaultsResponse,
+  }) : super('http://localhost');
   final bool failRun;
   final bool noTrades;
+  final bool failPreview;
+  final bool missingDefaults;
+  final Future<Map<String, dynamic>>? defaultsResponse;
+  Map<String, dynamic>? previewed;
   Map<String, dynamic>? submitted;
 
   @override
@@ -89,6 +99,13 @@ class HistoricalClient extends ApiClient {
             'timeframe': '1m',
             'quantity': '0.01',
           },
+          {
+            'id': 4,
+            'name': 'Forex demo',
+            'symbol': 'EURUSD',
+            'timeframe': '5m',
+            'quantity': '0.02',
+          },
         ],
         'strategies': ['trend_pullback', 'momentum_ignition'],
         'timeframes': ['1m', '5m'],
@@ -96,6 +113,24 @@ class HistoricalClient extends ApiClient {
     }
     if (path == '/api/personal/backtests/42/') {
       return savedRun(noTrades: noTrades);
+    }
+    if (path.startsWith('/api/personal/backtests/defaults/')) {
+      if (defaultsResponse != null) return await defaultsResponse!;
+      return {
+        'values': missingDefaults
+            ? {}
+            : {
+                'contract_size': path.endsWith('/4/') ? '100000' : '1',
+                'point_size': path.endsWith('/4/') ? '0.00001' : '0.01',
+                'currency': 'USD',
+                'spread_points': '50',
+              },
+        'source': missingDefaults ? 'unavailable' : 'broker_snapshot',
+        'message': missingDefaults
+            ? 'Broker specifications unavailable. Unknown sizes are left blank.'
+            : 'Defaults from connected broker. Spread is a snapshot.',
+        'as_of': missingDefaults ? null : '2025-01-08T12:00:00Z',
+      };
     }
     if (path.startsWith('/api/personal/backtests/')) {
       return {
@@ -111,6 +146,24 @@ class HistoricalClient extends ApiClient {
 
   @override
   Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
+    if (path == '/api/personal/backtests/preview/') {
+      previewed = body;
+      if (failPreview) {
+        throw const ApiException(
+          'Provide at least 102 candles, including warmup.',
+        );
+      }
+      return {
+        'bars': 3000,
+        'first_at': '2025-01-06T23:00:00Z',
+        'last_at': '2025-01-09T00:59:00Z',
+        'first_tradable_at': '2025-01-07T00:40:00Z',
+        'start_date': '2025-01-07',
+        'end_date': '2025-01-09',
+        'warmup': 100,
+        'gap_count': 0,
+      };
+    }
     if (path != '/api/personal/backtests/') {
       throw StateError('Unexpected POST $path');
     }
@@ -169,6 +222,185 @@ Future<void> submit(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('switching bots resets symbol-specific defaults', (tester) async {
+    await mount(tester, HistoricalClient());
+    await tester.ensureVisible(field('Contract size per lot'));
+    await tester.enterText(field('Contract size per lot'), '123');
+    await tester.ensureVisible(find.text('Bot / instrument'));
+    await tester.tap(find.text('Bitcoin demo · BTCUSDm'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Forex demo · EURUSD').last);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextFormField>(field('Contract size per lot'))
+          .controller!
+          .text,
+      '100000',
+    );
+    expect(
+      tester.widget<TextFormField>(field('Point size')).controller!.text,
+      '0.00001',
+    );
+    expect(
+      tester
+          .widget<TextFormField>(field('Fixed quantity (lots)'))
+          .controller!
+          .text,
+      '0.02',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('late defaults do not overwrite manual input', (tester) async {
+    final response = Completer<Map<String, dynamic>>();
+    await mount(tester, HistoricalClient(defaultsResponse: response.future));
+    await tester.ensureVisible(field('Contract size per lot'));
+    await tester.enterText(field('Contract size per lot'), '25');
+    response.complete({
+      'values': {'contract_size': '1', 'point_size': '0.01', 'currency': 'USD'},
+      'message': 'Read from broker',
+    });
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextFormField>(field('Contract size per lot'))
+          .controller!
+          .text,
+      '25',
+    );
+    expect(
+      tester.widget<TextFormField>(field('Point size')).controller!.text,
+      '0.01',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'CSV dates default after warmup and use bounded calendar selectors',
+    (tester) async {
+      final client = HistoricalClient();
+      await mount(tester, client);
+      final startFinder = find.byKey(const ValueKey('backtest-start_date'));
+      final endFinder = find.byKey(const ValueKey('backtest-end_date'));
+      expect(tester.widget<TextFormField>(startFinder).enabled, isFalse);
+      await tester.tap(find.text('Import candle CSV'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextFormField>(startFinder).controller!.text,
+        '2025-01-07',
+      );
+      expect(
+        tester.widget<TextFormField>(endFinder).controller!.text,
+        '2025-01-09',
+      );
+      await tester.ensureVisible(startFinder);
+      await tester.tap(startFinder);
+      await tester.pumpAndSettle();
+      final picker = tester.widget<DatePickerDialog>(
+        find.byType(DatePickerDialog),
+      );
+      expect(picker.firstDate, DateTime(2025, 1, 7));
+      expect(picker.lastDate, DateTime(2025, 1, 9));
+      await tester.tap(find.text('8'));
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextFormField>(startFinder).controller!.text,
+        '2025-01-08',
+      );
+      await tester.ensureVisible(find.text('Run historical backtest'));
+      await tester.tap(find.text('Run historical backtest'));
+      await tester.pumpAndSettle();
+      expect(client.submitted?['start_date'], '2025-01-08');
+      expect(client.submitted?['end_date'], '2025-01-09');
+      expect(client.submitted?['contract_size'], '1');
+      expect(client.submitted?['spread_points'], '50');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('rejects reversed dates before starting a simulation', (
+    tester,
+  ) async {
+    final client = HistoricalClient();
+    await mount(tester, client);
+    await tester.tap(find.text('Import candle CSV'));
+    await tester.pumpAndSettle();
+    tester
+            .widget<TextFormField>(
+              find.byKey(const ValueKey('backtest-start_date')),
+            )
+            .controller!
+            .text =
+        '2025-01-09';
+    tester
+            .widget<TextFormField>(
+              find.byKey(const ValueKey('backtest-end_date')),
+            )
+            .controller!
+            .text =
+        '2025-01-07';
+    await tester.ensureVisible(find.text('Run historical backtest'));
+    await tester.tap(find.text('Run historical backtest'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('End date must be on or after start date'),
+      findsOneWidget,
+    );
+    expect(client.submitted, isNull);
+  });
+
+  testWidgets('invalid CSV has no fabricated default dates', (tester) async {
+    await mount(tester, HistoricalClient(failPreview: true));
+    await tester.tap(find.text('Import candle CSV'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Provide at least 102 candles'), findsOneWidget);
+    final start = tester.widget<TextFormField>(
+      find.byKey(const ValueKey('backtest-start_date')),
+    );
+    expect(start.enabled, isFalse);
+    expect(start.controller!.text, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'missing specs stay explicit and changing timezone invalidates CSV dates',
+    (tester) async {
+      await mount(tester, HistoricalClient(missingDefaults: true));
+      expect(
+        tester
+            .widget<TextFormField>(field('Contract size per lot'))
+            .controller!
+            .text,
+        isEmpty,
+      );
+      expect(
+        tester.widget<TextFormField>(field('Point size')).controller!.text,
+        isEmpty,
+      );
+      expect(
+        find.textContaining('Unknown sizes are left blank'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Default 0 assumes perfect fills'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Import candle CSV'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(field('CSV UTC offset (minutes)'));
+      await tester.enterText(field('CSV UTC offset (minutes)'), '120');
+      await tester.pumpAndSettle();
+      final start = tester.widget<TextFormField>(
+        find.byKey(const ValueKey('backtest-start_date')),
+      );
+      expect(start.controller!.text, isEmpty);
+      expect(start.enabled, isFalse);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('imports UTF-16 MT5 exports in a compact window', (tester) async {
     await tester.binding.setSurfaceSize(const Size(760, 600));
     addTearDown(() => tester.binding.setSurfaceSize(null));
