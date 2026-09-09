@@ -1,5 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -12,6 +13,11 @@ from execution.models import BrokerPosition, Order
 
 class MT5OwnershipResolutionTests(TestCase):
     def setUp(self):
+        # GitHub Actions runs on Linux without the Windows-only MetaTrader5
+        # package. Keep every ownership test representative of that environment.
+        self.mt5_package = patch("execution.connectors.mt5._mt5_module", None)
+        self.mt5_package.start()
+        self.addCleanup(self.mt5_package.stop)
         self.user = get_user_model().objects.create_user("mt5-owner-resolution", password="pw")
         self.account = BrokerAccount.objects.create(
             owner=self.user,

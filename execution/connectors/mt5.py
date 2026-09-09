@@ -27,6 +27,11 @@ try:
 except Exception:
     _mt5_module = None
 
+# Position synchronization maps an already-returned MT5 record and must remain
+# usable in Linux reconciliation tests where the Windows-only package is absent.
+# MT5 defines POSITION_TYPE_BUY as 0; prefer the package value when available.
+_POSITION_TYPE_BUY = getattr(_mt5_module, "POSITION_TYPE_BUY", 0)
+
 
 def is_mt5_available() -> bool:
     return _mt5_module is not None
@@ -929,7 +934,7 @@ class MT5Connector(BaseConnector):
             originating_order = None
         side = (
             "buy"
-            if getattr(raw_position, "type", None) == getattr(mt5, "POSITION_TYPE_BUY", 0)
+            if getattr(raw_position, "type", None) == _POSITION_TYPE_BUY
             else "sell"
         )
         opened_at = None
