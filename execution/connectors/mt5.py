@@ -31,6 +31,7 @@ except Exception:
 # usable in Linux reconciliation tests where the Windows-only package is absent.
 # MT5 defines POSITION_TYPE_BUY as 0; prefer the package value when available.
 _POSITION_TYPE_BUY = getattr(_mt5_module, "POSITION_TYPE_BUY", 0)
+_EXIT_DEAL_ENTRIES = frozenset({1, 2, 3})  # MT5 OUT, INOUT, OUT_BY
 
 
 def is_mt5_available() -> bool:
@@ -166,6 +167,13 @@ def _coerce_ticket(value):
             return int(value)
         except Exception:
             return None
+
+
+def _is_exit_deal(deal) -> bool:
+    try:
+        return int(getattr(deal, "entry", -1)) in _EXIT_DEAL_ENTRIES
+    except (TypeError, ValueError):
+        return False
 
 
 def _maybe_store_broker_ticket(order: Order, result) -> None:
@@ -1024,7 +1032,11 @@ class MT5Connector(BaseConnector):
             return bool({value for value in ticket_values if value} & {value for value in expected if value})
 
         return (
-            [item for item in deals if matches(item)],
+            [
+                item
+                for item in deals
+                if matches(item) and (not order.is_exit or _is_exit_deal(item))
+            ],
             [item for item in active_orders if matches(item)],
             [item for item in positions if matches(item)],
         )
@@ -1107,6 +1119,10 @@ class MT5Connector(BaseConnector):
             if positions:
                 for raw_position in positions:
                     self._sync_broker_position(order, raw_position, ownership="ez_trade")
+                if order.is_exit:
+                    # An open position proves only that reconciliation reached
+                    # the broker. It cannot prove that any close volume filled.
+                    return True
                 raw_position = positions[-1]
                 volume = Decimal(str(getattr(raw_position, "volume", order.qty) or order.qty))
                 price = Decimal(str(getattr(raw_position, "price_open", order.price or 0) or 0))
@@ -1294,7 +1310,11 @@ class MT5Connector(BaseConnector):
             matching_deals = ()
             if order.broker_deal_ticket:
                 try:
-                    matching_deals = mt5.history_deals_get(ticket=order.broker_deal_ticket) or ()
+                    matching_deals = tuple(
+                        deal
+                        for deal in (mt5.history_deals_get(ticket=order.broker_deal_ticket) or ())
+                        if _is_exit_deal(deal)
+                    )
                 except Exception:
                     logger.warning(
                         "Unable to load authoritative MT5 closing deal for order %s",

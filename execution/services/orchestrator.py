@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import Literal, Tuple
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from execution.models import BrokerPosition, Decision, Order, BrokerAccount, Bot
 from execution.services.journal import log_journal_event
@@ -137,63 +138,24 @@ def calculate_position_size(qty_base: Decimal, atr: Decimal, symbol: str) -> Dec
     return adjusted
 
 
-def _get_minimum_stop_distance(symbol: str) -> Decimal:
-    """
-    Get the minimum distance between SL and TP for this symbol.
-    Prevents 'Invalid stops' errors from MT5 broker.
-    For high-precision instruments like GOLD (XAUUSDm), minimum is higher.
-    """
-    symbol_upper = symbol.upper()
-    
-    # Gold is high precision and needs larger minimum
-    if "XAU" in symbol_upper or "GOLD" in symbol_upper:
-        return Decimal("0.01")  # 10 pips minimum for GOLD
-    
-    # Forex pairs: standard 5 pip minimum
-    if any(pair in symbol_upper for pair in ["EUR", "GBP", "USD", "JPY", "CHF"]):
-        return Decimal("0.0005")  # 5 pips for most forex
-    
-    # Crypto and others: 0.0001 (1 pip)
-    return Decimal("0.0001")
+def _close_order_can_retry(order: Order) -> bool:
+    """Return True only when the previous close is terminal with no possible fill."""
+    if order.status not in {"canceled", "rejected", "error"}:
+        return False
+    if Decimal(str(order.filled_qty or 0)) > 0 or order.executions.exists():
+        return False
+    # An ambiguous or accepted submission keeps its deterministic identity
+    # until reconciliation proves the broker outcome.
+    return not order.attempts.filter(
+        status__in={"submitting", "ambiguous", "accepted", "partial", "reconciled"}
+    ).exists()
 
 
-def _enforce_minimum_stop_distance(symbol: str, side: str, entry_px: Decimal | None, 
-                                    sl: Decimal | None, tp: Decimal | None) -> Tuple[Decimal | None, Decimal | None]:
-    """
-    Validate and adjust SL/TP to ensure they meet minimum distance requirements.
-    Returns (adjusted_sl, adjusted_tp).
-    
-    If SL and TP are too close, widens them by applying minimum distance rules.
-    """
-    if not (sl and tp) or not entry_px:
-        return sl, tp
-    
-    min_distance = _get_minimum_stop_distance(symbol)
-    actual_distance = abs(sl - tp)
-    
-    if actual_distance < min_distance:
-        logger.warning(
-            f"SL/TP too close for {symbol}: distance={actual_distance} < min={min_distance}. "
-            f"Adjusting: entry={entry_px}, sl={sl}, tp={tp}"
-        )
-        
-        # Rebuild SL/TP to enforce minimum distance
-        if side == "buy":
-            # For buy: SL should be below entry, TP should be above
-            adjusted_sl = entry_px - min_distance * Decimal("1.5")  # 1.5x minimum for buffer
-            adjusted_tp = entry_px + min_distance * Decimal("1.5")
-        else:
-            # For sell: SL should be above entry, TP should be below
-            adjusted_sl = entry_px + min_distance * Decimal("1.5")
-            adjusted_tp = entry_px - min_distance * Decimal("1.5")
-        
-        logger.info(
-            f"Enforced minimum distance for {symbol} {side}: "
-            f"adjusted_sl={adjusted_sl}, adjusted_tp={adjusted_tp}"
-        )
-        return adjusted_sl, adjusted_tp
-    
-    return sl, tp
+def _retry_close_order_id(base_client_id: str, existing_ids: set[str]) -> str:
+    attempt = 1
+    while f"{base_client_id}|retry:{attempt}" in existing_ids:
+        attempt += 1
+    return f"{base_client_id}|retry:{attempt}"
 
 
 def create_close_order_for_position(
@@ -294,20 +256,34 @@ def create_close_order_for_position(
         "status": "new",
     }
 
-    order, created = Order.objects.get_or_create(
-        client_order_id=client_id,
-        defaults=defaults,
-    )
+    with transaction.atomic():
+        close_orders = list(
+            Order.objects.select_for_update()
+            .filter(
+                Q(client_order_id=client_id)
+                | Q(client_order_id__startswith=f"{client_id}|retry:")
+            )
+            .order_by("id")
+        )
+        if not close_orders:
+            order = Order.objects.create(client_order_id=client_id, **defaults)
+            created = True
+        else:
+            order = close_orders[-1]
+            created = False
+            if _close_order_can_retry(order):
+                retry_id = _retry_close_order_id(
+                    client_id,
+                    {existing.client_order_id for existing in close_orders},
+                )
+                order = Order.objects.create(client_order_id=retry_id, **defaults)
+                created = True
     validate_order_account_scope(order)
 
-    # Never recycle a resolved close order into a fresh submission. Ambiguous
-    # retries must reconcile this deterministic order before another send.
+    # Never recycle an active or ambiguous close into a fresh submission.
+    # Definitive zero-fill outcomes receive a separately identified attempt.
     if not created and order.status not in {"filled", "canceled", "rejected", "error"}:
-        desired_qty = qty
         updates = []
-        if order.qty != desired_qty:
-            order.qty = desired_qty
-            updates.append("qty")
         if order.side != side:
             order.side = side
             updates.append("side")
@@ -392,15 +368,6 @@ def create_order_from_decision(
     # MT5 data or invents fallback stops from an API/view process.
     dirty_fields: list[str] = []
 
-    px = None
-    for key in ("entry", "price", "close", "last_price"):
-        if params.get(key) is not None:
-            try:
-                px = Decimal(str(params[key]))
-            except Exception:
-                px = None
-            break
-
     if sl is not None:
         order.sl = Decimal(str(sl))
         dirty_fields.append("sl")
@@ -408,20 +375,6 @@ def create_order_from_decision(
     if tp is not None:
         order.tp = Decimal(str(tp))
         dirty_fields.append("tp")
-
-    # ⚠️ CRITICAL: Validate SL/TP distance to prevent "Invalid stops" broker rejections
-    if order.sl and order.tp and px:
-        adjusted_sl, adjusted_tp = _enforce_minimum_stop_distance(
-            symbol=symbol,
-            side=side,
-            entry_px=px,
-            sl=order.sl,
-            tp=order.tp
-        )
-        if adjusted_sl != order.sl or adjusted_tp != order.tp:
-            order.sl = adjusted_sl
-            order.tp = adjusted_tp
-            dirty_fields = list(set(dirty_fields + ["sl", "tp"]))  # add if not already present
 
     if dirty_fields:
         order.save(update_fields=dirty_fields)
