@@ -1288,6 +1288,119 @@ def validate_broker_configs_task():
             )
     return {"issues": issues}
 
+
+def _dispatch_scalper_candidate(decision: Decision, strategy_name: str) -> dict:
+    """Create and queue one ranked scalper candidate with local broker guards."""
+    orders_placed = []
+    failures = []
+    rejection_reason = None
+    try:
+        for order, _created in fanout_orders(decision, master_qty=None):
+            if order.status != "new" or order.submitted_at is not None:
+                rejection_reason = "order_not_dispatchable"
+                continue
+            constraints = get_broker_symbol_constraints(
+                order.broker_account,
+                order.symbol,
+            )
+            point = constraints.point
+            payload = decision.signal.payload or {}
+            spread = payload.get("spread_price")
+            if spread is None:
+                spread = payload.get("spread_points")
+            entry_hint = None
+            for source in (decision.params or {}, payload):
+                for key in ("entry", "price", "close", "last_price"):
+                    if source.get(key) is not None:
+                        entry_hint = Decimal(str(source[key]))
+                        break
+                if entry_hint is not None:
+                    break
+            if entry_hint is None:
+                price = get_price(order.broker_account, order.symbol)
+                if price is not None:
+                    entry_hint = Decimal(str(price))
+            sl_distance = Decimal("0")
+            if entry_hint is not None and order.sl is not None:
+                sl_distance = abs(Decimal(str(order.sl)) - entry_hint)
+            guard = apply_order_guards(
+                GuardInputs(
+                    sl_distance=sl_distance,
+                    sl_unit="price",
+                    spread=Decimal(str(spread)) if spread is not None else None,
+                    spread_unit="price",
+                    point=point,
+                    min_stop_points=constraints.stops_level_points,
+                )
+            )
+            if not guard.ok:
+                rejection_reason = guard.reason
+                log_journal_event(
+                    "order.dispatch_error",
+                    severity="warning",
+                    order=order,
+                    bot=order.bot,
+                    broker_account=order.broker_account,
+                    symbol=order.symbol,
+                    message="Ranked scalper candidate skipped by guard",
+                    context={"reason": guard.reason, "strategy": strategy_name},
+                )
+                continue
+            _queue_or_dispatch_order(order)
+            orders_placed.append((order.id, order.symbol, order.side))
+    except Exception as exc:
+        failures.append({"strategy": strategy_name, "error": str(exc)})
+        rejection_reason = "dispatch_failed"
+        logger.exception(
+            "[ScalperAllocation] decision=%s strategy=%s dispatch failed",
+            decision.id,
+            strategy_name,
+        )
+    if not orders_placed and rejection_reason is None:
+        rejection_reason = "fanout_produced_no_order"
+    return {
+        "orders": orders_placed,
+        "failures": failures,
+        "rejection_reason": rejection_reason,
+    }
+
+
+def _account_entry_slots(account: BrokerAccount) -> int | None:
+    """Return currently available account slots; None means unlimited."""
+    policy = RiskPolicy.objects.filter(broker_account=account).first()
+    limit = int(
+        policy.max_total_open_positions
+        if policy is not None
+        else RiskPolicy._meta.get_field("max_total_open_positions").get_default()
+    )
+    if limit <= 0:
+        return None
+    cutoff = timezone.now() - timedelta(minutes=5)
+    occupied = BrokerPosition.objects.filter(
+        broker_account=account,
+        ownership="ez_trade",
+        status="open",
+    ).count()
+    occupied += Order.objects.filter(
+        broker_account=account,
+        intent="entry",
+        status__in=["new", "ack"],
+        risk_reserved_at__gte=cutoff,
+    ).count()
+    return max(0, limit - occupied)
+
+
+def _update_scalper_run_allocation(run_log_id: int | None, **values) -> None:
+    if not run_log_id:
+        return
+    run_log = ScalperRunLog.objects.filter(pk=run_log_id).first()
+    if run_log is None:
+        return
+    summary = dict(run_log.summary or {})
+    summary.update(_json_safe(values))
+    run_log.summary = summary
+    run_log.save(update_fields=["summary"])
+
     
     
 
@@ -1329,6 +1442,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
     skipped_not_accepted = 0
     skipped_market_closed = 0
     skipped_unavailable = 0
+    candidates = []
 
     for bot in bots_qs:
         broker_account = getattr(bot, "broker_account", None)
@@ -1389,12 +1503,96 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
                 tf,
             )
         
-        # Run inline to guarantee scalper cycles execute even if a nested Celery worker is unavailable.
-        trade_scalper_strategies_for_bot.apply(
+        # Scan every bot before allocating account slots. This prevents the
+        # first/high-frequency symbol from winning merely because of loop order.
+        scan_result = trade_scalper_strategies_for_bot.apply(
             args=(bot.id,),
-            kwargs={"timeframe": tf, "n_bars": n_bars},
+            kwargs={
+                "timeframe": tf,
+                "n_bars": n_bars,
+                "defer_dispatch": True,
+            },
         )
+        scan_payload = getattr(scan_result, "result", None)
+        if isinstance(scan_payload, dict):
+            for candidate in scan_payload.get("candidates", []):
+                candidates.append(candidate)
         dispatched += 1
+
+    best_by_bot = {}
+    for candidate in candidates:
+        bot_id = int(candidate["bot_id"])
+        existing = best_by_bot.get(bot_id)
+        if existing is None or float(candidate["score"]) > float(existing["score"]):
+            best_by_bot[bot_id] = candidate
+
+    ranked = sorted(
+        best_by_bot.values(),
+        key=lambda candidate: (
+            -float(candidate["score"]),
+            int(candidate["bot_id"]),
+        ),
+    )
+    slots_by_account = {}
+    slot_winners_by_account = defaultdict(list)
+    awarded = []
+    slot_losses = []
+    for candidate in ranked:
+        account_id = int(candidate["broker_account_id"])
+        if account_id not in slots_by_account:
+            account = BrokerAccount.objects.get(pk=account_id)
+            slots_by_account[account_id] = _account_entry_slots(account)
+        available = slots_by_account[account_id]
+        if available == 0:
+            slot_losses.append(candidate)
+            winner_ids = slot_winners_by_account[account_id]
+            lost_to_another_bot = bool(winner_ids)
+            _update_scalper_run_allocation(
+                candidate.get("run_log_id"),
+                outcome=(
+                    "account_slot_lost"
+                    if lost_to_another_bot
+                    else "account_slot_unavailable"
+                ),
+                slot_status="lost" if lost_to_another_bot else "unavailable",
+                rejection_reason=(
+                    "account_slot_awarded_to_higher_ranked_setup"
+                    if lost_to_another_bot
+                    else "account_position_limit_reached"
+                ),
+                slot_winner_bot_id=winner_ids[-1] if winner_ids else None,
+            )
+            continue
+
+        decision = Decision.objects.select_related(
+            "signal",
+            "bot__broker_account",
+        ).get(pk=int(candidate["decision_id"]))
+        dispatch_result = _dispatch_scalper_candidate(
+            decision,
+            str(candidate["strategy"]),
+        )
+        if dispatch_result["orders"]:
+            awarded.append(candidate)
+            slot_winners_by_account[account_id].append(int(candidate["bot_id"]))
+            if available is not None:
+                slots_by_account[account_id] = max(0, available - 1)
+            _update_scalper_run_allocation(
+                candidate.get("run_log_id"),
+                outcome="orders_sent",
+                slot_status="won",
+                rejection_reason=None,
+                slot_winner_bot_id=int(candidate["bot_id"]),
+                orders=dispatch_result["orders"],
+            )
+        else:
+            _update_scalper_run_allocation(
+                candidate.get("run_log_id"),
+                outcome="dispatch_rejected",
+                slot_status="rejected",
+                rejection_reason=dispatch_result["rejection_reason"],
+                dispatch_failures=dispatch_result["failures"],
+            )
     
     logger.info(
         "[ScalperRunner] tf=%s dispatched=%s skipped_no_broker=%s skipped_no_symbols=%s skipped_no_strategies=%s skipped_not_accepted=%s skipped_market_closed=%s skipped_unavailable=%s",
@@ -1418,6 +1616,9 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
         "skipped_not_accepted": skipped_not_accepted,
         "skipped_market_closed": skipped_market_closed,
         "skipped_unavailable": skipped_unavailable,
+        "candidates": len(ranked),
+        "awarded": len(awarded),
+        "slot_losses": len(slot_losses),
     }
 
 
@@ -1429,7 +1630,13 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
     retry_jitter=True,
     retry_kwargs={"max_retries": 5},
 )
-def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n_bars: int = 100):
+def trade_scalper_strategies_for_bot(
+    self,
+    bot_id: int,
+    timeframe: str = "1m",
+    n_bars: int = 100,
+    defer_dispatch: bool = False,
+):
     """
     Runs all enabled scalper strategies for a single bot.
 
@@ -1446,21 +1653,55 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     scalper_cfg = build_scalper_config(bot)
 
     def _log_skip(reason: str, extra_context: dict | None = None):
+        context = {
+            "timeframe": timeframe,
+            "session": session_label,
+            "auto_trade_active": bool(getattr(bot, "auto_trade", False)),
+            "outcome": "skipped",
+            "reason": reason,
+            **(extra_context or {}),
+        }
         log_journal_event(
             "scalper_engine_run",
             bot=bot,
             owner=bot.owner if bot else None,
             symbol=symbol or "",
             message=f"Scalper skipped tf={timeframe} reason={reason} session={session_label}",
-            context={
-                "timeframe": timeframe,
-                "session": session_label,
-                "auto_trade_active": bool(getattr(bot, "auto_trade", False)),
-                "outcome": "skipped",
-                "reason": reason,
-                **(extra_context or {}),
-            },
+            context=context,
         )
+        try:
+            ScalperRunLog.objects.create(
+                bot=bot,
+                timeframe=timeframe,
+                session=session_label,
+                summary=_json_safe(
+                    {
+                        "outcome": "skipped",
+                        "generated_at": timezone.now().isoformat(),
+                        "strategies_evaluated": [],
+                        "best_score": None,
+                        "best_strategy": None,
+                        "rejection_reason": reason,
+                        "htf_status": (
+                            "unavailable"
+                            if reason == "htf_bias_unavailable"
+                            else "not_evaluated"
+                        ),
+                        "spread_status": (
+                            "unavailable"
+                            if reason.startswith("market_data")
+                            else "not_evaluated"
+                        ),
+                        "slot_status": "not_considered",
+                        "context": context,
+                    }
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "[ScalperTrade] failed to persist skipped run log bot=%s",
+                bot.id,
+            )
 
     if not getattr(bot, "auto_trade", False):
         logger.info("[ScalperTrade] bot=%s auto_trade=False, skipping", bot.id)
@@ -1729,6 +1970,7 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
     orders_placed = []
     dispatch_failures = []
     strategy_events = []
+    candidates = []
 
     # Optional HTF bias (15m) to filter countertrend M1 entries
     htf_bias = None
@@ -1983,122 +2225,29 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
                 decision.reason,
             )
             continue
+
+        candidates.append(
+            {
+                "bot_id": bot.id,
+                "broker_account_id": broker_account.id,
+                "decision_id": decision.id,
+                "strategy": strategy_name,
+                "symbol": symbol,
+                "score": float(decision.score or engine_decision.score or 0),
+            }
+        )
+        if defer_dispatch:
+            continue
         
         # Fanout to orders and dispatch
-        try:
-            for order, created in fanout_orders(decision, master_qty=None):
-                should_dispatch = order.status == "new" and order.submitted_at is None
-                if should_dispatch:
-                    # Apply unit-aware, broker-aware guards before dispatch
-                    try:
-                        constraints = get_broker_symbol_constraints(order.broker_account, order.symbol)
-                    except Exception:
-                        constraints = None
-                    point = getattr(constraints, "point", None) if constraints else None
-                    min_stop_pts = getattr(constraints, "stops_level_points", None) if constraints else None
-                    spread = None
-                    try:
-                        spread = (
-                            (decision.signal.payload or {}).get("spread_price")
-                            or (decision.signal.payload or {}).get("spread_points")
-                        ) if decision.signal and decision.signal.payload else None
-                    except Exception:
-                        spread = None
-                    entry_hint = None
-                    try:
-                        params = decision.params or {}
-                        for key in ("entry", "price", "close", "last_price"):
-                            if params.get(key):
-                                entry_hint = Decimal(str(params.get(key)))
-                                break
-                        if entry_hint is None and decision.signal and decision.signal.payload:
-                            payload = decision.signal.payload or {}
-                            for key in ("entry", "price", "close", "last_price"):
-                                if payload.get(key):
-                                    entry_hint = Decimal(str(payload.get(key)))
-                                    break
-                    except Exception:
-                        entry_hint = None
-                    if entry_hint is None:
-                        try:
-                            px = get_price(order.broker_account, order.symbol)
-                            if px is not None:
-                                entry_hint = Decimal(str(px))
-                        except Exception:
-                            entry_hint = None
-                    sl_distance_price = Decimal("0")
-                    try:
-                        if entry_hint is not None and order.sl is not None:
-                            sl_distance_price = abs(Decimal(str(order.sl)) - entry_hint)
-                    except Exception:
-                        sl_distance_price = Decimal("0")
-                    guard_inputs = GuardInputs(
-                        sl_distance=sl_distance_price,
-                        sl_unit="price",
-                        spread=Decimal(str(spread)) if spread is not None else None,
-                        spread_unit="price",
-                        point=point,
-                        min_stop_points=min_stop_pts,
-                    )
-                    guard = apply_order_guards(guard_inputs)
-                    if not guard.ok:
-                        log_journal_event(
-                            "order.dispatch_error",
-                            severity="warning",
-                            order=order,
-                            bot=order.bot,
-                            broker_account=order.broker_account,
-                            symbol=order.symbol,
-                            message="Order skipped by guard",
-                            context={
-                                "reason": guard.reason,
-                                "sl_distance_price": str(sl_distance_price),
-                                "spread_price": str(spread) if spread is not None else None,
-                                "min_stop_points": str(min_stop_pts) if min_stop_pts is not None else None,
-                                "point": str(point) if point is not None else None,
-                            },
-                        )
-                        continue
-                    try:
-                        _queue_or_dispatch_order(order)
-                        orders_placed.append((order.id, order.symbol, order.side))
-                    except Exception as e:
-                        dispatch_failures.append(
-                            {"order_id": order.id, "strategy": strategy_name, "error": str(e)}
-                        )
-                        log_journal_event(
-                            "order.dispatch_error",
-                            severity="error",
-                            order=order,
-                            bot=order.bot,
-                            broker_account=order.broker_account,
-                            symbol=order.symbol,
-                            message="Scalper dispatch failed",
-                            context={
-                                "bot_id": bot.id,
-                                "strategy": strategy_name,
-                                "error": str(e),
-                            },
-                        )
-                        logger.exception(
-                            "[ScalperTrade] bot=%s strategy=%s failed to dispatch order %s: %s",
-                            bot.id,
-                            strategy_name,
-                            order.id,
-                            e,
-                        )
-        except Exception as e:
-            dispatch_failures.append({"strategy": strategy_name, "error": str(e)})
-            logger.exception(
-                "[ScalperTrade] bot=%s strategy=%s fanout failed: %s",
-                bot.id,
-                strategy_name,
-                e,
-            )
-            continue
+        dispatch_result = _dispatch_scalper_candidate(decision, strategy_name)
+        orders_placed.extend(dispatch_result["orders"])
+        dispatch_failures.extend(dispatch_result["failures"])
     
     # Log summary with clearer outcome/context for UI
-    if orders_placed:
+    if defer_dispatch and candidates:
+        outcome = "candidate_pending_allocation"
+    elif orders_placed:
         outcome = "orders_sent"
     elif decisions_made:
         outcome = "decisions_made_no_orders"
@@ -2111,6 +2260,42 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         0,
         int((timezone.now() - cycle_started_at).total_seconds() * 1000),
     )
+    best_event = max(
+        strategy_events,
+        key=lambda event: float(event.get("score") or 0),
+        default=None,
+    )
+    best_candidate = max(
+        candidates,
+        key=lambda candidate: float(candidate.get("score") or 0),
+        default=None,
+    )
+    best_score = (
+        best_candidate.get("score")
+        if best_candidate is not None
+        else best_event.get("score") if best_event is not None else None
+    )
+    best_strategy = (
+        best_candidate.get("strategy")
+        if best_candidate is not None
+        else best_event.get("strategy") if best_event is not None else None
+    )
+    spread_points = (
+        spread_price / broker_point
+        if spread_price is not None and broker_point is not None and broker_point > 0
+        else None
+    )
+    spread_limit = Decimal(str(bot.max_spread_points or 0))
+    spread_status = "unavailable"
+    if spread_points is not None:
+        spread_status = (
+            "pass"
+            if spread_limit <= 0 or spread_points <= spread_limit
+            else "fail"
+        )
+    rejection_reason = None
+    if not candidates and best_event is not None:
+        rejection_reason = best_event.get("reason")
 
     log_journal_event(
         "scalper_engine_run",
@@ -2135,6 +2320,14 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
             "dispatch_failures": dispatch_failures,
             "cycle_duration_ms": cycle_duration_ms,
             "strategy_context": strategy_context,
+            "best_score": best_score,
+            "best_strategy": best_strategy,
+            "rejection_reason": rejection_reason,
+            "htf_status": "available" if htf_bias else "unavailable",
+            "spread_status": spread_status,
+            "spread_points": str(spread_points) if spread_points is not None else None,
+            "spread_limit_points": str(spread_limit),
+            "slot_status": "pending" if defer_dispatch and candidates else "not_applicable",
         },
     )
     
@@ -2160,9 +2353,19 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         "htf_bias": htf_bias,
         "htf_bias_detail": htf_bias_detail,
         "generated_at": timezone.now().isoformat(),
+        "strategies_evaluated": [event["strategy"] for event in strategy_events],
+        "best_score": best_score,
+        "best_strategy": best_strategy,
+        "rejection_reason": rejection_reason,
+        "htf_status": "available" if htf_bias else "unavailable",
+        "spread_status": spread_status,
+        "spread_points": str(spread_points) if spread_points is not None else None,
+        "spread_limit_points": str(spread_limit),
+        "slot_status": "pending" if defer_dispatch and candidates else "not_applicable",
     }
+    run_log = None
     try:
-        ScalperRunLog.objects.create(
+        run_log = ScalperRunLog.objects.create(
             bot=bot,
             timeframe=timeframe,
             session=session_label,
@@ -2170,6 +2373,10 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         )
     except Exception:
         logger.exception("[ScalperTrade] failed to persist run log bot=%s", bot.id)
+
+    if run_log is not None:
+        for candidate in candidates:
+            candidate["run_log_id"] = run_log.id
 
     if dispatch_failures:
         task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
@@ -2186,6 +2393,8 @@ def trade_scalper_strategies_for_bot(self, bot_id: int, timeframe: str = "1m", n
         "signals": len(signals_created),
         "decisions": len(decisions_made),
         "orders": len(orders_placed),
+        "candidates": candidates,
+        "run_log_id": run_log.id if run_log is not None else None,
     }
 
 

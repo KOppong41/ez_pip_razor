@@ -463,7 +463,7 @@ def personal_logs(request):
 @permission_classes([IsAuthenticated])
 def personal_backtesting(request):
     """Expose the last 24 hours of persisted strategy-run evidence."""
-    queryset = ScalperRunLog.objects.select_related("bot").filter(
+    queryset = ScalperRunLog.objects.select_related("bot", "bot__asset").filter(
         created_at__gte=timezone.now() - timedelta(hours=24)
     ).order_by("-created_at")
     if not request.user.is_superuser:
@@ -474,6 +474,7 @@ def personal_backtesting(request):
                 "id",
                 "bot_id",
                 "bot__name",
+                "bot__asset__symbol",
                 "timeframe",
                 "session",
                 "summary",

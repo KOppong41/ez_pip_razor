@@ -131,10 +131,20 @@ class FakeApiClient extends ApiClient {
           'id': 13985,
           'bot_id': 3,
           'bot__name': 'Gold London Scalper',
+          'bot__asset__symbol': 'XAUUSDm',
           'timeframe': '5m',
           'session': 'london',
           'created_at': '2026-08-26T12:30:00Z',
           'summary': {
+            'strategies_evaluated': ['trend_pullback', 'breakout_retest'],
+            'best_strategy': 'trend_pullback',
+            'best_score': 0.82,
+            'rejection_reason': 'account_slot_awarded_to_higher_ranked_setup',
+            'htf_status': 'available',
+            'spread_status': 'pass',
+            'slot_status': 'lost',
+            'slot_winner_bot_id': 2,
+            'outcome': 'account_slot_lost',
             'market': {
               'last_close': '2851.96',
               'tick': {'bid': 2851.95, 'ask': 2851.96},
@@ -544,10 +554,12 @@ void main() {
       find.text('Breakout Retest / Breakout Retest No Break'),
       findsOneWidget,
     );
-    expect(find.text('LAST CLOSE'), findsOneWidget);
-    expect(find.text('ACTIONABLE'), findsOneWidget);
-    expect(find.text('SKIPPED'), findsOneWidget);
+    expect(find.text('LAST SCAN'), findsOneWidget);
     expect(find.text('STRATEGIES'), findsOneWidget);
+    expect(find.text('BEST SETUP'), findsOneWidget);
+    expect(find.text('HTF / SPREAD'), findsOneWidget);
+    expect(find.text('ACCOUNT SLOT'), findsOneWidget);
+    expect(find.text('Lost to bot 2'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

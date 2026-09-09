@@ -5190,13 +5190,14 @@ class _BacktestRunTable extends StatelessWidget {
         dataRowMaxHeight: 72,
         columns: const [
           DataColumn(label: Text('BOT / SYMBOL')),
-          DataColumn(label: Text('TIME')),
+          DataColumn(label: Text('LAST SCAN')),
           DataColumn(label: Text('TF / SESSION')),
-          DataColumn(label: Text('LAST CLOSE')),
-          DataColumn(label: Text('ACTIONABLE')),
-          DataColumn(label: Text('SKIPPED')),
-          DataColumn(label: Text('OUTCOME')),
           DataColumn(label: Text('STRATEGIES')),
+          DataColumn(label: Text('BEST SETUP')),
+          DataColumn(label: Text('HTF / SPREAD')),
+          DataColumn(label: Text('ACCOUNT SLOT')),
+          DataColumn(label: Text('REJECTION')),
+          DataColumn(label: Text('OUTCOME')),
         ],
         rows: [for (final run in runs) _row(run)],
       ),
@@ -5205,38 +5206,58 @@ class _BacktestRunTable extends StatelessWidget {
 
   DataRow _row(Map<String, dynamic> run) {
     final summary = mapOf(run['summary']);
-    final market = mapOf(summary['market']);
     final strategies = listOfMaps(summary['strategies']);
-    final skipped = strategies.where((item) => item['action'] == 'skip').length;
-    final actionable = strategies.length - skipped;
     final outcome = '${summary['outcome'] ?? 'unknown'}';
     final outcomeColor = outcome == 'orders_sent' ? green : muted;
-    final strategyText = strategies
-        .map((item) => label('${item['strategy'] ?? 'unknown'}'))
+    final rawEvaluated = summary['strategies_evaluated'];
+    final evaluated = rawEvaluated is List ? rawEvaluated : const <dynamic>[];
+    final strategyItems = evaluated.isNotEmpty ? evaluated : strategies;
+    final strategyText = strategyItems
+        .map(
+          (item) =>
+              label('${item is Map ? item['strategy'] ?? 'unknown' : item}'),
+        )
         .join(', ');
+    final bestStrategy = summary['best_strategy'];
+    final bestScore = summary['best_score'];
+    final bestSetup = bestStrategy == null
+        ? '—'
+        : '${label('$bestStrategy')} / ${compactNumber(bestScore)}';
+    final htfStatus = label('${summary['htf_status'] ?? 'not_evaluated'}');
+    final spreadStatus = label(
+      '${summary['spread_status'] ?? 'not_evaluated'}',
+    );
+    final slotStatus = '${summary['slot_status'] ?? 'not_considered'}';
+    final slotWinnerBotId = summary['slot_winner_bot_id'];
+    final slotText = slotStatus == 'lost' && slotWinnerBotId != null
+        ? 'Lost to bot $slotWinnerBotId'
+        : label(slotStatus);
+    final rejection = summary['rejection_reason'];
+    final symbol = run['bot__asset__symbol'];
     return DataRow(
       cells: [
         DataCell(
           SizedBox(
             width: 150,
-            child: Text(
-              '${run['bot__name'] ?? 'Bot ${run['bot_id'] ?? '—'}'}',
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w700),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${run['bot__name'] ?? 'Bot ${run['bot_id'] ?? '—'}'}',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                Text(
+                  '${symbol ?? '—'}',
+                  style: const TextStyle(color: muted, fontSize: 10),
+                ),
+              ],
             ),
           ),
         ),
         DataCell(Text(formatDateTime(run['created_at']))),
         DataCell(Text('${run['timeframe'] ?? '—'} / ${run['session'] ?? '—'}')),
-        DataCell(Text(compactNumber(market['last_close']))),
-        DataCell(Text('$actionable', style: const TextStyle(color: green))),
-        DataCell(Text('$skipped', style: const TextStyle(color: muted))),
-        DataCell(
-          Text(
-            label(outcome),
-            style: TextStyle(color: outcomeColor, fontWeight: FontWeight.w700),
-          ),
-        ),
         DataCell(
           SizedBox(
             width: 230,
@@ -5245,6 +5266,25 @@ class _BacktestRunTable extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: muted),
             ),
+          ),
+        ),
+        DataCell(Text(bestSetup)),
+        DataCell(Text('$htfStatus / $spreadStatus')),
+        DataCell(Text(slotText)),
+        DataCell(
+          SizedBox(
+            width: 230,
+            child: Text(
+              rejection == null ? '—' : label('$rejection'),
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: muted),
+            ),
+          ),
+        ),
+        DataCell(
+          Text(
+            label(outcome),
+            style: TextStyle(color: outcomeColor, fontWeight: FontWeight.w700),
           ),
         ),
       ],
