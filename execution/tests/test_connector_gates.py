@@ -1,8 +1,9 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
-from execution.services.brokers import _resolve_connector
+from execution.services.brokers import _resolve_connector, validate_order_conditions
 
 
 class ConnectorGateTests(SimpleTestCase):
@@ -13,3 +14,15 @@ class ConnectorGateTests(SimpleTestCase):
         connector, key = _resolve_connector(order)
         self.assertIsNone(connector)
         self.assertEqual(key, "ctrader_api")
+
+    @patch("execution.services.brokers.is_liquid_session", return_value=False)
+    def test_tp1_exit_bypasses_entry_session_and_protection_gates(self, _session):
+        order = SimpleNamespace(
+            intent="exit",
+            client_order_id="close:tp1|abc",
+            broker_account=SimpleNamespace(broker="mt5"),
+            sl=None,
+            tp=None,
+        )
+
+        self.assertEqual(validate_order_conditions(order), (True, "ok"))

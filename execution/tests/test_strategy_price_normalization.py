@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.test import SimpleTestCase
 
+from execution.services.strategies.doji_breakout import run_doji_breakout
 from execution.services.strategies.price_action_pinbar import PinBarConfig, run_price_action_pinbar
 from execution.services.strategies.trend_pullback import _atr
 
@@ -36,6 +37,38 @@ def _scaled_pinbar_candles(scale: Decimal):
     return rows
 
 
+def _scaled_doji_breakout_candles(scale: Decimal):
+    rows = []
+    for index in range(82):
+        close = scale * (Decimal("1") + Decimal(index) * Decimal("0.0001"))
+        rows.append(
+            {
+                "open": close - scale * Decimal("0.00005"),
+                "high": close + scale * Decimal("0.0005"),
+                "low": close - scale * Decimal("0.0005"),
+                "close": close,
+            }
+        )
+
+    doji_close = scale * Decimal("1.0083")
+    shared_low = doji_close - scale * Decimal("0.0012")
+    wick_candle = {
+        "open": doji_close - scale * Decimal("0.00005"),
+        "high": doji_close + scale * Decimal("0.0001"),
+        "low": shared_low,
+        "close": doji_close,
+    }
+    rows[-5] = dict(wick_candle)
+    rows[-2] = dict(wick_candle)
+    rows[-1] = {
+        "open": doji_close + scale * Decimal("0.00025"),
+        "high": doji_close + scale * Decimal("0.0005"),
+        "low": doji_close,
+        "close": doji_close + scale * Decimal("0.0004"),
+    }
+    return rows
+
+
 class StrategyPriceNormalizationTests(SimpleTestCase):
     def test_atr_percentage_is_invariant_across_price_scales(self):
         low = _scaled_pinbar_candles(Decimal("1.1"))
@@ -56,3 +89,13 @@ class StrategyPriceNormalizationTests(SimpleTestCase):
         self.assertEqual({decision.action for decision in decisions}, {"open"})
         self.assertEqual({decision.direction for decision in decisions}, {"buy"})
         self.assertLess(max(d.score for d in decisions) - min(d.score for d in decisions), 1e-12)
+
+    def test_doji_breakout_is_invariant_across_price_scales(self):
+        decisions = [
+            run_doji_breakout("TEST", _scaled_doji_breakout_candles(scale))
+            for scale in (Decimal("1.1"), Decimal("2300"), Decimal("60000"))
+        ]
+
+        self.assertEqual({decision.action for decision in decisions}, {"open"})
+        self.assertEqual({decision.direction for decision in decisions}, {"buy"})
+        self.assertEqual(len({decision.reason for decision in decisions}), 1)

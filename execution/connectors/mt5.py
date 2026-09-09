@@ -157,6 +157,38 @@ def execution_quality_metadata(
     }
 
 
+def _adjust_stops_to_broker_minimum(
+    *,
+    side: str,
+    entry_price,
+    sl,
+    tp,
+    point,
+    stops_level_points,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Validate SL and TP independently from entry using live MT5 constraints."""
+    entry = Decimal(str(entry_price))
+    point_value = Decimal(str(point or 0))
+    stop_points = Decimal(str(stops_level_points or 0))
+    adjusted_sl = Decimal(str(sl)) if sl is not None else None
+    adjusted_tp = Decimal(str(tp)) if tp is not None else None
+    minimum = point_value * stop_points
+    if entry <= 0 or minimum <= 0:
+        return adjusted_sl, adjusted_tp
+
+    if side == "buy":
+        if adjusted_sl is not None and entry - adjusted_sl < minimum:
+            adjusted_sl = entry - minimum
+        if adjusted_tp is not None and adjusted_tp - entry < minimum:
+            adjusted_tp = entry + minimum
+    else:
+        if adjusted_sl is not None and adjusted_sl - entry < minimum:
+            adjusted_sl = entry + minimum
+        if adjusted_tp is not None and entry - adjusted_tp < minimum:
+            adjusted_tp = entry - minimum
+    return adjusted_sl, adjusted_tp
+
+
 def _coerce_ticket(value):
     if value in (None, "", 0):
         return None
@@ -1647,40 +1679,25 @@ class MT5Connector(BaseConnector):
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)
 
-        # Best-effort: adjust SL/TP to respect broker stop level to reduce MT5 10016 errors.
-        try:
-            sinfo = mt5.symbol_info(order.symbol)
-            point = Decimal(str(getattr(sinfo, "point", 0) or 0))
-            stops_level = Decimal(
-                str(
-                    getattr(sinfo, "trade_stops_level", None)
-                    or getattr(sinfo, "stops_level", 0)
-                    or 0
-                )
-            )
-            min_stop = point * stops_level
-            if min_stop > 0:
-                if order.side == "buy":
-                    if "sl" in req and req["sl"] > 0:
-                        sl_gap = Decimal(str(ask)) - Decimal(str(req["sl"]))
-                        if sl_gap < min_stop:
-                            req["sl"] = float(ask - min_stop)
-                    if "tp" in req and req["tp"] > 0:
-                        tp_gap = Decimal(str(req["tp"])) - Decimal(str(bid))
-                        if tp_gap < min_stop:
-                            req["tp"] = float(bid + min_stop)
-                else:
-                    if "sl" in req and req["sl"] > 0:
-                        sl_gap = Decimal(str(req["sl"])) - Decimal(str(bid))
-                        if sl_gap < min_stop:
-                            req["sl"] = float(bid + min_stop)
-                    if "tp" in req and req["tp"] > 0:
-                        tp_gap = Decimal(str(ask)) - Decimal(str(req["tp"]))
-                        if tp_gap < min_stop:
-                            req["tp"] = float(ask - min_stop)
-        except Exception:
-            # If we cannot read/adjust stops, let MT5 enforce.
-            pass
+        # MT5 exposes the stop distance in broker points. Validate each
+        # protection leg from the actual market entry side, independently.
+        entry_price = ask if order.side == "buy" else bid
+        adjusted_sl, adjusted_tp = _adjust_stops_to_broker_minimum(
+            side=order.side,
+            entry_price=entry_price,
+            sl=req.get("sl"),
+            tp=req.get("tp"),
+            point=getattr(sinfo, "point", 0),
+            stops_level_points=(
+                getattr(sinfo, "trade_stops_level", None)
+                if getattr(sinfo, "trade_stops_level", None) is not None
+                else getattr(sinfo, "stops_level", 0)
+            ),
+        )
+        if adjusted_sl is not None:
+            req["sl"] = float(adjusted_sl)
+        if adjusted_tp is not None:
+            req["tp"] = float(adjusted_tp)
 
         # Broker validation before submission. A rejected check is definitive
         # and safe to store without sending an order.

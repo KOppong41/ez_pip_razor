@@ -197,11 +197,10 @@ def validate_order_conditions(order: Order) -> tuple:
     - Verify spread is acceptable
     Returns (valid, reason)
     """
-    # Detect close orders by client_order_id prefix (make_close_order_id uses 'close|...')
-    is_close_order = str(getattr(order, "client_order_id", "")).startswith("close|")
+    is_close_order = getattr(order, "intent", "") == "exit"
 
     # Session check (skip for paper trading)
-    if order.broker_account.broker != "paper":
+    if order.broker_account.broker != "paper" and not is_close_order:
         if not is_liquid_session():
             return False, "outside_liquid_session"
 

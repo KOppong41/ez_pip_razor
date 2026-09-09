@@ -9,7 +9,11 @@ from django.utils import timezone
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.connectors.base import ConnectorError
-from execution.connectors.mt5 import MT5Connector, _MT5Proxy
+from execution.connectors.mt5 import (
+    MT5Connector,
+    _MT5Proxy,
+    _adjust_stops_to_broker_minimum,
+)
 from execution.models import BrokerPosition, Decision, Execution, ExecutionAttempt, Signal
 from execution.services.live_risk import PreTradeRiskResult, RiskRejected
 from execution.services.orchestrator import create_order_from_decision
@@ -99,6 +103,49 @@ class MT5ConnectorTest(TestCase):
         api.order_check.return_value = SimpleNamespace(retcode=0, comment="ok")
         api.history_deals_get.return_value = ()
         api.last_error.return_value = (0, "ok")
+
+    def test_broker_stop_distance_is_checked_per_leg_from_entry(self):
+        sl, tp = _adjust_stops_to_broker_minimum(
+            side="buy",
+            entry_price=Decimal("1.1002"),
+            sl=Decimal("1.1000"),
+            tp=Decimal("1.1020"),
+            point=Decimal("0.0001"),
+            stops_level_points=Decimal("5"),
+        )
+
+        self.assertEqual(sl, Decimal("1.0997"))
+        self.assertEqual(tp, Decimal("1.1020"))
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_exit_reconciliation_ignores_opening_deal_for_same_position(self, api):
+        self.order.intent = "exit"
+        self.order.broker_position_ticket = 333
+        self.order.submitted_at = timezone.now()
+        self.order.save(
+            update_fields=["intent", "broker_position_ticket", "submitted_at"]
+        )
+        opening = SimpleNamespace(
+            ticket=100,
+            order=101,
+            position_id=333,
+            entry=0,
+            comment="",
+        )
+        closing = SimpleNamespace(
+            ticket=200,
+            order=201,
+            position_id=333,
+            entry=1,
+            comment="",
+        )
+        api.history_deals_get.return_value = (opening, closing)
+        api.orders_get.return_value = ()
+        api.positions_get.return_value = ()
+
+        deals, _, _ = MT5Connector()._matching_broker_records(self.order)
+
+        self.assertEqual(deals, [closing])
 
     @patch("execution.connectors.mt5.mt5")
     def test_filling_mode_decodes_symbol_permission_bitmask(self, api):
@@ -385,6 +432,7 @@ class MT5ConnectorTest(TestCase):
                 ticket=556,
                 order=555,
                 position_id=444,
+                entry=1,
                 volume=0.10,
                 price=1.1000,
                 profit=12.5,

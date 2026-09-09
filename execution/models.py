@@ -137,6 +137,20 @@ class EconomicCalendarEvent(models.Model):
             models.Index(fields=["currency", "starts_at"]),
         ]
 
+
+class EconomicCalendarRefreshState(models.Model):
+    """Durable provider health used to prevent stale calendar fail-open."""
+
+    provider = models.CharField(max_length=32, unique=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_error = models.TextField(blank=True, default="")
+    event_count = models.PositiveIntegerField(default=0)
+
+    def __str__(self) -> str:
+        return f"{self.provider} calendar refresh"
+
+
 class Order(models.Model):
     INTENT = [
         ("entry", "entry"),

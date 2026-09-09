@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta, timezone as dt_timezone
+import logging
 from urllib.parse import quote
 
 import requests
@@ -10,10 +11,11 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from execution.models import EconomicCalendarEvent
+from execution.models import EconomicCalendarEvent, EconomicCalendarRefreshState
 
 
 PROVIDER = "tradingeconomics"
+logger = logging.getLogger(__name__)
 CURRENCY_COUNTRIES = {
     "USD": "united states",
     "EUR": "euro area",
@@ -44,29 +46,47 @@ def refresh_economic_calendar(*, now=None, session=requests) -> int:
     """Fetch and persist the configured high-impact Trading Economics window."""
     if not getattr(settings, "ECONOMIC_CALENDAR_ENABLED", False):
         return 0
+    current = now or timezone.now()
+    EconomicCalendarRefreshState.objects.update_or_create(
+        provider=PROVIDER,
+        defaults={"last_attempt_at": current},
+    )
     api_key = str(getattr(settings, "TRADING_ECONOMICS_API_KEY", "") or "").strip()
     if not api_key:
+        EconomicCalendarRefreshState.objects.filter(provider=PROVIDER).update(
+            last_error="TRADING_ECONOMICS_API_KEY is required when the calendar is enabled",
+        )
         raise RuntimeError("TRADING_ECONOMICS_API_KEY is required when the calendar is enabled")
 
-    current = now or timezone.now()
     countries = list(getattr(settings, "ECONOMIC_CALENDAR_COUNTRIES", CURRENCY_COUNTRIES.values()))
     country_path = quote(",".join(countries), safe=",")
     start = (current - timedelta(days=1)).date().isoformat()
     end = (current + timedelta(days=2)).date().isoformat()
     url = f"https://api.tradingeconomics.com/calendar/country/{country_path}/{start}/{end}"
-    response = session.get(
-        url,
-        params={
-            "c": api_key,
-            "importance": int(getattr(settings, "ECONOMIC_CALENDAR_MIN_IMPORTANCE", 3)),
-            "f": "json",
-        },
-        timeout=int(getattr(settings, "ECONOMIC_CALENDAR_TIMEOUT_SECONDS", 10)),
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, list):
-        raise ValueError("Economic calendar provider returned a non-list payload")
+    try:
+        response = session.get(
+            url,
+            params={
+                "c": api_key,
+                "importance": int(
+                    getattr(settings, "ECONOMIC_CALENDAR_MIN_IMPORTANCE", 3)
+                ),
+                "f": "json",
+            },
+            timeout=int(
+                getattr(settings, "ECONOMIC_CALENDAR_TIMEOUT_SECONDS", 10)
+            ),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError("Economic calendar provider returned a non-list payload")
+    except Exception as exc:
+        EconomicCalendarRefreshState.objects.filter(provider=PROVIDER).update(
+            last_attempt_at=current,
+            last_error=str(exc)[:2000],
+        )
+        raise
 
     imported = 0
     with transaction.atomic():
@@ -97,6 +117,14 @@ def refresh_economic_calendar(*, now=None, session=requests) -> int:
             provider=PROVIDER,
             starts_at__lt=current - timedelta(days=7),
         ).delete()
+        EconomicCalendarRefreshState.objects.select_for_update().filter(
+            provider=PROVIDER
+        ).update(
+            last_attempt_at=current,
+            last_success_at=current,
+            last_error="",
+            event_count=imported,
+        )
     return imported
 
 
@@ -108,6 +136,26 @@ def is_economic_news_blackout(symbol: str, *, at=None) -> bool:
         return False
     countries = {CURRENCY_COUNTRIES[code] for code in currencies}
     current = at or timezone.now()
+    max_stale = timedelta(
+        minutes=max(
+            1,
+            int(getattr(settings, "ECONOMIC_CALENDAR_MAX_STALE_MINUTES", 30)),
+        )
+    )
+    refresh_state = EconomicCalendarRefreshState.objects.filter(
+        provider=PROVIDER
+    ).first()
+    if (
+        refresh_state is None
+        or refresh_state.last_success_at is None
+        or refresh_state.last_success_at < current - max_stale
+    ):
+        logger.warning(
+            "Economic calendar is stale; blocking entries for %s (last_success=%s)",
+            symbol,
+            refresh_state.last_success_at if refresh_state else None,
+        )
+        return True
     before = timedelta(minutes=int(getattr(settings, "ECONOMIC_NEWS_BLACKOUT_BEFORE_MINUTES", 30)))
     after = timedelta(minutes=int(getattr(settings, "ECONOMIC_NEWS_BLACKOUT_AFTER_MINUTES", 30)))
     minimum = int(getattr(settings, "ECONOMIC_CALENDAR_MIN_IMPORTANCE", 3))

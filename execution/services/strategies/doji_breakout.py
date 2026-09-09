@@ -14,10 +14,12 @@ PinType = Literal["bullish", "bearish"]
 class DojiBreakoutConfig:
     ema_period: int = 20
     lookback_for_levels: int = 80
-    wick_level_tolerance: Decimal = Decimal("0.0005")
-    breakout_buffer: Decimal = Decimal("0.0001")
+    atr_period: int = 12
+    min_atr_pct: Decimal = Decimal("0.00005")
+    wick_level_tolerance_atr: Decimal = Decimal("0.5")
+    breakout_buffer_atr: Decimal = Decimal("0.1")
+    min_range_atr: Decimal = Decimal("0.05")
     rr: Decimal = Decimal("1.8")
-    min_range: Decimal = Decimal("0.00001")
     body_ratio_max: Decimal = Decimal("0.2")  # doji body <= 20% of range
     wick_dom_ratio: Decimal = Decimal("0.4")  # short wick must be <= 40% of long wick
 
@@ -35,10 +37,24 @@ def _ema(values: List[Decimal], period: int) -> List[Decimal]:
     return ema_vals
 
 
-def _is_doji(c: Candle, cfg: DojiBreakoutConfig) -> Optional[PinType]:
+def _atr(candles: List[Candle], period: int) -> Decimal:
+    if period <= 0 or len(candles) < period:
+        return Decimal("0")
+    return sum(
+        (candle["high"] - candle["low"] for candle in candles[-period:]),
+        Decimal("0"),
+    ) / Decimal(period)
+
+
+def _is_doji(
+    c: Candle,
+    cfg: DojiBreakoutConfig,
+    *,
+    min_range: Decimal,
+) -> Optional[PinType]:
     high, low, o, cl = c["high"], c["low"], c["open"], c["close"]
     rng = high - low
-    if rng <= cfg.min_range:
+    if rng <= min_range:
         return None
 
     body = abs(cl - o)
@@ -61,13 +77,19 @@ def _is_doji(c: Candle, cfg: DojiBreakoutConfig) -> Optional[PinType]:
     return None
 
 
-def _collect_wick_levels(candles: List[Candle], cfg: DojiBreakoutConfig) -> List[Decimal]:
+def _collect_wick_levels(
+    candles: List[Candle],
+    cfg: DojiBreakoutConfig,
+    *,
+    min_range: Decimal,
+    tolerance: Decimal,
+) -> List[Decimal]:
     raw: List[Decimal] = []
     window = candles[-cfg.lookback_for_levels :] if candles else []
     for c in window:
         high, low, o, cl = c["high"], c["low"], c["open"], c["close"]
         rng = high - low
-        if rng <= cfg.min_range:
+        if rng <= min_range:
             continue
         upper_wick = high - max(o, cl)
         lower_wick = min(o, cl) - low
@@ -78,16 +100,22 @@ def _collect_wick_levels(candles: List[Candle], cfg: DojiBreakoutConfig) -> List
 
     clustered: List[Decimal] = []
     for lvl in raw:
-        if not clustered or all(abs(lvl - x) > cfg.wick_level_tolerance for x in clustered):
+        if not clustered or all(abs(lvl - x) > tolerance for x in clustered):
             clustered.append(lvl)
     return clustered
 
 
-def _has_level(pin: PinType, doji: Candle, levels: List[Decimal], cfg: DojiBreakoutConfig) -> bool:
+def _has_level(
+    pin: PinType,
+    doji: Candle,
+    levels: List[Decimal],
+    *,
+    tolerance: Decimal,
+) -> bool:
     if not levels:
         return False
     wick_price = doji["low"] if pin == "bullish" else doji["high"]
-    return any(abs(wick_price - lvl) <= cfg.wick_level_tolerance for lvl in levels)
+    return any(abs(wick_price - lvl) <= tolerance for lvl in levels)
 
 
 def _trend_ok(pin: PinType, ema: List[Decimal], idx: int, close: Decimal) -> bool:
@@ -113,23 +141,42 @@ def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBrea
 
     doji = candles[-2]
     last = candles[-1]
+    atr_price = _atr(candles[:-1], cfg.atr_period)
+    reference_price = abs(doji["close"])
+    atr_pct = atr_price / reference_price if reference_price else Decimal("0")
+    if atr_price <= 0 or atr_pct < cfg.min_atr_pct:
+        return EngineDecision(
+            action="skip",
+            reason="doji_breakout_low_atr",
+            strategy="doji_breakout",
+            metadata={
+                "atr_pct": float(atr_pct),
+                "min_atr_pct": float(cfg.min_atr_pct),
+            },
+        )
+    min_range = atr_price * cfg.min_range_atr
+    level_tolerance = atr_price * cfg.wick_level_tolerance_atr
+    buffer = atr_price * cfg.breakout_buffer_atr
     closes = [c["close"] for c in candles]
     ema = _ema(closes, cfg.ema_period)
-    doji_type = _is_doji(doji, cfg)
+    doji_type = _is_doji(doji, cfg, min_range=min_range)
     if doji_type is None:
         return EngineDecision(action="skip", reason="no_doji", strategy="doji_breakout")
 
     if not _trend_ok(doji_type, ema, len(candles) - 2, doji["close"]):
         return EngineDecision(action="skip", reason="trend_filter_fail", strategy="doji_breakout")
 
-    levels = _collect_wick_levels(candles[:-2], cfg)
-    if not _has_level(doji_type, doji, levels, cfg):
+    levels = _collect_wick_levels(
+        candles[:-2],
+        cfg,
+        min_range=min_range,
+        tolerance=level_tolerance,
+    )
+    if not _has_level(doji_type, doji, levels, tolerance=level_tolerance):
         return EngineDecision(action="skip", reason="no_sr_confluence", strategy="doji_breakout")
 
     doji_high = doji["high"]
     doji_low = doji["low"]
-    buffer = cfg.breakout_buffer
-
     if doji_type == "bullish":
         if last["close"] <= doji_high + buffer:
             return EngineDecision(action="skip", reason="no_breakout", strategy="doji_breakout")
@@ -153,4 +200,9 @@ def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBrea
         reason="doji_breakout_sr_confluence",
         strategy="doji_breakout",
         score=0.6,
+        metadata={
+            "atr_pct": float(atr_pct),
+            "level_tolerance_atr": float(cfg.wick_level_tolerance_atr),
+            "breakout_buffer_atr": float(cfg.breakout_buffer_atr),
+        },
     )

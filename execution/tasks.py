@@ -442,6 +442,42 @@ def monitor_positions_task(self):
         raise
 
 
+def _tp1_order_completed(order: Order) -> bool:
+    """Treat TP1 as complete only after its requested volume was executed."""
+    executed = order.executions.aggregate(total=Sum("qty"))["total"] or Decimal("0")
+    return (
+        order.status == "filled"
+        and Decimal(str(order.remaining_qty or 0)) == 0
+        and executed >= Decimal(str(order.qty))
+    )
+
+
+def _reconcile_tp1_orders(connector: MT5Connector, orders) -> bool:
+    """Reconcile submitted TP1 orders and report authoritative completion."""
+    for order in orders:
+        if _tp1_order_completed(order):
+            return True
+        has_submission = bool(
+            order.submitted_at
+            or order.broker_order_ticket
+            or order.broker_deal_ticket
+            or order.attempts.filter(
+                status__in=["submitting", "ambiguous", "accepted", "partial"]
+            ).exists()
+        )
+        if has_submission and order.status in {
+            "new",
+            "ack",
+            "part_filled",
+            "filled",
+        }:
+            connector.reconcile_order(order)
+            order.refresh_from_db()
+            if _tp1_order_completed(order):
+                return True
+    return False
+
+
 @shared_task(
     bind=True,
     autoretry_for=(Exception,),
@@ -479,11 +515,8 @@ def trail_positions_task(self):
                 broker_position_ticket=pos.broker_position_ticket,
                 intent="exit",
                 client_order_id__startswith="close:tp1|",
-            )
-            # One deterministic TP1 attempt prevents duplicate partial closes.
-            # A definitive rejection resumes trailing protection rather than
-            # trapping the position in an endless partial-close retry loop.
-            tp1_completed = tp1_orders.exists()
+            ).order_by("id")
+            tp1_completed = _reconcile_tp1_orders(connector, list(tp1_orders))
             scalper_plan = plan_scalper_position(
                 pos,
                 market,
@@ -513,7 +546,17 @@ def trail_positions_task(self):
                         close_qty=requested,
                         stage="tp1",
                     )
-                    if created:
+                    should_dispatch = created or (
+                        order.status in {"new", "part_filled"}
+                        and not order.attempts.filter(
+                            status__in=["submitting", "ambiguous"]
+                        ).exists()
+                        and (
+                            order.status == "part_filled"
+                            or order.execution_queued_at is None
+                        )
+                    )
+                    if should_dispatch:
                         _queue_or_dispatch_order(order, emergency=True)
                         closed_ids.append(pos.id)
                 elif scalper_plan.new_sl is not None:

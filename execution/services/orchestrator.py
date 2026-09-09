@@ -144,11 +144,13 @@ def _close_order_can_retry(order: Order) -> bool:
         return False
     if Decimal(str(order.filled_qty or 0)) > 0 or order.executions.exists():
         return False
-    # An ambiguous or accepted submission keeps its deterministic identity
-    # until reconciliation proves the broker outcome.
-    return not order.attempts.filter(
-        status__in={"submitting", "ambiguous", "accepted", "partial", "reconciled"}
-    ).exists()
+    # A broker-confirmed cancellation is safe to retry even when the original
+    # submission was accepted. Other accepted or ambiguous sends retain their
+    # deterministic identity until reconciliation proves the outcome.
+    unsafe_attempts = {"submitting", "ambiguous", "partial", "reconciled"}
+    if order.status != "canceled":
+        unsafe_attempts.add("accepted")
+    return not order.attempts.filter(status__in=unsafe_attempts).exists()
 
 
 def _retry_close_order_id(base_client_id: str, existing_ids: set[str]) -> str:
@@ -266,8 +268,10 @@ def create_close_order_for_position(
             .order_by("id")
         )
         if not close_orders:
-            order = Order.objects.create(client_order_id=client_id, **defaults)
-            created = True
+            order, created = Order.objects.get_or_create(
+                client_order_id=client_id,
+                defaults=defaults,
+            )
         else:
             order = close_orders[-1]
             created = False
