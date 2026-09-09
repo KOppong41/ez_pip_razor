@@ -78,6 +78,10 @@ class BotSerializer(serializers.ModelSerializer):
             "loss_streak_autopause_enabled",
             "max_loss_streak_before_pause",
             "loss_streak_cooldown_min",
+            "soft_drawdown_limit_pct",
+            "soft_size_multiplier",
+            "hard_drawdown_limit_pct",
+            "hard_size_multiplier",
             "created_at",
         )
         read_only_fields = ("id", "bot_id", "status", "created_at")
@@ -164,11 +168,25 @@ class BotSerializer(serializers.ModelSerializer):
         bot_lot = effective_value("max_bot_lot_size")
         bot_positions = effective_value("risk_max_concurrent_positions")
         risk_pct = effective_value("risk_per_trade_pct")
+        soft_drawdown = effective_value("soft_drawdown_limit_pct")
+        hard_drawdown = effective_value("hard_drawdown_limit_pct")
+        soft_multiplier = effective_value("soft_size_multiplier")
+        hard_multiplier = effective_value("hard_size_multiplier")
         errors = {}
         if sizing_mode == "risk" and (risk_pct is None or risk_pct <= 0):
             errors["risk_per_trade_pct"] = "Risk per trade must be greater than 0 in risk-based mode."
         if sizing_mode == "fixed" and default_qty is not None and bot_lot is not None and default_qty > bot_lot:
             errors["default_qty"] = "Default lot size cannot exceed Maximum bot lot size."
+        if soft_drawdown < 0 or hard_drawdown < 0:
+            errors["soft_drawdown_limit_pct"] = "Drawdown limits cannot be negative."
+        elif soft_drawdown > 0 and hard_drawdown > 0 and hard_drawdown < soft_drawdown:
+            errors["hard_drawdown_limit_pct"] = "Hard drawdown must be greater than or equal to soft drawdown."
+        if not (0 < soft_multiplier <= 1):
+            errors["soft_size_multiplier"] = "Soft size multiplier must be greater than 0 and no greater than 1."
+        if not (0 < hard_multiplier <= 1):
+            errors["hard_size_multiplier"] = "Hard size multiplier must be greater than 0 and no greater than 1."
+        elif hard_multiplier > soft_multiplier:
+            errors["hard_size_multiplier"] = "Hard size multiplier cannot exceed the soft size multiplier."
         if account:
             try:
                 policy = account.risk_policy

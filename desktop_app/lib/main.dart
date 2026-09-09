@@ -2892,6 +2892,20 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   late final TextEditingController interval;
   late final TextEditingController maxSpread;
   late final TextEditingController allowedDeviation;
+  late final TextEditingController defaultTpPips;
+  late final TextEditingController defaultSlPips;
+  late final TextEditingController allocationAmount;
+  late final TextEditingController allocationProfitPct;
+  late final TextEditingController allocationLossPct;
+  late final TextEditingController tradingWindowStart;
+  late final TextEditingController tradingWindowEnd;
+  late final TextEditingController killSwitchMaxUnrealizedPct;
+  late final TextEditingController maxLossStreak;
+  late final TextEditingController lossStreakCooldown;
+  late final TextEditingController softDrawdownLimitPct;
+  late final TextEditingController softSizeMultiplier;
+  late final TextEditingController hardDrawdownLimitPct;
+  late final TextEditingController hardSizeMultiplier;
   final editorScroll = ScrollController();
   int? assetId;
   int? accountId;
@@ -2902,7 +2916,28 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   bool autoTrade = true;
   bool allowLiveExecution = false;
   bool closePositionsOnEmergencyStop = false;
+  bool tradingScheduleEnabled = true;
+  bool allowOppositeScalp = false;
+  bool killSwitchEnabled = true;
+  bool lossStreakAutopauseEnabled = false;
   final selectedStrategies = <String>{};
+  final selectedTimeframes = <String>{};
+  final selectedTradingDays = <String>{};
+
+  static const tradingDays = <String, String>{
+    'mon': 'Mon',
+    'tue': 'Tue',
+    'wed': 'Wed',
+    'thu': 'Thu',
+    'fri': 'Fri',
+    'sat': 'Sat',
+    'sun': 'Sun',
+  };
+
+  static String _shortTime(String value) {
+    final match = RegExp(r'^(\d{2}):(\d{2})').firstMatch(value);
+    return match == null ? value : '${match.group(1)}:${match.group(2)}';
+  }
 
   List<Map<String, dynamic>> get assets => listOfMaps(widget.options['assets']);
   List<Map<String, dynamic>> get accounts =>
@@ -2936,10 +2971,24 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     allowLiveExecution = bot?['allow_live_account_execution'] == true;
     closePositionsOnEmergencyStop =
         bot?['close_positions_on_emergency_stop'] == true;
+    tradingScheduleEnabled = bot?['trading_schedule_enabled'] != false;
+    allowOppositeScalp = bot?['allow_opposite_scalp'] == true;
+    killSwitchEnabled = bot?['kill_switch_enabled'] != false;
+    lossStreakAutopauseEnabled = bot?['loss_streak_autopause_enabled'] == true;
     selectedStrategies.addAll(
       bot?['enabled_strategies'] is List
           ? List<dynamic>.from(bot!['enabled_strategies']).map((v) => '$v')
           : const ['harami'],
+    );
+    selectedTimeframes.addAll(
+      bot?['allowed_timeframes'] is List
+          ? List<dynamic>.from(bot!['allowed_timeframes']).map((v) => '$v')
+          : const <String>[],
+    );
+    selectedTradingDays.addAll(
+      bot?['allowed_trading_days'] is List
+          ? List<dynamic>.from(bot!['allowed_trading_days']).map((v) => '$v')
+          : const ['mon', 'tue', 'wed', 'thu', 'fri'],
     );
     name = TextEditingController(text: '${bot?['name'] ?? ''}');
     qty = TextEditingController(
@@ -2969,6 +3018,48 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     );
     allowedDeviation = TextEditingController(
       text: '${bot?['allowed_deviation_points'] ?? '8'}',
+    );
+    defaultTpPips = TextEditingController(
+      text: '${bot?['default_tp_pips'] ?? '10'}',
+    );
+    defaultSlPips = TextEditingController(
+      text: '${bot?['default_sl_pips'] ?? '5'}',
+    );
+    allocationAmount = TextEditingController(
+      text: '${bot?['allocation_amount'] ?? '0'}',
+    );
+    allocationProfitPct = TextEditingController(
+      text: '${bot?['allocation_profit_pct'] ?? '0'}',
+    );
+    allocationLossPct = TextEditingController(
+      text: '${bot?['allocation_loss_pct'] ?? '100'}',
+    );
+    tradingWindowStart = TextEditingController(
+      text: _shortTime('${bot?['trading_window_start'] ?? '06:00'}'),
+    );
+    tradingWindowEnd = TextEditingController(
+      text: _shortTime('${bot?['trading_window_end'] ?? '18:00'}'),
+    );
+    killSwitchMaxUnrealizedPct = TextEditingController(
+      text: '${bot?['kill_switch_max_unrealized_pct'] ?? '5'}',
+    );
+    maxLossStreak = TextEditingController(
+      text: '${bot?['max_loss_streak_before_pause'] ?? '0'}',
+    );
+    lossStreakCooldown = TextEditingController(
+      text: '${bot?['loss_streak_cooldown_min'] ?? '0'}',
+    );
+    softDrawdownLimitPct = TextEditingController(
+      text: '${bot?['soft_drawdown_limit_pct'] ?? '0'}',
+    );
+    softSizeMultiplier = TextEditingController(
+      text: '${bot?['soft_size_multiplier'] ?? '1'}',
+    );
+    hardDrawdownLimitPct = TextEditingController(
+      text: '${bot?['hard_drawdown_limit_pct'] ?? '0'}',
+    );
+    hardSizeMultiplier = TextEditingController(
+      text: '${bot?['hard_size_multiplier'] ?? '1'}',
     );
   }
 
@@ -3020,6 +3111,20 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     interval.dispose();
     maxSpread.dispose();
     allowedDeviation.dispose();
+    defaultTpPips.dispose();
+    defaultSlPips.dispose();
+    allocationAmount.dispose();
+    allocationProfitPct.dispose();
+    allocationLossPct.dispose();
+    tradingWindowStart.dispose();
+    tradingWindowEnd.dispose();
+    killSwitchMaxUnrealizedPct.dispose();
+    maxLossStreak.dispose();
+    lossStreakCooldown.dispose();
+    softDrawdownLimitPct.dispose();
+    softSizeMultiplier.dispose();
+    hardDrawdownLimitPct.dispose();
+    hardSizeMultiplier.dispose();
     super.dispose();
   }
 
@@ -3041,6 +3146,16 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
 
   void _showValidationError(String text) =>
       message(context, text, isError: true);
+
+  bool _validTime(TextEditingController controller) {
+    final match = RegExp(
+      r'^(\d{2}):(\d{2})$',
+    ).firstMatch(controller.text.trim());
+    if (match == null) return false;
+    final hour = int.parse(match.group(1)!);
+    final minute = int.parse(match.group(2)!);
+    return hour >= 0 && hour < 24 && minute >= 0 && minute < 60;
+  }
 
   void submit() {
     if (name.text.trim().isEmpty || assetId == null || accountId == null) {
@@ -3081,6 +3196,73 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
         _invalidInteger(allowedDeviation, allowZero: true)) {
       _showValidationError(
         'Position and trade limits must be valid numbers. Spread, interval and deviation may be zero.',
+      );
+      return;
+    }
+    if (_invalidNumber(defaultTpPips) || _invalidNumber(defaultSlPips)) {
+      _showValidationError(
+        'Default stop loss and take profit must be greater than zero.',
+      );
+      return;
+    }
+    final allocation = double.tryParse(allocationAmount.text.trim());
+    final profitTarget = double.tryParse(allocationProfitPct.text.trim());
+    final lossLimit = double.tryParse(allocationLossPct.text.trim());
+    if (allocation == null ||
+        allocation < 0 ||
+        profitTarget == null ||
+        profitTarget < 0 ||
+        profitTarget > 1000 ||
+        lossLimit == null ||
+        lossLimit < 0 ||
+        lossLimit > 1000) {
+      _showValidationError(
+        'Allocation must be zero or greater; profit and loss percentages must be between 0 and 1000.',
+      );
+      return;
+    }
+    if (tradingScheduleEnabled &&
+        (selectedTradingDays.isEmpty ||
+            !_validTime(tradingWindowStart) ||
+            !_validTime(tradingWindowEnd))) {
+      _showValidationError(
+        'Choose at least one trading day and enter schedule times as HH:mm.',
+      );
+      return;
+    }
+    final killSwitchPct = double.tryParse(
+      killSwitchMaxUnrealizedPct.text.trim(),
+    );
+    if (killSwitchEnabled &&
+        (killSwitchPct == null || killSwitchPct < 0.1 || killSwitchPct > 100)) {
+      _showValidationError('Kill-switch loss must be between 0.1 and 100%.');
+      return;
+    }
+    if (lossStreakAutopauseEnabled &&
+        (_invalidInteger(maxLossStreak) ||
+            _invalidInteger(lossStreakCooldown))) {
+      _showValidationError(
+        'Loss-streak auto-pause requires a positive streak and cooldown.',
+      );
+      return;
+    }
+    final softDrawdown = double.tryParse(softDrawdownLimitPct.text.trim());
+    final hardDrawdown = double.tryParse(hardDrawdownLimitPct.text.trim());
+    final softMultiplier = double.tryParse(softSizeMultiplier.text.trim());
+    final hardMultiplier = double.tryParse(hardSizeMultiplier.text.trim());
+    if (softDrawdown == null ||
+        softDrawdown < 0 ||
+        hardDrawdown == null ||
+        hardDrawdown < 0 ||
+        (softDrawdown > 0 && hardDrawdown > 0 && hardDrawdown < softDrawdown) ||
+        softMultiplier == null ||
+        softMultiplier <= 0 ||
+        softMultiplier > 1 ||
+        hardMultiplier == null ||
+        hardMultiplier <= 0 ||
+        hardMultiplier > softMultiplier) {
+      _showValidationError(
+        'Drawdown limits must increase from soft to hard, while size multipliers must decrease and stay between 0 and 1.',
       );
       return;
     }
@@ -3131,6 +3313,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       'broker_account': accountId,
       'engine_mode': engineMode,
       'default_timeframe': timeframe,
+      'allowed_timeframes': selectedTimeframes.toList()..sort(),
       'default_qty': qty.text.trim(),
       'position_sizing_mode': positionSizingMode,
       'risk_per_trade_pct': riskPerTrade.text.trim(),
@@ -3143,9 +3326,28 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       'trade_interval_minutes': interval.text.trim(),
       'max_spread_points': maxSpread.text.trim(),
       'allowed_deviation_points': allowedDeviation.text.trim(),
+      'default_tp_pips': defaultTpPips.text.trim(),
+      'default_sl_pips': defaultSlPips.text.trim(),
       'allow_live_account_execution': allowLiveExecution,
       'close_positions_on_emergency_stop': closePositionsOnEmergencyStop,
       'trading_profile': tradingProfile,
+      'allocation_amount': allocationAmount.text.trim(),
+      'allocation_profit_pct': allocationProfitPct.text.trim(),
+      'allocation_loss_pct': allocationLossPct.text.trim(),
+      'trading_schedule_enabled': tradingScheduleEnabled,
+      'allowed_trading_days': selectedTradingDays.toList()..sort(),
+      'trading_window_start': tradingWindowStart.text.trim(),
+      'trading_window_end': tradingWindowEnd.text.trim(),
+      'allow_opposite_scalp': allowOppositeScalp,
+      'kill_switch_enabled': killSwitchEnabled,
+      'kill_switch_max_unrealized_pct': killSwitchMaxUnrealizedPct.text.trim(),
+      'loss_streak_autopause_enabled': lossStreakAutopauseEnabled,
+      'max_loss_streak_before_pause': maxLossStreak.text.trim(),
+      'loss_streak_cooldown_min': lossStreakCooldown.text.trim(),
+      'soft_drawdown_limit_pct': softDrawdownLimitPct.text.trim(),
+      'soft_size_multiplier': softSizeMultiplier.text.trim(),
+      'hard_drawdown_limit_pct': hardDrawdownLimitPct.text.trim(),
+      'hard_size_multiplier': hardSizeMultiplier.text.trim(),
     });
   }
 
@@ -3250,6 +3452,38 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
         ),
     ],
   );
+
+  Widget _configChips(Map<String, String> options, Set<String> selected) =>
+      Wrap(
+        spacing: 7,
+        runSpacing: 7,
+        children: [
+          for (final option in options.entries)
+            FilterChip(
+              label: Text(option.value),
+              selected: selected.contains(option.key),
+              selectedColor: blue.withValues(alpha: 0.65),
+              backgroundColor: const Color(0xFF0A1217),
+              side: BorderSide(
+                color: selected.contains(option.key)
+                    ? blue.withValues(alpha: 0.55)
+                    : border,
+              ),
+              labelStyle: TextStyle(
+                color: selected.contains(option.key)
+                    ? Colors.white
+                    : const Color(0xFFD8E2E6),
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+              ),
+              onSelected: (enabled) => setState(() {
+                enabled
+                    ? selected.add(option.key)
+                    : selected.remove(option.key);
+              }),
+            ),
+        ],
+      );
 
   Widget _automaticExecutionCard() => Container(
     padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
@@ -3610,6 +3844,20 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   onChanged: (value) =>
                       setState(() => tradingProfile = value ?? tradingProfile),
                 ),
+                const SizedBox(height: 14),
+                const Text(
+                  'Allowed execution timeframes',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Leave every option clear to allow all timeframes.',
+                  style: TextStyle(color: muted, fontSize: 9),
+                ),
+                const SizedBox(height: 8),
+                _configChips({
+                  for (final value in timeframes) value: value.toUpperCase(),
+                }, selectedTimeframes),
                 const SizedBox(height: 16),
                 _automaticExecutionCard(),
                 const SizedBox(height: 24),
@@ -3777,6 +4025,33 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     helperText: 'Maximum deviation sent with this bot\'s order',
                   ),
                 ),
+                if (engineMode != 'scalper') ...[
+                  const SizedBox(height: 12),
+                  _responsiveFields([
+                    TextField(
+                      controller: defaultSlPips,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Default stop loss',
+                        suffixText: 'pips',
+                        helperText: 'Fallback protection for new decisions',
+                      ),
+                    ),
+                    TextField(
+                      controller: defaultTpPips,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Default take profit',
+                        suffixText: 'pips',
+                        helperText: 'Fallback fixed target for new decisions',
+                      ),
+                    ),
+                  ]),
+                ],
                 const SizedBox(height: 12),
                 _botSafetyToggle(
                   icon: Icons.verified_user_outlined,
@@ -3798,6 +4073,208 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       setState(() => closePositionsOnEmergencyStop = value),
                   color: danger,
                 ),
+                const SizedBox(height: 24),
+                _sectionHeading(
+                  'Allocation & limits',
+                  'Assign a virtual bankroll and stop this bot at its allocation profit or loss boundary.',
+                ),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  TextField(
+                    controller: allocationAmount,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Allocation amount',
+                      helperText: '0 disables allocation-based limits',
+                    ),
+                  ),
+                  TextField(
+                    controller: allocationProfitPct,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Profit target',
+                      suffixText: '% allocation',
+                      helperText: '0 disables the profit target',
+                    ),
+                  ),
+                  TextField(
+                    controller: allocationLossPct,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Loss limit',
+                      suffixText: '% allocation',
+                      helperText: '100 stops after the allocation is lost',
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 24),
+                _sectionHeading(
+                  'Trading schedule',
+                  'Restrict new entries to selected local days and times.',
+                ),
+                const SizedBox(height: 12),
+                _botSafetyToggle(
+                  icon: Icons.schedule_outlined,
+                  title: 'Use trading schedule',
+                  description:
+                      'Disable for 24/7 eligibility; market-hours and risk guards still apply.',
+                  value: tradingScheduleEnabled,
+                  onChanged: (value) =>
+                      setState(() => tradingScheduleEnabled = value),
+                  color: blue,
+                ),
+                if (tradingScheduleEnabled) ...[
+                  const SizedBox(height: 12),
+                  _configChips(tradingDays, selectedTradingDays),
+                  const SizedBox(height: 12),
+                  _responsiveFields([
+                    TextField(
+                      controller: tradingWindowStart,
+                      decoration: const InputDecoration(
+                        labelText: 'Trading starts',
+                        hintText: '06:00',
+                        helperText: '24-hour HH:mm',
+                      ),
+                    ),
+                    TextField(
+                      controller: tradingWindowEnd,
+                      decoration: const InputDecoration(
+                        labelText: 'Trading ends',
+                        hintText: '18:00',
+                        helperText: '24-hour HH:mm',
+                      ),
+                    ),
+                  ]),
+                ],
+                const SizedBox(height: 24),
+                _sectionHeading(
+                  'Position protection',
+                  'Configure emergency exits and automatic cooling behavior.',
+                ),
+                const SizedBox(height: 12),
+                _botSafetyToggle(
+                  icon: Icons.swap_horiz_rounded,
+                  title: 'Allow opposite-direction scalp',
+                  description:
+                      'Permit a small counter-position while retaining this bot\'s main trade.',
+                  value: allowOppositeScalp,
+                  onChanged: (value) =>
+                      setState(() => allowOppositeScalp = value),
+                  color: amber,
+                ),
+                const SizedBox(height: 10),
+                _botSafetyToggle(
+                  icon: Icons.health_and_safety_outlined,
+                  title: 'Enable unrealized-loss kill switch',
+                  description:
+                      'Close this bot\'s positions after its floating loss reaches the configured percentage.',
+                  value: killSwitchEnabled,
+                  onChanged: (value) =>
+                      setState(() => killSwitchEnabled = value),
+                  color: danger,
+                ),
+                if (killSwitchEnabled) ...[
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: killSwitchMaxUnrealizedPct,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Maximum unrealized loss',
+                      suffixText: '%',
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                _botSafetyToggle(
+                  icon: Icons.pause_circle_outline_rounded,
+                  title: 'Auto-pause after a loss streak',
+                  description:
+                      'Pause new entries after consecutive losing closes and resume after a cooldown.',
+                  value: lossStreakAutopauseEnabled,
+                  onChanged: (value) =>
+                      setState(() => lossStreakAutopauseEnabled = value),
+                  color: amber,
+                ),
+                if (lossStreakAutopauseEnabled) ...[
+                  const SizedBox(height: 10),
+                  _responsiveFields([
+                    TextField(
+                      controller: maxLossStreak,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Maximum loss streak',
+                        suffixText: 'trades',
+                      ),
+                    ),
+                    TextField(
+                      controller: lossStreakCooldown,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Loss-streak cooldown',
+                        suffixText: 'min',
+                      ),
+                    ),
+                  ]),
+                ],
+                const SizedBox(height: 24),
+                _sectionHeading(
+                  'Drawdown sizing',
+                  'Reduce order size as this bot reaches soft and hard daily drawdown levels. Zero disables a threshold.',
+                ),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  TextField(
+                    controller: softDrawdownLimitPct,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Soft drawdown',
+                      suffixText: '%',
+                    ),
+                  ),
+                  TextField(
+                    controller: softSizeMultiplier,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Soft size multiplier',
+                      hintText: '0.50',
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  TextField(
+                    controller: hardDrawdownLimitPct,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Hard drawdown',
+                      suffixText: '%',
+                    ),
+                  ),
+                  TextField(
+                    controller: hardSizeMultiplier,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Hard size multiplier',
+                      hintText: '0.25',
+                    ),
+                  ),
+                ]),
               ],
             ),
           ),

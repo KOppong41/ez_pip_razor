@@ -451,6 +451,14 @@ void main() {
       find.text('Allow live-account execution for this bot'),
       findsOneWidget,
     );
+    expect(find.text('ALLOCATION & LIMITS'), findsOneWidget);
+    expect(find.text('Allocation amount'), findsOneWidget);
+    expect(find.text('TRADING SCHEDULE'), findsOneWidget);
+    expect(find.text('Use trading schedule'), findsOneWidget);
+    expect(find.text('POSITION PROTECTION'), findsOneWidget);
+    expect(find.text('Enable unrealized-loss kill switch'), findsOneWidget);
+    expect(find.text('DRAWDOWN SIZING'), findsOneWidget);
+    expect(find.text('Soft drawdown'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

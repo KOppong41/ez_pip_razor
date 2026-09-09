@@ -111,3 +111,47 @@ class ClientBotApiTest(TestCase):
         self.assertEqual(limits["max_total_open_positions"], 2)
         asset_ids = {row["id"] for row in response.json()["assets"]}
         self.assertIn(self.asset.id, asset_ids)
+
+    def test_client_can_round_trip_all_user_editable_risk_and_schedule_fields(self):
+        response = self.client.post(
+            "/api/bots/",
+            data={
+                "name": "Configured Bot",
+                "asset": self.asset.id,
+                "broker_account": self.account.id,
+                "engine_mode": "harami",
+                "default_timeframe": "5m",
+                "allowed_timeframes": ["1m", "5m"],
+                "default_qty": "0.02",
+                "default_tp_pips": "12",
+                "default_sl_pips": "6",
+                "allocation_amount": "300",
+                "allocation_profit_pct": "50",
+                "allocation_loss_pct": "100",
+                "trading_schedule_enabled": True,
+                "allowed_trading_days": ["mon", "wed", "fri"],
+                "trading_window_start": "06:30",
+                "trading_window_end": "17:45",
+                "allow_opposite_scalp": True,
+                "kill_switch_enabled": True,
+                "kill_switch_max_unrealized_pct": "4",
+                "loss_streak_autopause_enabled": True,
+                "max_loss_streak_before_pause": 3,
+                "loss_streak_cooldown_min": 90,
+                "soft_drawdown_limit_pct": "2",
+                "soft_size_multiplier": "0.5",
+                "hard_drawdown_limit_pct": "4",
+                "hard_size_multiplier": "0.25",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.json())
+        data = response.json()
+        self.assertEqual(data["allowed_timeframes"], ["1m", "5m"])
+        self.assertEqual(Decimal(data["allocation_amount"]), Decimal("300"))
+        self.assertEqual(data["allowed_trading_days"], ["mon", "wed", "fri"])
+        self.assertTrue(data["allow_opposite_scalp"])
+        self.assertTrue(data["loss_streak_autopause_enabled"])
+        self.assertEqual(Decimal(data["soft_size_multiplier"]), Decimal("0.5"))
+        self.assertEqual(Decimal(data["hard_size_multiplier"]), Decimal("0.25"))
