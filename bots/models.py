@@ -240,6 +240,10 @@ class Bot(models.Model):
         ("paused", "Paused"),
         ("stopped", "Stopped"),
     ]
+    POSITION_SIZING_CHOICES = [
+        ("fixed", "Fixed lot"),
+        ("risk", "Risk based"),
+    ]
 
     name = models.CharField(
         max_length=100,
@@ -284,9 +288,56 @@ class Bot(models.Model):
         decimal_places=8,
         default=Decimal("0.10"),
         help_text=(
-            "Default lot size per trade before SL distance is considered. "
-            "Adjust per symbol volatility (e.g. 0.10 for EURUSD, 0.02 for XAUUSD)."
+            "Order volume used only when Position sizing mode is Fixed lot. "
+            "It is ignored for risk-based sizing."
         ),
+    )
+
+    position_sizing_mode = models.CharField(
+        max_length=12,
+        choices=POSITION_SIZING_CHOICES,
+        default="risk",
+        help_text="Use the fixed default lot or calculate volume from equity and stop-loss risk.",
+    )
+    risk_per_trade_pct = models.DecimalField(
+        max_digits=6,
+        decimal_places=3,
+        default=Decimal("0.5"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
+        help_text="Percentage of current account equity risked when position sizing is risk based.",
+    )
+    max_bot_lot_size = models.DecimalField(
+        max_digits=12,
+        decimal_places=8,
+        default=Decimal("0.05"),
+        validators=[MinValueValidator(Decimal("0.00000001"))],
+        help_text="Hard maximum volume for any entry created by this bot.",
+    )
+    max_spread_points = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("30"),
+        validators=[MinValueValidator(Decimal("0"))],
+        help_text="Maximum entry spread in raw broker/MT5 points. Set to 0 to disable.",
+    )
+    allowed_deviation_points = models.PositiveIntegerField(
+        default=8,
+        help_text="Maximum order deviation requested from MT5, in raw broker points.",
+    )
+    allow_live_account_execution = models.BooleanField(
+        default=False,
+        help_text="Explicit permission for this bot to submit entries to a live-money account.",
+    )
+    close_positions_on_emergency_stop = models.BooleanField(
+        default=False,
+        help_text="Close only this bot's owned positions when its account emergency stop is active.",
+    )
+    mt5_magic_number = models.BigIntegerField(
+        null=True,
+        blank=True,
+        unique=True,
+        editable=False,
+        help_text="Stable per-bot MT5 ownership identifier.",
     )
 
     default_tp_pips = models.DecimalField(
@@ -396,7 +447,7 @@ class Bot(models.Model):
     )
 
     risk_max_concurrent_positions = models.PositiveIntegerField(
-        default=5,
+        default=1,
         help_text="Maximum number of open positions this bot may hold across all symbols at the same time.",
     )
 
@@ -608,6 +659,37 @@ class Bot(models.Model):
         except Exception:
             raise ValidationError({"decision_min_score": "Invalid decision_min_score value."})
 
+        if self.position_sizing_mode == "risk" and self.risk_per_trade_pct <= 0:
+            raise ValidationError({"risk_per_trade_pct": "Risk per trade must be greater than 0 in risk-based mode."})
+        if self.position_sizing_mode == "fixed" and self.default_qty > self.max_bot_lot_size:
+            raise ValidationError(
+                {"default_qty": "Default lot size cannot exceed Maximum bot lot size."}
+            )
+
+        if self.broker_account_id:
+            policy_model = apps.get_model("execution", "RiskPolicy")
+            policy = policy_model.objects.filter(broker_account_id=self.broker_account_id).first()
+            if policy:
+                account_lot_cap = Decimal(str(policy.max_order_lot_size or 0))
+                if account_lot_cap > 0 and self.max_bot_lot_size > account_lot_cap:
+                    raise ValidationError(
+                        {
+                            "max_bot_lot_size": (
+                                f"Maximum bot lot size cannot exceed the account hard limit of {account_lot_cap}."
+                            )
+                        }
+                    )
+                account_position_cap = int(policy.max_total_open_positions or 0)
+                if account_position_cap > 0 and self.risk_max_concurrent_positions > account_position_cap:
+                    raise ValidationError(
+                        {
+                            "risk_max_concurrent_positions": (
+                                "Maximum bot positions cannot exceed the account hard limit "
+                                f"of {account_position_cap}."
+                            )
+                        }
+                    )
+
         # Validate allowed_timeframes against standard choices
         if self.allowed_timeframes:
             invalid_tf = [tf for tf in self.allowed_timeframes if tf not in STANDARD_TIMEFRAMES]
@@ -707,6 +789,13 @@ class Bot(models.Model):
         if not self.bot_id:
             self.bot_id = generate_bot_id()
         super().save(*args, **kwargs)
+        if self.mt5_magic_number is None and self.pk:
+            # Stable, non-secret namespace. Existing global-magic positions remain
+            # recoverable through their order ticket/comment during reconciliation.
+            self.mt5_magic_number = 500_000_000 + int(self.pk)
+            type(self).objects.filter(pk=self.pk, mt5_magic_number__isnull=True).update(
+                mt5_magic_number=self.mt5_magic_number
+            )
 
 
 class Strategy(models.Model):

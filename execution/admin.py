@@ -379,7 +379,7 @@ class AccountRiskDayAdmin(admin.ModelAdmin):
 
 @admin.register(RiskPolicy)
 class RiskPolicyAdmin(admin.ModelAdmin):
-    list_display = ("broker_account", "risk_per_trade_pct", "max_daily_loss_pct", "max_account_drawdown_pct", "entries_enabled", "emergency_stop")
+    list_display = ("broker_account", "max_order_lot_size", "max_daily_loss_pct", "max_account_drawdown_pct", "entries_enabled", "emergency_stop")
 
 
 @admin.register(BrokerSymbolMapping)

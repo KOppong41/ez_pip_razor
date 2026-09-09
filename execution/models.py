@@ -1,6 +1,7 @@
 from datetime import time
 from decimal import Decimal
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -163,6 +164,12 @@ class Order(models.Model):
     execution_queued_at = models.DateTimeField(null=True, blank=True)
     mt5_worker_started_at = models.DateTimeField(null=True, blank=True)
     risk_validation_completed_at = models.DateTimeField(null=True, blank=True)
+    risk_reserved_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Short-lived account exposure reservation made by final pre-trade validation.",
+    )
     order_send_called_at = models.DateTimeField(null=True, blank=True)
     broker_response_received_at = models.DateTimeField(null=True, blank=True)
     execution_recorded_at = models.DateTimeField(null=True, blank=True)
@@ -502,9 +509,12 @@ class AccountRiskDay(models.Model):
 
 class RiskPolicy(models.Model):
     broker_account = models.OneToOneField(BrokerAccount, on_delete=models.CASCADE, related_name="risk_policy")
-    risk_per_trade_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("0.5"))
-    max_daily_loss_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("1.5"))
-    max_account_drawdown_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("5.0"))
+    max_daily_loss_pct = models.DecimalField(
+        max_digits=6, decimal_places=3, default=Decimal("1.5"), validators=[MinValueValidator(Decimal("0"))]
+    )
+    max_account_drawdown_pct = models.DecimalField(
+        max_digits=6, decimal_places=3, default=Decimal("5.0"), validators=[MinValueValidator(Decimal("0"))]
+    )
     equity_high_water = models.DecimalField(
         max_digits=20,
         decimal_places=8,
@@ -512,20 +522,26 @@ class RiskPolicy(models.Model):
         help_text="Persistent highest observed broker equity used for account drawdown protection.",
     )
     equity_high_water_at = models.DateTimeField(null=True, blank=True)
-    max_positions = models.PositiveIntegerField(default=1)
+    max_total_open_positions = models.PositiveIntegerField(default=1)
     max_positions_per_symbol = models.PositiveIntegerField(default=1)
-    max_entry_trades_per_day = models.PositiveIntegerField(default=3)
-    max_lot = models.DecimalField(max_digits=12, decimal_places=8, default=Decimal("0.05"))
-    max_spread_points = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("30"))
-    deviation_points = models.PositiveIntegerField(default=8)
-    stop_after_daily_profit_pct = models.DecimalField(max_digits=6, decimal_places=3, default=Decimal("0"))
-    entries_enabled = models.BooleanField(default=False)
-    live_trading_confirmed = models.BooleanField(
-        default=False,
-        help_text="Explicit operator confirmation required when MT5 reports a live-money account.",
+    max_order_lot_size = models.DecimalField(
+        max_digits=12,
+        decimal_places=8,
+        default=Decimal("0.05"),
+        validators=[MinValueValidator(Decimal("0"))],
     )
+    max_aggregate_open_lots = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        default=Decimal("0.05"),
+        validators=[MinValueValidator(Decimal("0"))],
+        help_text="Combined open volume across positions owned by bots on this account. 0 disables.",
+    )
+    stop_after_daily_profit_pct = models.DecimalField(
+        max_digits=6, decimal_places=3, default=Decimal("0"), validators=[MinValueValidator(Decimal("0"))]
+    )
+    entries_enabled = models.BooleanField(default=False)
     emergency_stop = models.BooleanField(default=False)
-    emergency_close_owned_positions = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):

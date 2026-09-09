@@ -11,7 +11,7 @@ from brokers.models import BrokerAccount
 from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector, _MT5Proxy
 from execution.models import BrokerPosition, Decision, ExecutionAttempt, Signal
-from execution.services.live_risk import PreTradeRiskResult
+from execution.services.live_risk import PreTradeRiskResult, RiskRejected
 from execution.services.orchestrator import create_order_from_decision
 
 
@@ -131,6 +131,12 @@ class MT5ConnectorTest(TestCase):
         self.assertEqual(self.order.broker_position_ticket, 333)
         self.assertEqual(ExecutionAttempt.objects.get(order=self.order).status, "accepted")
         self.assertEqual(api.order_send.call_args.args[0]["deviation"], 17)
+        self.bot.refresh_from_db()
+        self.assertIsNotNone(self.bot.mt5_magic_number)
+        self.assertEqual(
+            api.order_send.call_args.args[0]["magic"],
+            self.bot.mt5_magic_number,
+        )
         self.order.refresh_from_db()
         self.assertIsNotNone(self.order.risk_validation_completed_at)
         self.assertIsNotNone(self.order.order_send_called_at)
@@ -160,6 +166,49 @@ class MT5ConnectorTest(TestCase):
             connector.place_order(self.order)
 
         api.order_send.assert_called_once()
+
+    @patch("execution.connectors.mt5.log_journal_event")
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_risk_rejection_is_machine_readable_and_releases_reservation(
+        self,
+        risk,
+        api,
+        journal,
+    ):
+        self._configure_api(api)
+        self.order.risk_reserved_at = timezone.now()
+        self.order.save(update_fields=["risk_reserved_at"])
+        risk.side_effect = RiskRejected(
+            "BOT_MAX_LOT",
+            "Requested lot exceeds the bot maximum",
+            context={"requested_lot": "0.30", "effective_max_lot": "0.20"},
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            with self.assertRaisesRegex(ConnectorError, "BOT_MAX_LOT"):
+                connector.place_order(self.order)
+
+        api.order_send.assert_not_called()
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "rejected")
+        self.assertIsNone(self.order.risk_reserved_at)
+        self.assertEqual(self.order.broker_response["type"], "risk_rejection")
+        self.assertEqual(self.order.broker_response["code"], "BOT_MAX_LOT")
+        self.assertEqual(
+            self.order.broker_response["context"]["effective_max_lot"],
+            "0.20",
+        )
+        risk_events = [
+            call
+            for call in journal.call_args_list
+            if call.args and call.args[0] == "risk.rejection"
+        ]
+        self.assertEqual(len(risk_events), 1)
+        self.assertEqual(risk_events[0].kwargs["context"]["code"], "BOT_MAX_LOT")
 
     @patch("execution.connectors.mt5.mt5")
     @patch("execution.services.live_risk.enforce_pretrade_risk")

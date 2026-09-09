@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -223,8 +224,8 @@ def personal_control(request):
         state = MT5ConnectionState.objects.filter(broker_account=account).first()
         if not state or not state.connected:
             return Response({"detail": "MT5 must be connected before starting"}, status=409)
-        if state.account_mode == "live" and not policy.live_trading_confirmed:
-            return Response({"detail": "Live trading has not been explicitly confirmed"}, status=409)
+        if state.account_mode == "live" and bots.filter(allow_live_account_execution=False).exists():
+            return Response({"detail": "Live-account execution is disabled for one or more bots"}, status=409)
         policy.emergency_stop = False
         policy.entries_enabled = True
         policy.save(update_fields=["emergency_stop", "entries_enabled", "updated_at"])
@@ -239,7 +240,7 @@ def personal_control(request):
         policy.save(update_fields=["entries_enabled", "emergency_stop", "updated_at"])
         bots.update(status="stopped")
         # The serialized MT5 worker cancels outstanding entries first, then
-        # flattens owned positions only when the policy explicitly opts in.
+        # flattens positions only for bots that explicitly opt in.
         from execution.tasks import kill_switch_monitor_task
 
         transaction.on_commit(
@@ -381,25 +382,24 @@ def personal_risk(request):
         return Response({"detail": str(exc)}, status=400)
     policy, _ = RiskPolicy.objects.get_or_create(broker_account=account)
     editable = {
-        "risk_per_trade_pct",
         "max_daily_loss_pct",
         "max_account_drawdown_pct",
-        "max_positions",
+        "max_total_open_positions",
         "max_positions_per_symbol",
-        "max_entry_trades_per_day",
-        "max_lot",
-        "max_spread_points",
-        "deviation_points",
+        "max_order_lot_size",
+        "max_aggregate_open_lots",
         "stop_after_daily_profit_pct",
-        "emergency_close_owned_positions",
-        "live_trading_confirmed",
     }
     if request.method == "PATCH":
         for field in editable:
             if field in request.data:
                 setattr(policy, field, request.data[field])
-        policy.full_clean()
-        policy.save()
+        try:
+            policy.full_clean()
+            policy.save()
+        except DjangoValidationError as exc:
+            detail = exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages}
+            return Response(detail, status=status.HTTP_400_BAD_REQUEST)
     fields = [
         "id",
         "broker_account_id",

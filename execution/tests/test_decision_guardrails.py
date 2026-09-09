@@ -30,6 +30,9 @@ class DecisionGuardrailTests(TestCase):
             broker_account=self.account,
             asset=self.asset,
             allowed_symbols=["EURUSDm"],
+            # These tests exercise same/opposite-direction behavior, not the
+            # conservative one-position default introduced for new bots.
+            risk_max_concurrent_positions=5,
         )
         self.bot.allow_opposite_scalp = True
         self.bot.save(update_fields=["allow_opposite_scalp"])

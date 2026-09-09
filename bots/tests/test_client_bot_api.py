@@ -1,8 +1,11 @@
+from decimal import Decimal
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
+from execution.models import RiskPolicy
 
 
 class ClientBotApiTest(TestCase):
@@ -63,6 +66,8 @@ class ClientBotApiTest(TestCase):
         bot = Bot.objects.get(name="Alice Bot")
         self.assertEqual(bot.owner, self.user)
         self.assertEqual(bot.status, "stopped")
+        self.assertEqual(bot.position_sizing_mode, "risk")
+        self.assertEqual(bot.risk_per_trade_pct, Decimal("0.5"))
 
     def test_client_cannot_see_or_control_another_users_bot(self):
         response = self.client.get("/api/bots/")
@@ -90,9 +95,19 @@ class ClientBotApiTest(TestCase):
         self.assertIn("broker_account", response.json())
 
     def test_options_only_include_the_clients_accounts(self):
+        RiskPolicy.objects.create(
+            broker_account=self.account,
+            max_order_lot_size="0.04",
+            max_total_open_positions=2,
+            max_positions_per_symbol=1,
+            max_aggregate_open_lots="0.08",
+        )
         response = self.client.get("/api/bots/options/")
         self.assertEqual(response.status_code, 200)
         account_ids = {row["id"] for row in response.json()["accounts"]}
         self.assertEqual(account_ids, {self.account.id})
+        limits = response.json()["accounts"][0]["risk_limits"]
+        self.assertEqual(Decimal(str(limits["max_order_lot_size"])), Decimal("0.04"))
+        self.assertEqual(limits["max_total_open_positions"], 2)
         asset_ids = {row["id"] for row in response.json()["assets"]}
         self.assertIn(self.asset.id, asset_ids)

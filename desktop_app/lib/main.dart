@@ -2884,17 +2884,24 @@ class _BotEditorDialog extends StatefulWidget {
 class _BotEditorDialogState extends State<_BotEditorDialog> {
   late final TextEditingController name;
   late final TextEditingController qty;
+  late final TextEditingController riskPerTrade;
+  late final TextEditingController maxBotLot;
   late final TextEditingController decisionScore;
   late final TextEditingController maxPositions;
   late final TextEditingController maxTrades;
   late final TextEditingController interval;
+  late final TextEditingController maxSpread;
+  late final TextEditingController allowedDeviation;
   final editorScroll = ScrollController();
   int? assetId;
   int? accountId;
   String engineMode = 'harami';
   String timeframe = '5m';
   String tradingProfile = 'very_safe';
+  String positionSizingMode = 'risk';
   bool autoTrade = true;
+  bool allowLiveExecution = false;
+  bool closePositionsOnEmergencyStop = false;
   final selectedStrategies = <String>{};
 
   List<Map<String, dynamic>> get assets => listOfMaps(widget.options['assets']);
@@ -2924,7 +2931,11 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     engineMode = '${bot?['engine_mode'] ?? 'harami'}';
     timeframe = '${bot?['default_timeframe'] ?? '5m'}';
     tradingProfile = '${bot?['trading_profile'] ?? 'very_safe'}';
+    positionSizingMode = '${bot?['position_sizing_mode'] ?? 'risk'}';
     autoTrade = bot?['auto_trade'] != false;
+    allowLiveExecution = bot?['allow_live_account_execution'] == true;
+    closePositionsOnEmergencyStop =
+        bot?['close_positions_on_emergency_stop'] == true;
     selectedStrategies.addAll(
       bot?['enabled_strategies'] is List
           ? List<dynamic>.from(bot!['enabled_strategies']).map((v) => '$v')
@@ -2935,17 +2946,29 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       text:
           '${bot?['default_qty'] ?? selectedAsset?['recommended_qty'] ?? '0.01'}',
     );
+    riskPerTrade = TextEditingController(
+      text: '${bot?['risk_per_trade_pct'] ?? '0.5'}',
+    );
+    maxBotLot = TextEditingController(
+      text: '${bot?['max_bot_lot_size'] ?? '0.05'}',
+    );
     decisionScore = TextEditingController(
       text: '${bot?['decision_min_score'] ?? '0.5'}',
     );
     maxPositions = TextEditingController(
-      text: '${bot?['risk_max_concurrent_positions'] ?? '5'}',
+      text: '${bot?['risk_max_concurrent_positions'] ?? '1'}',
     );
     maxTrades = TextEditingController(
       text: '${bot?['max_trades_per_day'] ?? '10'}',
     );
     interval = TextEditingController(
       text: '${bot?['trade_interval_minutes'] ?? '15'}',
+    );
+    maxSpread = TextEditingController(
+      text: '${bot?['max_spread_points'] ?? '30'}',
+    );
+    allowedDeviation = TextEditingController(
+      text: '${bot?['allowed_deviation_points'] ?? '8'}',
     );
   }
 
@@ -2956,17 +2979,68 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     return null;
   }
 
+  Map<String, dynamic>? get selectedAccount {
+    for (final account in accounts) {
+      if (integerValue(account['id']) == accountId) return account;
+    }
+    return null;
+  }
+
+  Map<String, dynamic> get selectedAccountLimits {
+    final account = selectedAccount;
+    if (account == null) return const {};
+    final nested = mapOf(
+      account['risk_limits'] ??
+          account['risk_policy'] ??
+          account['hard_limits'],
+    );
+    return nested.isEmpty ? account : nested;
+  }
+
+  double? _accountDecimalLimit(String field) {
+    final value = double.tryParse('${selectedAccountLimits[field] ?? ''}');
+    return value != null && value > 0 ? value : null;
+  }
+
+  int? _accountIntegerLimit(String field) {
+    final value = int.tryParse('${selectedAccountLimits[field] ?? ''}');
+    return value != null && value > 0 ? value : null;
+  }
+
   @override
   void dispose() {
     editorScroll.dispose();
     name.dispose();
     qty.dispose();
+    riskPerTrade.dispose();
+    maxBotLot.dispose();
     decisionScore.dispose();
     maxPositions.dispose();
     maxTrades.dispose();
     interval.dispose();
+    maxSpread.dispose();
+    allowedDeviation.dispose();
     super.dispose();
   }
+
+  bool _invalidNumber(
+    TextEditingController controller, {
+    bool allowZero = false,
+  }) {
+    final value = double.tryParse(controller.text.trim());
+    return value == null || (allowZero ? value < 0 : value <= 0);
+  }
+
+  bool _invalidInteger(
+    TextEditingController controller, {
+    bool allowZero = false,
+  }) {
+    final value = int.tryParse(controller.text.trim());
+    return value == null || (allowZero ? value < 0 : value <= 0);
+  }
+
+  void _showValidationError(String text) =>
+      message(context, text, isError: true);
 
   void submit() {
     if (name.text.trim().isEmpty || assetId == null || accountId == null) {
@@ -2985,6 +3059,72 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       );
       return;
     }
+    if (_invalidNumber(maxBotLot)) {
+      _showValidationError('Bot maximum lot size must be greater than zero.');
+      return;
+    }
+    if (positionSizingMode == 'fixed' && _invalidNumber(qty)) {
+      _showValidationError('Fixed lot size must be greater than zero.');
+      return;
+    }
+    if (positionSizingMode == 'risk') {
+      final risk = double.tryParse(riskPerTrade.text.trim());
+      if (risk == null || risk <= 0 || risk > 100) {
+        _showValidationError('Risk per trade must be between 0 and 100%.');
+        return;
+      }
+    }
+    if (_invalidInteger(maxPositions) ||
+        _invalidInteger(maxTrades) ||
+        _invalidInteger(interval, allowZero: true) ||
+        _invalidNumber(maxSpread, allowZero: true) ||
+        _invalidInteger(allowedDeviation, allowZero: true)) {
+      _showValidationError(
+        'Position and trade limits must be valid numbers. Spread, interval and deviation may be zero.',
+      );
+      return;
+    }
+    final score = double.tryParse(decisionScore.text.trim());
+    if (score == null || score < 0 || score > 1) {
+      _showValidationError('Minimum signal score must be between 0 and 1.');
+      return;
+    }
+    final botLot = double.parse(maxBotLot.text.trim());
+    final accountLot = _accountDecimalLimit('max_order_lot_size');
+    if (accountLot != null && botLot > accountLot) {
+      _showValidationError(
+        'Bot maximum lot size cannot exceed the account limit of $accountLot lots.',
+      );
+      return;
+    }
+    if (positionSizingMode == 'fixed') {
+      final fixedLot = double.parse(qty.text.trim());
+      if (fixedLot > botLot) {
+        _showValidationError(
+          'Fixed lot size cannot exceed this bot\'s maximum of $botLot lots.',
+        );
+        return;
+      }
+      final assetMinimum = double.tryParse(
+        '${selectedAsset?['min_qty'] ?? ''}',
+      );
+      if (assetMinimum != null && fixedLot < assetMinimum) {
+        _showValidationError(
+          'Fixed lot size cannot be below the asset minimum of $assetMinimum lots.',
+        );
+        return;
+      }
+    }
+    final botPositions = int.tryParse(maxPositions.text.trim());
+    final accountPositions = _accountIntegerLimit('max_total_open_positions');
+    if (accountPositions != null &&
+        botPositions != null &&
+        botPositions > accountPositions) {
+      _showValidationError(
+        'Bot open positions cannot exceed the account limit of $accountPositions.',
+      );
+      return;
+    }
     Navigator.pop(context, <String, dynamic>{
       'name': name.text.trim(),
       'asset': assetId,
@@ -2992,12 +3132,19 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       'engine_mode': engineMode,
       'default_timeframe': timeframe,
       'default_qty': qty.text.trim(),
+      'position_sizing_mode': positionSizingMode,
+      'risk_per_trade_pct': riskPerTrade.text.trim(),
+      'max_bot_lot_size': maxBotLot.text.trim(),
       'auto_trade': autoTrade,
       'enabled_strategies': selectedStrategies.toList()..sort(),
       'decision_min_score': decisionScore.text.trim(),
       'risk_max_concurrent_positions': maxPositions.text.trim(),
       'max_trades_per_day': maxTrades.text.trim(),
       'trade_interval_minutes': interval.text.trim(),
+      'max_spread_points': maxSpread.text.trim(),
+      'allowed_deviation_points': allowedDeviation.text.trim(),
+      'allow_live_account_execution': allowLiveExecution,
+      'close_positions_on_emergency_stop': closePositionsOnEmergencyStop,
       'trading_profile': tradingProfile,
     });
   }
@@ -3153,6 +3300,137 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       ],
     ),
   );
+
+  Widget _botSafetyToggle({
+    required IconData icon,
+    required String title,
+    required String description,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    Color color = amber,
+  }) => Container(
+    padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+    decoration: BoxDecoration(
+      color: const Color(0xFF0A1217),
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: value ? color.withValues(alpha: 0.45) : border),
+    ),
+    child: Row(
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Icon(icon, color: color, size: 18),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                description,
+                style: const TextStyle(color: muted, fontSize: 9, height: 1.3),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Switch(value: value, onChanged: onChanged),
+      ],
+    ),
+  );
+
+  Widget _accountLimitsCard() {
+    final limits = selectedAccountLimits;
+    final values = <(String, String)>[
+      if (limits['max_order_lot_size'] != null)
+        ('PER ORDER', '${limits['max_order_lot_size']} lots'),
+      if (limits['max_total_open_positions'] != null)
+        ('TOTAL POSITIONS', '${limits['max_total_open_positions']}'),
+      if (limits['max_positions_per_symbol'] != null)
+        ('PER SYMBOL', '${limits['max_positions_per_symbol']}'),
+      if (limits['max_aggregate_open_lots'] != null)
+        ('OPEN VOLUME', '${limits['max_aggregate_open_lots']} lots'),
+    ];
+    return Container(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: blue.withValues(alpha: 0.055),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: blue.withValues(alpha: 0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.account_balance_outlined, color: blue, size: 16),
+              SizedBox(width: 7),
+              Text(
+                'Account hard limits',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
+              ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          if (values.isEmpty)
+            const Text(
+              'Limits are unavailable in this response. The server still validates the account ceiling before saving and before every order.',
+              style: TextStyle(color: muted, fontSize: 9, height: 1.35),
+            )
+          else
+            Wrap(
+              spacing: 18,
+              runSpacing: 7,
+              children: [
+                for (final value in values)
+                  Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(
+                          text: '${value.$1}  ',
+                          style: const TextStyle(
+                            color: muted,
+                            fontSize: 8,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.55,
+                          ),
+                        ),
+                        TextSpan(
+                          text: value.$2,
+                          style: const TextStyle(
+                            fontFamily: 'Consolas',
+                            color: blue,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          const SizedBox(height: 6),
+          const Text(
+            'The stricter bot or account value wins at execution time.',
+            style: TextStyle(color: muted, fontSize: 9),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3316,40 +3594,21 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   flexes: const [2, 1],
                 ),
                 const SizedBox(height: 12),
-                _responsiveFields(
-                  [
-                    DropdownButtonFormField<String>(
-                      initialValue: tradingProfile,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        labelText: 'Trading profile',
+                DropdownButtonFormField<String>(
+                  initialValue: tradingProfile,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Trading profile',
+                  ),
+                  items: [
+                    for (final profile in tradingProfiles)
+                      DropdownMenuItem(
+                        value: '${profile['value']}',
+                        child: _dropdownText('${profile['label']}'),
                       ),
-                      items: [
-                        for (final profile in tradingProfiles)
-                          DropdownMenuItem(
-                            value: '${profile['value']}',
-                            child: _dropdownText('${profile['label']}'),
-                          ),
-                      ],
-                      onChanged: (value) => setState(
-                        () => tradingProfile = value ?? tradingProfile,
-                      ),
-                    ),
-                    TextField(
-                      controller: qty,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
-                      decoration: InputDecoration(
-                        labelText: 'Default lot size',
-                        suffixText: 'lots',
-                        helperText: selectedAsset == null
-                            ? null
-                            : 'Minimum ${selectedAsset!['min_qty']}',
-                      ),
-                    ),
                   ],
-                  flexes: const [2, 1],
+                  onChanged: (value) =>
+                      setState(() => tradingProfile = value ?? tradingProfile),
                 ),
                 const SizedBox(height: 16),
                 _automaticExecutionCard(),
@@ -3388,8 +3647,84 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                 const SizedBox(height: 24),
                 _sectionHeading(
                   'Risk & cadence',
-                  'Set conservative entry thresholds and activity limits.',
+                  'Size positions and set this bot\'s execution guardrails.',
                 ),
+                const SizedBox(height: 12),
+                _accountLimitsCard(),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  DropdownButtonFormField<String>(
+                    initialValue: positionSizingMode,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Position sizing',
+                      helperText:
+                          'Choose fixed lots or equity risk at the stop',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'risk',
+                        child: Text('Risk based (equity + stop loss)'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'fixed',
+                        child: Text('Fixed lot size'),
+                      ),
+                    ],
+                    onChanged: (value) => setState(
+                      () => positionSizingMode = value ?? positionSizingMode,
+                    ),
+                  ),
+                  if (positionSizingMode == 'fixed')
+                    TextField(
+                      controller: qty,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: 'Fixed lot size',
+                        suffixText: 'lots',
+                        helperText: selectedAsset == null
+                            ? 'Used exactly for each entry'
+                            : 'Asset minimum ${selectedAsset!['min_qty']}',
+                      ),
+                    )
+                  else
+                    TextField(
+                      controller: riskPerTrade,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Risk per trade',
+                        suffixText: '% equity',
+                        helperText:
+                            'Volume is calculated from the stop distance',
+                      ),
+                    ),
+                ]),
+                const SizedBox(height: 12),
+                _responsiveFields([
+                  TextField(
+                    controller: maxBotLot,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Bot maximum lot size',
+                      suffixText: 'lots',
+                      helperText: 'Hard per-order ceiling for this bot',
+                    ),
+                  ),
+                  TextField(
+                    controller: maxPositions,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Bot maximum open positions',
+                      helperText: 'Counts only positions owned by this bot',
+                    ),
+                  ),
+                ]),
                 const SizedBox(height: 12),
                 _responsiveFields([
                   TextField(
@@ -3403,22 +3738,15 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     ),
                   ),
                   TextField(
-                    controller: maxPositions,
+                    controller: maxTrades,
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
-                      labelText: 'Maximum open positions',
+                      labelText: 'Bot maximum trades per day',
                     ),
                   ),
                 ]),
                 const SizedBox(height: 12),
                 _responsiveFields([
-                  TextField(
-                    controller: maxTrades,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Maximum trades per day',
-                    ),
-                  ),
                   TextField(
                     controller: interval,
                     keyboardType: TextInputType.number,
@@ -3427,7 +3755,49 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       suffixText: 'min',
                     ),
                   ),
+                  TextField(
+                    controller: maxSpread,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Maximum entry spread',
+                      suffixText: 'points',
+                      helperText: '0 disables this bot-level spread check',
+                    ),
+                  ),
                 ]),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: allowedDeviation,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Allowed execution deviation',
+                    suffixText: 'points',
+                    helperText: 'Maximum deviation sent with this bot\'s order',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _botSafetyToggle(
+                  icon: Icons.verified_user_outlined,
+                  title: 'Allow live-account execution for this bot',
+                  description:
+                      'Leave disabled until demo testing proves the complete execution and recovery cycle.',
+                  value: allowLiveExecution,
+                  onChanged: (value) =>
+                      setState(() => allowLiveExecution = value),
+                ),
+                const SizedBox(height: 10),
+                _botSafetyToggle(
+                  icon: Icons.emergency_outlined,
+                  title: 'Close this bot\'s positions on emergency stop',
+                  description:
+                      'Closes only positions durably owned by this bot; manual and other bot positions remain untouched.',
+                  value: closePositionsOnEmergencyStop,
+                  onChanged: (value) =>
+                      setState(() => closePositionsOnEmergencyStop = value),
+                  color: danger,
+                ),
               ],
             ),
           ),
@@ -3477,6 +3847,7 @@ class _BotCard extends StatelessWidget {
     final strategies = bot['enabled_strategies'] is List
         ? List<dynamic>.from(bot['enabled_strategies'])
         : <dynamic>[];
+    final sizingMode = '${bot['position_sizing_mode'] ?? 'fixed'}';
     return Container(
       padding: const EdgeInsets.all(17),
       decoration: BoxDecoration(
@@ -3568,8 +3939,10 @@ class _BotCard extends StatelessWidget {
                   value: '${bot['default_timeframe'] ?? '—'}'.toUpperCase(),
                 ),
                 _BotDatum(
-                  label: 'LOT SIZE',
-                  value: '${bot['default_qty'] ?? '—'}',
+                  label: 'SIZING',
+                  value: sizingMode == 'risk'
+                      ? '${bot['risk_per_trade_pct'] ?? '—'}% RISK'
+                      : '${bot['default_qty'] ?? '—'} LOT',
                 ),
                 _BotDatum(label: 'ACCOUNT', value: '${account['name'] ?? '—'}'),
                 _BotDatum(
@@ -5065,20 +5438,15 @@ class RiskPage extends StatefulWidget {
 
 class _RiskPageState extends State<RiskPage> {
   static const fields = [
-    'risk_per_trade_pct',
     'max_daily_loss_pct',
     'max_account_drawdown_pct',
-    'max_positions',
+    'max_order_lot_size',
+    'max_total_open_positions',
     'max_positions_per_symbol',
-    'max_entry_trades_per_day',
-    'max_lot',
-    'max_spread_points',
-    'deviation_points',
+    'max_aggregate_open_lots',
     'stop_after_daily_profit_pct',
   ];
   final controllers = <String, TextEditingController>{};
-  bool closeOwned = false;
-  bool liveConfirmed = false;
   bool loading = true;
   bool saving = false;
   String? error;
@@ -5103,8 +5471,6 @@ class _RiskPageState extends State<RiskPage> {
         controllers.putIfAbsent(field, TextEditingController.new).text =
             value[field]?.toString() ?? '';
       }
-      closeOwned = value['emergency_close_owned_positions'] == true;
-      liveConfirmed = value['live_trading_confirmed'] == true;
       error = null;
     } catch (e) {
       error = e.toString();
@@ -5122,8 +5488,6 @@ class _RiskPageState extends State<RiskPage> {
     }
     final body = <String, dynamic>{
       for (final field in fields) field: controllers[field]!.text.trim(),
-      'emergency_close_owned_positions': closeOwned,
-      'live_trading_confirmed': liveConfirmed,
     };
     if (mounted) setState(() => saving = true);
     try {
@@ -5227,57 +5591,6 @@ class _RiskPageState extends State<RiskPage> {
     ),
   );
 
-  Widget _safetyToggle({
-    required IconData icon,
-    required String title,
-    required String description,
-    required bool value,
-    required ValueChanged<bool> onChanged,
-    Color color = amber,
-  }) => Container(
-    padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
-    decoration: BoxDecoration(
-      color: panel,
-      borderRadius: BorderRadius.circular(10),
-      border: Border.all(color: value ? color.withValues(alpha: 0.45) : border),
-    ),
-    child: Row(
-      children: [
-        Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(9),
-          ),
-          child: Icon(icon, color: color, size: 18),
-        ),
-        const SizedBox(width: 11),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                description,
-                style: const TextStyle(color: muted, fontSize: 9, height: 1.3),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: 8),
-        Switch(value: value, onChanged: onChanged),
-      ],
-    ),
-  );
-
   @override
   Widget build(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
@@ -5289,8 +5602,8 @@ class _RiskPageState extends State<RiskPage> {
           eyebrow: 'ACCOUNT GUARDRAILS',
           title: 'Risk policy',
           description:
-              'Define exposure, loss and execution limits applied before every order.',
-          badge: liveConfirmed ? 'LIVE ENABLED' : 'DEMO SAFE',
+              'Set account-wide capital protection and hard aggregate exposure ceilings.',
+          badge: 'HARD ACCOUNT CAPS',
           action: FilledButton.icon(
             onPressed: saving ? null : save,
             icon: saving
@@ -5306,14 +5619,9 @@ class _RiskPageState extends State<RiskPage> {
         _policySection(
           icon: Icons.account_balance_wallet_outlined,
           title: 'Capital protection',
-          description: 'Cap loss per trade, per day and across the account.',
+          description:
+              'Stop new entries at account-level loss or profit thresholds.',
           fields: [
-            _riskInput(
-              'risk_per_trade_pct',
-              'Risk per trade',
-              suffix: '%',
-              help: 'Maximum equity risked by each new entry',
-            ),
             _riskInput(
               'max_daily_loss_pct',
               'Maximum daily loss',
@@ -5337,94 +5645,40 @@ class _RiskPageState extends State<RiskPage> {
         const SizedBox(height: 10),
         _policySection(
           icon: Icons.layers_outlined,
-          title: 'Exposure limits',
-          description: 'Control position size and trading frequency.',
+          title: 'Hard aggregate exposure',
+          description:
+              'These account ceilings override every bot when they are stricter.',
           fields: [
             _riskInput(
-              'max_lot',
-              'Maximum lot size',
+              'max_order_lot_size',
+              'Maximum lot size per order',
               suffix: 'lots',
-              help: 'Hard cap on the volume of one order',
+              help: 'No bot may submit an order above this account cap',
             ),
             _riskInput(
-              'max_positions',
-              'Maximum open positions',
-              help: 'Account-wide limit for simultaneous positions',
+              'max_total_open_positions',
+              'Total bot-owned positions',
+              help: 'Maximum open positions owned by all bots on this account',
             ),
             _riskInput(
               'max_positions_per_symbol',
-              'Positions per symbol',
-              help: 'Maximum simultaneous positions for one symbol',
+              'Bot-owned positions per symbol',
+              help: 'Account-wide ceiling for one broker symbol',
             ),
             _riskInput(
-              'max_entry_trades_per_day',
-              'Entry trades per day',
-              help: 'Maximum number of filled entry trades each day',
+              'max_aggregate_open_lots',
+              'Aggregate open volume',
+              suffix: 'lots',
+              help: 'Combined volume of all bot-owned positions; 0 disables',
             ),
           ],
         ),
         const SizedBox(height: 10),
-        _policySection(
-          icon: Icons.speed_rounded,
-          title: 'Execution quality',
-          description: 'Reject orders when broker conditions are unfavorable.',
-          fields: [
-            _riskInput(
-              'max_spread_points',
-              'Maximum spread',
-              suffix: 'points',
-              help: 'Rejects entries when the broker spread is wider',
-            ),
-            _riskInput(
-              'deviation_points',
-              'Allowed deviation',
-              suffix: 'points',
-              help: 'Maximum accepted execution price deviation',
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final stacked = constraints.maxWidth < 760;
-            final toggles = [
-              _safetyToggle(
-                icon: Icons.emergency_outlined,
-                title: 'Close owned positions on emergency stop',
-                description:
-                    'Only EZ Trade-managed positions close; manual trades remain untouched.',
-                value: closeOwned,
-                onChanged: (value) => setState(() => closeOwned = value),
-                color: danger,
-              ),
-              _safetyToggle(
-                icon: Icons.verified_user_outlined,
-                title: 'Confirm live-account trading',
-                description:
-                    'Keep disabled while testing on demo accounts and simulations.',
-                value: liveConfirmed,
-                onChanged: (value) => setState(() => liveConfirmed = value),
-                color: amber,
-              ),
-            ];
-            if (stacked) {
-              return Column(
-                children: [
-                  toggles.first,
-                  const SizedBox(height: 10),
-                  toggles.last,
-                ],
-              );
-            }
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(child: toggles.first),
-                const SizedBox(width: 10),
-                Expanded(child: toggles.last),
-              ],
-            );
-          },
+        const _InlineNotice(
+          icon: Icons.smart_toy_outlined,
+          text:
+              'Per-trade sizing, bot position and cadence limits, spread, deviation, live permission and emergency-close behavior are configured on each bot.',
+          color: blue,
         ),
       ],
     );

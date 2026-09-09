@@ -51,21 +51,38 @@ class BotViewSet(
             "recommended_qty",
             "max_spread",
         )
-        accounts = BrokerAccount.objects.filter(
+        account_rows = BrokerAccount.objects.filter(
             owner=request.user,
             is_active=True,
-        ).values(
-            "id",
-            "name",
-            "broker",
-            "mt5_login",
-            "mt5_server",
-            "is_verified",
-        )
+        ).select_related("risk_policy")
+        accounts = []
+        for account in account_rows:
+            try:
+                risk = account.risk_policy
+            except RiskPolicy.DoesNotExist:
+                risk = None
+            accounts.append(
+                {
+                    "id": account.id,
+                    "name": account.name,
+                    "broker": account.broker,
+                    "mt5_login": account.mt5_login,
+                    "mt5_server": account.mt5_server,
+                    "is_verified": account.is_verified,
+                    "risk_limits": None
+                    if risk is None
+                    else {
+                        "max_order_lot_size": risk.max_order_lot_size,
+                        "max_total_open_positions": risk.max_total_open_positions,
+                        "max_positions_per_symbol": risk.max_positions_per_symbol,
+                        "max_aggregate_open_lots": risk.max_aggregate_open_lots,
+                    },
+                }
+            )
         return Response(
             {
                 "assets": list(assets),
-                "accounts": list(accounts),
+                "accounts": accounts,
                 "engine_modes": [
                     {"value": value, "label": label}
                     for value, label in ENGINE_MODES
@@ -113,9 +130,9 @@ class BotViewSet(
             risk, _ = RiskPolicy.objects.get_or_create(
                 broker_account=bot.broker_account
             )
-            if connection.account_mode == "live" and not risk.live_trading_confirmed:
+            if connection.account_mode == "live" and not bot.allow_live_account_execution:
                 return Response(
-                    {"detail": "Live trading has not been explicitly confirmed."},
+                    {"detail": "Live-account execution is disabled for this bot."},
                     status=status.HTTP_409_CONFLICT,
                 )
             risk.entries_enabled = True

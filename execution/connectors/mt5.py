@@ -69,6 +69,63 @@ mt5 = _MT5Proxy()
 logger = logging.getLogger(__name__)
 
 
+def _legacy_magic_number() -> int:
+    """Return the pre-per-bot magic retained for legacy reconciliation only."""
+    return int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813))
+
+
+def _bot_magic_number(bot) -> int:
+    """Resolve the durable MT5 magic for a bot, with a legacy-safe fallback."""
+    if bot is None:
+        return _legacy_magic_number()
+    magic = getattr(bot, "mt5_magic_number", None)
+    if magic is not None:
+        return int(magic)
+    # Bot.save() and the data migration populate this value. The deterministic
+    # fallback keeps an old/incompletely migrated row safe without reverting a
+    # newly submitted order to the account-wide legacy magic.
+    if getattr(bot, "pk", None):
+        return 500_000_000 + int(bot.pk)
+    return _legacy_magic_number()
+
+
+def _order_magic_number(order: Order) -> int:
+    return _bot_magic_number(getattr(order, "bot", None))
+
+
+def _position_magic_number(position: BrokerPosition) -> int:
+    return _bot_magic_number(getattr(position, "bot", None))
+
+
+def _clear_risk_reservation(order: Order) -> None:
+    """Release a final-risk reservation once the submission is terminal."""
+    if not getattr(order, "pk", None):
+        return
+    Order.objects.filter(pk=order.pk, risk_reserved_at__isnull=False).update(
+        risk_reserved_at=None
+    )
+    order.risk_reserved_at = None
+
+
+def _store_risk_rejection(order: Order, rejection: dict) -> dict:
+    """Persist a JSON-safe, machine-readable rejection on the order."""
+    safe_rejection = json.loads(json.dumps(rejection, default=str))
+    if not isinstance(safe_rejection, dict):
+        safe_rejection = {
+            "code": "RISK_REJECTED",
+            "message": str(safe_rejection),
+            "context": {},
+        }
+    payload = {"type": "risk_rejection", **safe_rejection}
+    Order.objects.filter(pk=order.pk).update(
+        broker_response=payload,
+        risk_reserved_at=None,
+    )
+    order.broker_response = payload
+    order.risk_reserved_at = None
+    return safe_rejection
+
+
 def execution_quality_metadata(
     *,
     requested_price,
@@ -638,7 +695,7 @@ class MT5Connector(BaseConnector):
                 "position": int(broker_position.broker_position_ticket),
                 "sl": float(requested_sl),
                 "tp": float(requested_tp),
-                "magic": int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813)),
+                "magic": _position_magic_number(broker_position),
                 "comment": f"ezp:{broker_position.broker_position_ticket}"[:31],
             }
             result = mt5.order_send(request)
@@ -696,6 +753,115 @@ class MT5Connector(BaseConnector):
         return f"{prefix}{order.client_order_id}"[:31]
 
     @staticmethod
+    def _order_from_comment(broker_account, comment: str):
+        """Resolve a comment only when its client-order fragment is unambiguous."""
+        if comment.startswith("ezc:"):
+            intent = "exit"
+            fragment = comment[4:]
+        elif comment.startswith("ez:"):
+            intent = "entry"
+            fragment = comment[3:]
+        else:
+            return None
+        if not fragment:
+            return None
+        candidates = list(
+            Order.objects.filter(
+                broker_account=broker_account,
+                intent=intent,
+                client_order_id__startswith=fragment,
+            )
+            .select_related("bot")
+            .order_by("-created_at")[:2]
+        )
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _resolve_broker_position_ownership(self, broker_account, raw_position):
+        """Resolve ownership from durable tickets, comments, and per-bot magic.
+
+        Symbols are intentionally excluded: two bots or a manual position can
+        trade the same instrument and symbol matching is not proof of ownership.
+        """
+        ticket = _coerce_ticket(
+            getattr(raw_position, "ticket", None)
+            or getattr(raw_position, "identifier", None)
+        )
+        magic = _coerce_ticket(getattr(raw_position, "magic", None))
+        comment = str(getattr(raw_position, "comment", "") or "")
+
+        existing = None
+        ticket_order = None
+        ticket_evidence_order = None
+        if ticket is not None:
+            existing = (
+                BrokerPosition.objects.filter(
+                    broker_account=broker_account,
+                    broker_position_ticket=ticket,
+                )
+                .select_related("bot", "originating_order__bot")
+                .first()
+            )
+            # An entry order is the originating order. An exit sharing the same
+            # position ticket may still identify the bot but must not replace it.
+            ticket_order = (
+                Order.objects.filter(
+                    broker_account=broker_account,
+                    broker_position_ticket=ticket,
+                    intent="entry",
+                )
+                .select_related("bot")
+                .order_by("-created_at")
+                .first()
+            )
+            ticket_evidence_order = ticket_order or (
+                Order.objects.filter(
+                    broker_account=broker_account,
+                    broker_position_ticket=ticket,
+                )
+                .select_related("bot")
+                .order_by("-created_at")
+                .first()
+            )
+
+        comment_order = self._order_from_comment(broker_account, comment)
+        evidence_order = ticket_evidence_order or comment_order
+        originating_order = None
+        if ticket_order is not None and ticket_order.is_entry:
+            originating_order = ticket_order
+        elif comment_order is not None and comment_order.is_entry:
+            originating_order = comment_order
+        elif existing is not None and existing.originating_order_id:
+            originating_order = existing.originating_order
+
+        bot = originating_order.bot if originating_order is not None else None
+        if bot is None and evidence_order is not None:
+            bot = evidence_order.bot
+        if bot is None and existing is not None and existing.ownership == "ez_trade":
+            bot = existing.bot
+        if bot is None and magic is not None:
+            bot = (
+                broker_account.bots.filter(mt5_magic_number=magic)
+                .order_by("pk")
+                .first()
+            )
+
+        has_internal_ticket = bool(
+            ticket_evidence_order or (existing and existing.ownership == "ez_trade")
+        )
+        has_per_bot_magic = bool(bot is not None and magic == _bot_magic_number(bot))
+        has_legacy_signature = bool(
+            magic == _legacy_magic_number()
+            and comment.startswith(("ez:", "ezc:"))
+        )
+        if has_internal_ticket or has_per_bot_magic or has_legacy_signature:
+            ownership = "ez_trade"
+        else:
+            ownership = "manual" if not comment and not magic else "external"
+            bot = None
+            originating_order = None
+        return originating_order, bot, ownership
+
+    @staticmethod
     def _filling_mode(symbol_info):
         configured = getattr(symbol_info, "filling_mode", None)
         valid = {
@@ -725,6 +891,7 @@ class MT5Connector(BaseConnector):
         *,
         broker_account=None,
         ownership: str | None = None,
+        bot=None,
     ):
         ticket = _coerce_ticket(
             getattr(raw_position, "ticket", None) or getattr(raw_position, "identifier", None)
@@ -736,8 +903,30 @@ class MT5Connector(BaseConnector):
             raise ConnectorError("Broker account is required to synchronize a position")
         magic = _coerce_ticket(getattr(raw_position, "magic", None))
         comment = str(getattr(raw_position, "comment", "") or "")
-        configured_magic = int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813))
-        inferred = "ez_trade" if magic == configured_magic and comment.startswith(("ez:", "ezc:")) else "external"
+        existing = BrokerPosition.objects.filter(
+            broker_account=account,
+            broker_position_ticket=ticket,
+        ).first()
+        if ownership is None:
+            resolved_order, resolved_bot, ownership = self._resolve_broker_position_ownership(
+                account,
+                raw_position,
+            )
+            if order is None:
+                order = resolved_order
+            if bot is None:
+                bot = resolved_bot
+        effective_ownership = ownership or "external"
+        linked_bot = order.bot if order is not None else bot
+        originating_order = order if order is not None and order.is_entry else None
+        if effective_ownership == "ez_trade" and existing is not None:
+            # A partial close is synchronized with its exit order. Preserve the
+            # original entry link instead of replacing it with that exit order.
+            linked_bot = linked_bot or existing.bot
+            originating_order = originating_order or existing.originating_order
+        if effective_ownership != "ez_trade":
+            linked_bot = None
+            originating_order = None
         side = (
             "buy"
             if getattr(raw_position, "type", None) == getattr(mt5, "POSITION_TYPE_BUY", 0)
@@ -751,9 +940,9 @@ class MT5Connector(BaseConnector):
             broker_position_ticket=ticket,
             defaults={
                 "owner": account.owner,
-                "bot": order.bot if order is not None and (ownership or inferred) == "ez_trade" else None,
-                "originating_order": order if order is not None and (ownership or inferred) == "ez_trade" else None,
-                "ownership": ownership or inferred,
+                "bot": linked_bot,
+                "originating_order": originating_order,
+                "ownership": effective_ownership,
                 "symbol": str(getattr(raw_position, "symbol", order.symbol if order else "")),
                 "side": side,
                 "volume": Decimal(str(getattr(raw_position, "volume", 0) or 0)),
@@ -775,7 +964,6 @@ class MT5Connector(BaseConnector):
 
     def _sync_broker_exposure_snapshot(self, broker_account, raw_positions) -> None:
         """Persist every position returned by the just-read broker snapshot."""
-        configured_magic = int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813))
         for raw_position in raw_positions:
             ticket = _coerce_ticket(
                 getattr(raw_position, "ticket", None)
@@ -783,33 +971,16 @@ class MT5Connector(BaseConnector):
             )
             if ticket is None:
                 raise ConnectorError("MT5 returned a position without a ticket")
-            order = (
-                Order.objects.filter(
-                    broker_account=broker_account,
-                    broker_position_ticket=ticket,
-                )
-                .order_by("-created_at")
-                .first()
-            )
-            magic = int(getattr(raw_position, "magic", 0) or 0)
-            comment = str(getattr(raw_position, "comment", "") or "")
-            is_owned = bool(
-                order
-                or (
-                    magic == configured_magic
-                    and comment.startswith(("ez:", "ezc:"))
-                )
-            )
-            ownership = (
-                "ez_trade"
-                if is_owned
-                else ("manual" if not comment else "external")
+            order, bot, ownership = self._resolve_broker_position_ownership(
+                broker_account,
+                raw_position,
             )
             self._sync_broker_position(
                 order,
                 raw_position,
                 broker_account=broker_account,
                 ownership=ownership,
+                bot=bot,
             )
 
     def _matching_broker_records(self, order: Order):
@@ -1021,7 +1192,7 @@ class MT5Connector(BaseConnector):
                 "type": close_type,
                 "position": int(ticket),
                 "deviation": int(getattr(settings, "MT5_CLOSE_DEVIATION_POINTS", 20)),
-                "magic": int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813)),
+                "magic": _order_magic_number(order),
                 "comment": self._order_comment(order, closing=True),
                 "type_filling": self._filling_mode(sinfo),
             }
@@ -1235,7 +1406,19 @@ class MT5Connector(BaseConnector):
             order.save(update_fields=["requested_price"])
             mark_order_timestamp(order, "risk_validation_completed_at")
         except RiskRejected as exc:
-            msg = f"Order {order.id} risk rejected: {exc}"
+            try:
+                rejection = exc.as_dict()
+            except Exception:
+                rejection = {
+                    "code": getattr(exc, "code", "RISK_REJECTED"),
+                    "message": str(exc),
+                    "context": getattr(exc, "context", {}) or {},
+                }
+            rejection = _store_risk_rejection(order, rejection)
+            msg = (
+                f"Order {order.id} risk rejected "
+                f"[{rejection.get('code', 'RISK_REJECTED')}]: {rejection.get('message', str(exc))}"
+            )
             update_order_status(order, "rejected", error_msg=msg)
             log_journal_event(
                 "risk.rejection",
@@ -1244,8 +1427,8 @@ class MT5Connector(BaseConnector):
                 bot=order.bot,
                 broker_account=order.broker_account,
                 symbol=order.symbol,
-                message=str(exc),
-                context={"reason": str(exc)},
+                message=rejection.get("message", str(exc)),
+                context=rejection,
             )
             raise ConnectorError(msg) from exc
 
@@ -1289,6 +1472,7 @@ class MT5Connector(BaseConnector):
         # Allow close orders to proceed even if spread is wide to avoid being trapped.
         if not is_close_order and asset_max_spread > 0 and spread > asset_max_spread:
             msg = f"Order {order.id} rejected: spread {spread} exceeds limit {asset_max_spread} for {order.symbol}"
+            _clear_risk_reservation(order)
             update_order_status(order, "error", error_msg=msg)
             raise ConnectorError(msg)
 
@@ -1297,6 +1481,7 @@ class MT5Connector(BaseConnector):
         max_lot = runtime_cfg.max_order_lot
         if max_lot > 0 and qty_dec > max_lot:
             msg = f"Order {order.id} rejected: qty {qty_dec} exceeds max lot {max_lot}"
+            _clear_risk_reservation(order)
             update_order_status(order, "error", error_msg=msg)
             raise ConnectorError(msg)
 
@@ -1324,6 +1509,7 @@ class MT5Connector(BaseConnector):
                     f"Order {order.id} rejected: notional {effective_notional} below minimum "
                     f"{asset_min_notional} (contract_size={contract_size})"
                 )
+                _clear_risk_reservation(order)
                 update_order_status(order, "error", error_msg=msg)
                 raise ConnectorError(msg)
             max_notional = runtime_cfg.max_order_notional
@@ -1332,6 +1518,7 @@ class MT5Connector(BaseConnector):
                     f"Order {order.id} rejected: notional {effective_notional} exceeds max limit {max_notional} "
                     f"(contract_size={contract_size})"
                 )
+                _clear_risk_reservation(order)
                 update_order_status(order, "error", error_msg=msg)
                 raise ConnectorError(msg)
 
@@ -1345,10 +1532,10 @@ class MT5Connector(BaseConnector):
             "volume": volume,
             "type": order_type,
             # The authoritative risk pass resolves the bot's unit-aware,
-            # symbol-specific slippage setting to raw MT5 points. This also
-            # falls back to RiskPolicy.deviation_points for non-scalper orders.
+            # symbol-specific slippage setting to raw MT5 points and uses the
+            # bot's allowed-deviation setting as the general fallback.
             "deviation": int(risk_result.deviation_points),
-            "magic": int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813)),
+            "magic": _order_magic_number(order),
             "comment": self._order_comment(order),
             "type_filling": self._filling_mode(sinfo),
         }
@@ -1362,6 +1549,7 @@ class MT5Connector(BaseConnector):
         
         if order.sl is None or order.tp is None:
             msg = f"Order {order.id} rejected: SL or TP missing (risk management enforced)"
+            _clear_risk_reservation(order)
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)
 
@@ -1405,6 +1593,7 @@ class MT5Connector(BaseConnector):
         check = mt5.order_check(req)
         if check is None:
             msg = f"MT5 order_check unavailable: {mt5.last_error()}"
+            _clear_risk_reservation(order)
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)
         check_retcode = getattr(check, "retcode", 0)
@@ -1414,6 +1603,7 @@ class MT5Connector(BaseConnector):
             order.mt5_retcode_description = str(getattr(check, "comment", "") or "")
             order.broker_response = _safe_mt5_metadata(check)
             order.save(update_fields=["mt5_retcode", "mt5_retcode_description", "broker_response"])
+            _clear_risk_reservation(order)
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)
 
@@ -1679,6 +1869,7 @@ class MT5Connector(BaseConnector):
             ]
         )
         update_order_status(order, "rejected", error_msg=msg)
+        _clear_risk_reservation(order)
         log_journal_event(
             "order.dispatch_error",
             severity="error",
@@ -1712,6 +1903,7 @@ class MT5Connector(BaseConnector):
             )
             if order.status == "new" and not has_submission:
                 update_order_status(order, "canceled")
+                _clear_risk_reservation(order)
                 return
 
             self._login_from_order(order)
@@ -1749,7 +1941,7 @@ class MT5Connector(BaseConnector):
                 "action": mt5.TRADE_ACTION_REMOVE,
                 "order": int(order.broker_order_ticket),
                 "symbol": order.symbol,
-                "magic": int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813)),
+                "magic": _order_magic_number(order),
                 "comment": self._order_comment(order)[:31],
             }
             result = mt5.order_send(request)
@@ -1784,3 +1976,4 @@ class MT5Connector(BaseConnector):
                 ]
             )
             update_order_status(order, "canceled")
+            _clear_risk_reservation(order)

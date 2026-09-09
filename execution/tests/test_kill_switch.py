@@ -102,7 +102,7 @@ class KillSwitchRiskDayTests(TestCase):
     @patch("execution.tasks._queue_or_dispatch_order")
     @patch("execution.services.orchestrator.create_close_order_for_position")
     @patch("execution.tasks.MT5Connector")
-    def test_flattening_requires_explicit_policy_opt_in(
+    def test_flattening_requires_explicit_bot_opt_in_and_durable_ownership(
         self,
         connector_type,
         create_close,
@@ -121,21 +121,92 @@ class KillSwitchRiskDayTests(TestCase):
             volume="0.01",
             open_price="1.10",
         )
+        other_bot = Bot(
+            owner=self.user,
+            name="Non-flattening bot",
+            bot_id="KILLOTHER1",
+            broker_account=self.account,
+            asset=Asset.objects.create(symbol="KILLRISKOTHER"),
+            status="active",
+            close_positions_on_emergency_stop=False,
+        )
+        Bot.objects.bulk_create([other_bot])
+        BrokerPosition.objects.create(
+            broker_account=self.account,
+            bot=other_bot,
+            broker_position_ticket=877,
+            ownership="ez_trade",
+            symbol="EURUSD",
+            side="buy",
+            volume="0.01",
+            open_price="1.10",
+        )
+        BrokerPosition.objects.create(
+            broker_account=self.account,
+            broker_position_ticket=878,
+            ownership="ez_trade",
+            symbol="EURUSD",
+            side="buy",
+            volume="0.01",
+            open_price="1.10",
+        )
+        BrokerPosition.objects.create(
+            broker_account=self.account,
+            bot=self.bot,
+            broker_position_ticket=879,
+            ownership="manual",
+            symbol="EURUSD",
+            side="buy",
+            volume="0.01",
+            open_price="1.10",
+        )
         self.policy.emergency_stop = True
-        self.policy.emergency_close_owned_positions = False
-        self.policy.save(update_fields=["emergency_stop", "emergency_close_owned_positions"])
+        self.policy.save(update_fields=["emergency_stop"])
 
         kill_switch_monitor_task.run()
         create_close.assert_not_called()
 
-        self.policy.emergency_close_owned_positions = True
-        self.policy.save(update_fields=["emergency_close_owned_positions"])
+        self.bot.close_positions_on_emergency_stop = True
+        self.bot.save(update_fields=["close_positions_on_emergency_stop"])
         close_order = object()
         create_close.return_value = (close_order, True)
         kill_switch_monitor_task.run()
 
         create_close.assert_called_once()
+        self.assertEqual(create_close.call_args.args[0].broker_position_ticket, 876)
         queue_order.assert_called_once_with(close_order, emergency=True)
+
+    @patch("execution.tasks.MT5Connector")
+    def test_zero_capital_limits_disable_automatic_triggers(self, connector_type):
+        connector = connector_type.return_value
+        connector.account_info_for_account.return_value = self.account_info
+        connector.history_deals_for_account.return_value = (
+            SimpleNamespace(
+                profit=-150,
+                commission=0,
+                swap=0,
+                fee=0,
+                entry=1,
+                position_id=99,
+            ),
+        )
+        self.policy.max_daily_loss_pct = 0
+        self.policy.max_account_drawdown_pct = 0
+        self.policy.equity_high_water = 10000
+        self.policy.save(
+            update_fields=[
+                "max_daily_loss_pct",
+                "max_account_drawdown_pct",
+                "equity_high_water",
+            ]
+        )
+
+        result = kill_switch_monitor_task.run()
+
+        self.policy.refresh_from_db()
+        self.assertTrue(self.policy.entries_enabled)
+        self.assertFalse(self.policy.emergency_stop)
+        self.assertEqual(result["triggered"], [])
 
 
 class KillSwitchCancellationTests(TestCase):

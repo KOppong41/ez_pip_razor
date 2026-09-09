@@ -447,6 +447,7 @@ class BotAdmin(admin.ModelAdmin):
         "engine_mode",
         "broker_account",
         "default_timeframe",
+        "position_sizing_mode",
         "default_qty",
         "created_at",
         "enabled_strategies",
@@ -468,7 +469,15 @@ class BotAdmin(admin.ModelAdmin):
             "fields": ("name", "owner", "status", "auto_trade", "engine_mode", "enabled_strategies"),
         }),
         ("Routing & Sizing", {
-            "fields": ("asset", "default_timeframe", "allowed_timeframes", "default_qty"),
+            "fields": (
+                "asset",
+                "default_timeframe",
+                "allowed_timeframes",
+                "position_sizing_mode",
+                "default_qty",
+                "risk_per_trade_pct",
+                "max_bot_lot_size",
+            ),
         }),
         ("Risk Limits", {
             "fields": (
@@ -476,6 +485,10 @@ class BotAdmin(admin.ModelAdmin):
                 "risk_max_concurrent_positions",
                 "max_trades_per_day",
                 "trade_interval_minutes",
+                "max_spread_points",
+                "allowed_deviation_points",
+                "allow_live_account_execution",
+                "close_positions_on_emergency_stop",
                 "allow_opposite_scalp",
                 "allocation_amount",
                 "allocation_profit_pct",
@@ -525,13 +538,13 @@ class BotAdmin(admin.ModelAdmin):
             "classes": ("collapse",),
         }),
         ("Identifiers", {
-            "fields": ("bot_id",),
+            "fields": ("bot_id", "mt5_magic_number"),
             "classes": ("collapse",),
         }),
     )
     fieldsets = base_fieldsets
 
-    readonly_fields = ("created_at", "owner", "bot_id")
+    readonly_fields = ("created_at", "owner", "bot_id", "mt5_magic_number")
 
     # --------- Custom URLs for details / controls / duplicate ----------
 

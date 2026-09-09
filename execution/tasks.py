@@ -2218,9 +2218,16 @@ def kill_switch_monitor_task(self):
         reason = None
         if policy.emergency_stop:
             reason = "explicit_emergency_stop"
-        elif daily_loss is not None and daily_loss >= policy.max_daily_loss_pct:
+        elif (
+            policy.max_daily_loss_pct > 0
+            and daily_loss is not None
+            and daily_loss >= policy.max_daily_loss_pct
+        ):
             reason = "maximum_daily_loss"
-        elif drawdown >= policy.max_account_drawdown_pct:
+        elif (
+            policy.max_account_drawdown_pct > 0
+            and drawdown >= policy.max_account_drawdown_pct
+        ):
             reason = "maximum_account_drawdown"
         if reason is None:
             continue
@@ -2245,25 +2252,30 @@ def kill_switch_monitor_task(self):
         canceled_local.extend(cancellation["canceled_local_order_ids"])
         broker_cancels.extend(cancellation["broker_cancel_order_ids"])
         cancel_failures.extend(cancellation["cancel_failures"])
-        if policy.emergency_close_owned_positions:
-            for position in BrokerPosition.objects.filter(
-                broker_account=account,
-                ownership="ez_trade",
-                status="open",
-            ):
-                try:
-                    order, _ = create_close_order_for_position(position, account)
-                    _queue_or_dispatch_order(order, emergency=True)
-                    closed.append(position.broker_position_ticket)
-                except Exception as exc:
-                    flatten_failures.append(
-                        {
-                            "broker_position_ticket": position.broker_position_ticket,
-                            "error": str(exc),
-                        }
-                    )
-                    task_failures_total.labels(task="kill_switch_monitor_task").inc()
-                    logger.exception("Kill switch could not close owned ticket=%s", position.broker_position_ticket)
+        # Flattening is a bot-level choice. Durable bot ownership is required;
+        # manual/external/unassigned legacy positions are never inferred by symbol.
+        for position in BrokerPosition.objects.filter(
+            broker_account=account,
+            bot__isnull=False,
+            bot__broker_account=account,
+            bot__close_positions_on_emergency_stop=True,
+            ownership="ez_trade",
+            status="open",
+        ).select_related("bot"):
+            try:
+                order, _ = create_close_order_for_position(position, account)
+                _queue_or_dispatch_order(order, emergency=True)
+                closed.append(position.broker_position_ticket)
+            except Exception as exc:
+                flatten_failures.append(
+                    {
+                        "broker_position_ticket": position.broker_position_ticket,
+                        "bot_id": position.bot_id,
+                        "error": str(exc),
+                    }
+                )
+                task_failures_total.labels(task="kill_switch_monitor_task").inc()
+                logger.exception("Kill switch could not close owned ticket=%s", position.broker_position_ticket)
     result = {
         "triggered": triggered,
         "canceled_local_order_ids": canceled_local,
@@ -2388,27 +2400,19 @@ def reconcile_broker_positions_task(self):
                 continue
             ticket = int(ticket)
             broker_tickets.add(ticket)
-            order = Order.objects.filter(
-                broker_account=acct,
-                broker_position_ticket=ticket,
-            ).order_by("-created_at").first()
-            magic = int(getattr(pos, "magic", 0) or 0)
-            comment = str(getattr(pos, "comment", "") or "")
-            is_owned = bool(
-                order
-                or (
-                    magic == int(getattr(settings, "MT5_MAGIC_NUMBER", 20250813))
-                    and comment.startswith(("ez:", "ezc:"))
-                )
+            order, bot, ownership = connector._resolve_broker_position_ownership(
+                acct,
+                pos,
             )
             try:
                 connector._sync_broker_position(
                     order,
                     pos,
                     broker_account=acct,
-                    ownership="ez_trade" if is_owned else ("manual" if not comment else "external"),
+                    ownership=ownership,
+                    bot=bot,
                 )
-                target = imported_owned if is_owned else imported_external
+                target = imported_owned if ownership == "ez_trade" else imported_external
                 target.append(ticket)
             except Exception as e:
                 errors.append((acct.id, ticket, str(e)))

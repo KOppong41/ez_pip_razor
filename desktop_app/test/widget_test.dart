@@ -30,6 +30,16 @@ class FakeApiClient extends ApiClient {
           'engine_mode': 'scalper',
           'default_timeframe': '1m',
           'default_qty': '0.01',
+          'position_sizing_mode': 'risk',
+          'risk_per_trade_pct': '0.5',
+          'max_bot_lot_size': '0.04',
+          'risk_max_concurrent_positions': 2,
+          'max_trades_per_day': 8,
+          'trade_interval_minutes': 10,
+          'max_spread_points': '25',
+          'allowed_deviation_points': 6,
+          'allow_live_account_execution': false,
+          'close_positions_on_emergency_stop': false,
           'auto_trade': true,
           'enabled_strategies': ['momentum_ignition'],
           'trading_profile': 'scalper',
@@ -54,6 +64,12 @@ class FakeApiClient extends ApiClient {
             'name': 'Primary MT5',
             'mt5_login': '100001',
             'is_verified': true,
+            'risk_limits': {
+              'max_order_lot_size': '0.05',
+              'max_total_open_positions': 3,
+              'max_positions_per_symbol': 2,
+              'max_aggregate_open_lots': '0.10',
+            },
           },
         ],
         'engine_modes': [
@@ -100,18 +116,13 @@ class FakeApiClient extends ApiClient {
     }
     if (path == '/api/personal/risk/') {
       return {
-        'risk_per_trade_pct': '0.5',
         'max_daily_loss_pct': '1.5',
         'max_account_drawdown_pct': '5.0',
-        'max_positions': 1,
+        'max_total_open_positions': 3,
         'max_positions_per_symbol': 1,
-        'max_entry_trades_per_day': 3,
-        'max_lot': '0.05',
-        'max_spread_points': '30',
-        'deviation_points': 8,
+        'max_order_lot_size': '0.05',
+        'max_aggregate_open_lots': '0.10',
         'stop_after_daily_profit_pct': '0',
-        'emergency_close_owned_positions': false,
-        'live_trading_confirmed': false,
       };
     }
     if (path == '/api/personal/backtesting/') {
@@ -427,6 +438,78 @@ void main() {
 
     expect(find.text('Edit bot configuration'), findsOneWidget);
     expect(find.text('Save changes'), findsOneWidget);
+    await tester.drag(
+      find.byType(SingleChildScrollView).last,
+      const Offset(0, -1000),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Account hard limits'), findsOneWidget);
+    expect(find.text('Risk per trade'), findsOneWidget);
+    expect(find.text('Bot maximum lot size'), findsOneWidget);
+    expect(find.text('Bot maximum open positions'), findsOneWidget);
+    expect(
+      find.text('Allow live-account execution for this bot'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('bot editor changes sizing fields without mixing semantics', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: BotsPage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit bot'));
+    await tester.pumpAndSettle();
+    final sizingDropdown = find
+        .byWidgetPredicate(
+          (widget) => widget is DropdownButtonFormField<String>,
+        )
+        .last;
+    await tester.ensureVisible(sizingDropdown);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Risk per trade'), findsOneWidget);
+    expect(find.text('Fixed lot size'), findsNothing);
+    await tester.tap(sizingDropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Fixed lot size').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Fixed lot size'), findsAtLeastNWidgets(1));
+    expect(find.text('Risk per trade'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('risk page contains only account capital and exposure limits', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: RiskPage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Capital protection'), findsOneWidget);
+    expect(find.text('Hard aggregate exposure'), findsOneWidget);
+    expect(find.text('Maximum lot size per order'), findsOneWidget);
+    expect(find.text('Total bot-owned positions'), findsOneWidget);
+    expect(find.text('Aggregate open volume'), findsOneWidget);
+    expect(find.text('Risk per trade'), findsNothing);
+    expect(find.text('Execution quality'), findsNothing);
+    expect(find.text('Confirm live-account trading'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 

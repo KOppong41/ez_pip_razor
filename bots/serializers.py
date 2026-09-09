@@ -49,6 +49,9 @@ class BotSerializer(serializers.ModelSerializer):
             "default_timeframe",
             "allowed_timeframes",
             "default_qty",
+            "position_sizing_mode",
+            "risk_per_trade_pct",
+            "max_bot_lot_size",
             "default_tp_pips",
             "default_sl_pips",
             "auto_trade",
@@ -57,6 +60,10 @@ class BotSerializer(serializers.ModelSerializer):
             "risk_max_concurrent_positions",
             "max_trades_per_day",
             "trade_interval_minutes",
+            "max_spread_points",
+            "allowed_deviation_points",
+            "allow_live_account_execution",
+            "close_positions_on_emergency_stop",
             "allocation_amount",
             "allocation_profit_pct",
             "allocation_loss_pct",
@@ -108,10 +115,33 @@ class BotSerializer(serializers.ModelSerializer):
             "login": account.mt5_login,
             "server": account.mt5_server,
             "is_verified": account.is_verified,
+            "risk_limits": self._account_risk_limits(account),
+        }
+
+    @staticmethod
+    def _account_risk_limits(account):
+        try:
+            policy = account.risk_policy
+        except Exception:
+            return None
+        return {
+            "max_order_lot_size": policy.max_order_lot_size,
+            "max_total_open_positions": policy.max_total_open_positions,
+            "max_positions_per_symbol": policy.max_positions_per_symbol,
+            "max_aggregate_open_lots": policy.max_aggregate_open_lots,
         }
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+
+        def effective_value(field_name):
+            """Use the value DRF will actually persist, including model defaults."""
+            if field_name in attrs:
+                return attrs[field_name]
+            if self.instance is not None:
+                return getattr(self.instance, field_name)
+            return Bot._meta.get_field(field_name).get_default()
+
         auto_trade = attrs.get(
             "auto_trade",
             getattr(self.instance, "auto_trade", True),
@@ -128,6 +158,33 @@ class BotSerializer(serializers.ModelSerializer):
                     )
                 }
             )
+        account = attrs.get("broker_account", getattr(self.instance, "broker_account", None))
+        sizing_mode = effective_value("position_sizing_mode")
+        default_qty = effective_value("default_qty")
+        bot_lot = effective_value("max_bot_lot_size")
+        bot_positions = effective_value("risk_max_concurrent_positions")
+        risk_pct = effective_value("risk_per_trade_pct")
+        errors = {}
+        if sizing_mode == "risk" and (risk_pct is None or risk_pct <= 0):
+            errors["risk_per_trade_pct"] = "Risk per trade must be greater than 0 in risk-based mode."
+        if sizing_mode == "fixed" and default_qty is not None and bot_lot is not None and default_qty > bot_lot:
+            errors["default_qty"] = "Default lot size cannot exceed Maximum bot lot size."
+        if account:
+            try:
+                policy = account.risk_policy
+            except Exception:
+                policy = None
+            if policy and bot_lot is not None and policy.max_order_lot_size > 0 and bot_lot > policy.max_order_lot_size:
+                errors["max_bot_lot_size"] = (
+                    f"Cannot exceed the account hard limit of {policy.max_order_lot_size} lots."
+                )
+            if policy and bot_positions is not None and policy.max_total_open_positions > 0 and bot_positions > policy.max_total_open_positions:
+                errors["risk_max_concurrent_positions"] = (
+                    "Cannot exceed the account hard limit of "
+                    f"{policy.max_total_open_positions} positions."
+                )
+        if errors:
+            raise serializers.ValidationError(errors)
         return attrs
 
     @staticmethod
