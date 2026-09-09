@@ -36,12 +36,23 @@ def run_range_reversion(candles: List[Candle], cfg: RangeReversionConfig | None 
 
     upper_band = range_high - width * cfg.band_factor
     lower_band = range_low + width * cfg.band_factor
+    width_pct = width / range_low
+    range_quality = min(
+        Decimal("1"),
+        width_pct / (cfg.min_range_pct * Decimal("3")),
+    )
 
     # Fade extremes back to mid
     if last_close >= upper_band:
         sl = range_high
         risk = sl - last_close
         tp = last_close - risk * cfg.rr if risk > 0 else None
+        edge_span = width * cfg.band_factor
+        proximity = min(
+            Decimal("1"),
+            max(Decimal("0"), (last_close - upper_band) / edge_span),
+        ) if edge_span > 0 else Decimal("0")
+        quality = min(Decimal("1"), range_quality * Decimal("0.6") + proximity * Decimal("0.4"))
         return EngineDecision(
             action="open",
             direction="sell",
@@ -49,13 +60,20 @@ def run_range_reversion(candles: List[Candle], cfg: RangeReversionConfig | None 
             tp=tp,
             reason="range_reversion_upper",
             strategy="range_reversion",
-            score=float(width),
+            score=float(quality),
+            metadata={"confidence": float(quality), "range_width_pct": float(width_pct)},
         )
 
     if last_close <= lower_band:
         sl = range_low
         risk = last_close - sl
         tp = last_close + risk * cfg.rr if risk > 0 else None
+        edge_span = width * cfg.band_factor
+        proximity = min(
+            Decimal("1"),
+            max(Decimal("0"), (lower_band - last_close) / edge_span),
+        ) if edge_span > 0 else Decimal("0")
+        quality = min(Decimal("1"), range_quality * Decimal("0.6") + proximity * Decimal("0.4"))
         return EngineDecision(
             action="open",
             direction="buy",
@@ -63,7 +81,8 @@ def run_range_reversion(candles: List[Candle], cfg: RangeReversionConfig | None 
             tp=tp,
             reason="range_reversion_lower",
             strategy="range_reversion",
-            score=float(width),
+            score=float(quality),
+            metadata={"confidence": float(quality), "range_width_pct": float(width_pct)},
         )
 
     return EngineDecision(action="skip", reason="range_reversion_mid_range", strategy="range_reversion")

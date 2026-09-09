@@ -6,6 +6,7 @@ from decimal import Decimal
 from datetime import datetime
 import logging
 from execution.services.journal import log_journal_event
+from execution.services.protection_policy import validate_order_protection
 from execution.services.market_hours import get_market_status
 from dataclasses import dataclass
 from functools import lru_cache
@@ -77,6 +78,7 @@ class BrokerSymbolConstraints:
     stops_level_points: Decimal | None = None
     freeze_level_points: Decimal | None = None
     max_deviation: Decimal | None = None
+    digits: int | None = None
 
 
 ENTRY_CONSTRAINT_FIELDS = (
@@ -185,6 +187,7 @@ def _get_broker_constraints_cached(
             stops_level_points=_optional_decimal(stops_level),
             freeze_level_points=_optional_decimal(freeze_level),
             max_deviation=Decimal("20"),  # keep aligned with mt5 connector default
+            digits=getattr(sinfo, "digits", None),
         )
 
     # Placeholder for other connectors (ctrader/exness_web) when their constraint APIs are added.
@@ -224,10 +227,11 @@ def validate_order_conditions(order: Order) -> tuple:
         if market_status and not market_status.is_open:
             return False, f"market_closed:{market_status.reason}"
 
-    # Enforce SL/TP presence before sending live (required for opens)
+    # Apply the same semantic protection policy used by order creation and MT5.
     if order.broker_account.broker != "paper" and not is_close_order:
-        if order.sl is None or order.tp is None:
-            return False, "missing_sl_tp"
+        protection_ok, reason = validate_order_protection(order)
+        if not protection_ok:
+            return False, reason
 
     # Spread check would require market data; placeholder for future integration
     return True, "ok"

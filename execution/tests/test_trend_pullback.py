@@ -50,6 +50,8 @@ class TrendPullbackFractalTests(SimpleTestCase):
 
         self.assertEqual(result.action, "open")
         self.assertEqual(result.direction, "buy")
+        self.assertGreaterEqual(result.score, 0.0)
+        self.assertLessEqual(result.score, 1.0)
 
     @patch("execution.services.strategies.trend_pullback._atr", return_value=Decimal("1"))
     @patch("execution.services.strategies.trend_pullback._ema")

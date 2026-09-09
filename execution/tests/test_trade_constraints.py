@@ -44,6 +44,30 @@ class TradeConstraintTest(SimpleTestCase):
             Decimal("6.0"),
         )
 
+    def test_asset_preset_distance_units_are_symbol_safe(self):
+        self.assertEqual(
+            distance_to_price(Decimal("10"), "pips", Decimal("0.001"), digits=3),
+            Decimal("0.100"),
+        )
+        self.assertEqual(
+            distance_to_price(
+                Decimal("0.10"), "percent", Decimal("0.01"), market_price=Decimal("3000")
+            ),
+            Decimal("3.00"),
+        )
+        self.assertEqual(
+            distance_to_price(
+                Decimal("0.12"), "percent", Decimal("0.1"), market_price=Decimal("20000")
+            ),
+            Decimal("24.00"),
+        )
+        self.assertEqual(
+            distance_to_price(
+                Decimal("0.35"), "percent", Decimal("0.01"), market_price=Decimal("100000")
+            ),
+            Decimal("350.00"),
+        )
+
     def test_snap_quantity_floors_to_step_and_max(self):
         constraints = LotConstraints(min_lot=Decimal("0.05"), max_lot=Decimal("1.0"), lot_step=Decimal("0.01"))
         self.assertEqual(snap_quantity(Decimal("0.078"), constraints), Decimal("0.07"))

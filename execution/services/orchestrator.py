@@ -6,6 +6,11 @@ from django.db.models import Q
 from django.utils import timezone
 from execution.models import BrokerPosition, Decision, Order, BrokerAccount, Bot
 from execution.services.journal import log_journal_event
+from execution.services.protection_policy import (
+    decision_exit_mode,
+    validate_order_protection,
+    validate_protection,
+)
 import hashlib
 from core.metrics import orders_created_total, order_status_total
 from decimal import Decimal
@@ -93,10 +98,6 @@ def make_close_order_id(position, broker_account: BrokerAccount, *, stage: str =
     prefix = "close|" if stage == "full" else f"close:{stage}|"
     return prefix + hashlib.sha1(base.encode()).hexdigest()[:20]
 
-
-def _allows_managed_take_profit(decision: Decision) -> bool:
-    scalper = (decision.params or {}).get("scalper")
-    return isinstance(scalper, dict) and scalper.get("exit_mode") in {"trail_only", "hybrid"}
 
 @dataclass
 class OrderSpec:
@@ -343,9 +344,15 @@ def create_order_from_decision(
     params = decision.params or {}
     sl = params.get("sl")
     tp = params.get("tp")
-    managed_take_profit = _allows_managed_take_profit(decision)
-    if sl is None or (tp is None and not managed_take_profit):
-        raise ValueError("Automated entry decisions require SL and either TP or a managed exit policy")
+    intent = "entry" if decision.action == "open" else "exit"
+    protection_ok, protection_reason = validate_protection(
+        intent=intent,
+        sl=sl,
+        tp=tp,
+        exit_mode=decision_exit_mode(decision),
+    )
+    if not protection_ok:
+        raise ValueError(f"Automated order protection invalid: {protection_reason}")
 
     # Base defaults for a new order
     defaults = {
@@ -356,7 +363,7 @@ def create_order_from_decision(
         "side": side,
         "qty": qty,
         "remaining_qty": qty_decimal,
-        "intent": "entry" if decision.action == "open" else "exit",
+        "intent": intent,
         "status": "new",
         "owner_id": owner_id,
     }
@@ -384,8 +391,9 @@ def create_order_from_decision(
         order.save(update_fields=dirty_fields)
     
     # Enforce broker-side protection before a new live entry can exist.
-    if not order.sl or (not order.tp and not managed_take_profit):
-        raise ValueError(f"Order {order.id} missing required entry protection")
+    protection_ok, protection_reason = validate_order_protection(order)
+    if not protection_ok:
+        raise ValueError(f"Order {order.id} protection invalid: {protection_reason}")
 
     if created:
         orders_created_total.labels(

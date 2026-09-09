@@ -36,7 +36,9 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             metadata={"reason": "insufficient_candles", "needed": cfg.lookback + 2, "got": len(candles)},
         )
 
-    range_high, range_low = _range_levels(candles[:-1], cfg.lookback)  # exclude last bar for breakout detection
+    # The previous candle is the breakout candidate, so the reference range
+    # must end before it (the final candle is the retest candidate).
+    range_high, range_low = _range_levels(candles[:-2], cfg.lookback)
     range_width = range_high - range_low
     if range_width <= range_low * cfg.min_range_pct:
         return EngineDecision(
@@ -74,6 +76,12 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
     if not broke_up and not broke_down:
         return EngineDecision(action="skip", reason="breakout_retest_no_break", strategy="breakout_retest")
 
+    range_threshold = range_low * cfg.min_range_pct
+    range_confidence = min(
+        Decimal("1"),
+        range_width / range_threshold if range_threshold > 0 else Decimal("0"),
+    )
+
     if broke_up:
         # Retest current bar into old range high
         near_level = abs(last["low"] - range_high) <= range_high * cfg.retest_tolerance
@@ -89,9 +97,9 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             tp=tp,
             reason="breakout_retest_up",
             strategy="breakout_retest",
-            score=float(range_width),
+            score=float(range_confidence),
             metadata={
-                "confidence": float(min(Decimal("1"), range_width / (range_low * cfg.min_range_pct))),
+                "confidence": float(range_confidence),
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),
@@ -112,9 +120,9 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             tp=tp,
             reason="breakout_retest_down",
             strategy="breakout_retest",
-            score=float(range_width),
+            score=float(range_confidence),
             metadata={
-                "confidence": float(min(Decimal("1"), range_width / (range_low * cfg.min_range_pct))),
+                "confidence": float(range_confidence),
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),

@@ -32,11 +32,11 @@ def _parse_decimal(payload: dict[str, Any], *keys: str) -> Decimal | None:
     return None
 
 
-def _pip_size(point: Decimal | None) -> Decimal | None:
+def _pip_size(point: Decimal | None, digits: int | None = None) -> Decimal | None:
     if point is None:
         return None
     # MT5: pip = 10 points on most FX symbols (5-digit brokers). For metals/indices, point is already a larger tick.
-    return point * Decimal("10") if point < Decimal("1") else point
+    return point * Decimal("10") if digits in (3, 5) else point
 
 
 def _to_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decimal:
@@ -55,7 +55,15 @@ def _to_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decimal
     return value
 
 
-def _from_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decimal:
+def _from_price_delta(
+    value: Decimal,
+    unit: str,
+    point: Decimal | None,
+    *,
+    market_price: Decimal | None = None,
+    atr: Decimal | None = None,
+    digits: int | None = None,
+) -> Decimal:
     unit = (unit or "points").lower()
     if unit == "price":
         return value
@@ -67,14 +75,22 @@ def _from_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decim
                 return value
         return value
     if unit == "pips":
-        pip = _pip_size(point) or Decimal("0.0001")
+        pip = _pip_size(point, digits) or Decimal("0.0001")
         if pip:
             try:
                 return value / pip
             except Exception:
                 return value
         return value
-    return value
+    if unit == "percent":
+        if market_price is None or market_price <= 0:
+            raise ValueError("market_price is required for percent distances")
+        return value * Decimal("100") / market_price
+    if unit == "atr":
+        if atr is None or atr <= 0:
+            raise ValueError("atr is required for ATR distances")
+        return value / atr
+    raise ValueError(f"Unsupported distance unit: {unit}")
 
 @dataclass
 class ScalpRuntimeState:
@@ -100,16 +116,18 @@ def _point_size_for_symbol(symbol_cfg: SymbolConfig, symbol: str, payload: dict[
                     return Decimal(str(payload[key]))
                 except Exception:
                     continue
-    # Fallback heuristics: gold uses 0.1 points, majors 0.0001
-    symbol_upper = symbol_cfg.key
-    if symbol_upper.startswith("XAU"):
-        return Decimal("0.10")
-    return Decimal("0.0001")
+    return Decimal("0")
 
 
 def _estimate_sl_distance_points(symbol_cfg: SymbolConfig, payload: dict[str, Any]) -> Decimal:
     payload = payload or {}
     point = _parse_decimal(payload, "point")
+    market_price = _parse_decimal(payload, "entry", "price", "close", "last_price")
+    atr_price = _parse_decimal(payload, "atr_price", "atr")
+    try:
+        digits = int(payload["digits"]) if payload.get("digits") is not None else None
+    except (TypeError, ValueError):
+        digits = None
     min_stop_points = None
     for key in ("min_stop_points", "stops_level_points", "broker_min_stop_points"):
         candidate = _parse_decimal(payload, key)
@@ -122,22 +140,15 @@ def _estimate_sl_distance_points(symbol_cfg: SymbolConfig, payload: dict[str, An
             return pts
         except Exception:
             pass
-    min_stop = None
-    for key in ("min_stop_points", "stops_level_points", "broker_min_stop_points"):
-        if key in payload and payload.get(key) is not None:
-            try:
-                candidate = Decimal(str(payload.get(key)))
-                if candidate > 0:
-                    min_stop = candidate if min_stop is None else max(min_stop, candidate)
-            except Exception:
-                continue
     atr_points = None
-    atr_price = _parse_decimal(payload, "atr_price", "atr")
     if atr_price and atr_price > 0:
         atr_points = _from_price_delta(
             atr_price,
             getattr(symbol_cfg, "sl_points_unit", "points"),
             point,
+            market_price=market_price,
+            atr=atr_price,
+            digits=digits,
         )
     for key in ("atr_points", "atr_m1_points"):
         if atr_points is not None:
@@ -152,17 +163,30 @@ def _estimate_sl_distance_points(symbol_cfg: SymbolConfig, payload: dict[str, An
         distance = atr_points * Decimal("1.0")
     else:
         distance = (symbol_cfg.sl_points_min + symbol_cfg.sl_points_max) / Decimal("2")
-    # Broker stop level is expressed in MT5 points; translate into the symbol config unit before enforcing.
+    distance = max(
+        symbol_cfg.sl_points_min,
+        min(symbol_cfg.sl_points_max, distance),
+    )
+    # Broker stop level is authoritative even when it exceeds the recommended range.
     if min_stop_points is not None and min_stop_points > 0:
         try:
             stop_in_unit = min_stop_points
             if symbol_cfg.sl_points_unit.lower() == "pips":
-                pip = _pip_size(point) or Decimal("0.0001")
+                pip = _pip_size(point, digits) or Decimal("0.0001")
                 stop_in_unit = (min_stop_points * (point or pip)) / pip
+            elif symbol_cfg.sl_points_unit.lower() in {"percent", "atr"}:
+                stop_in_unit = _from_price_delta(
+                    min_stop_points * point,
+                    symbol_cfg.sl_points_unit,
+                    point,
+                    market_price=market_price,
+                    atr=atr_price,
+                    digits=digits,
+                )
             distance = max(distance, stop_in_unit)
         except Exception:
             distance = max(distance, min_stop_points)
-    return max(symbol_cfg.sl_points_min, min(symbol_cfg.sl_points_max, distance))
+    return distance
 
 
 def _resolve_entry_price(broker_account, symbol: str, payload: dict[str, Any]) -> Decimal | None:
@@ -353,18 +377,37 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
         return StrategyDecision(action="ignore", reason="scalper:no_price")
 
     point = _point_size_for_symbol(symbol_cfg, signal.symbol, payload)
+    try:
+        digits = int(payload["digits"]) if payload.get("digits") is not None else None
+    except (TypeError, ValueError):
+        digits = None
+    atr_price = _parse_decimal(payload, "atr_price", "atr")
     sl_points = _estimate_sl_distance_points(symbol_cfg, payload)
 
     sl_unit = getattr(symbol_cfg, "sl_points_unit", "points")
     sl_hint_price = _parse_decimal(payload, "sl")
     if sl_hint_price is not None:
         hint_delta_price = abs(entry - sl_hint_price)
-        hint_in_unit = _from_price_delta(hint_delta_price, sl_unit, point)
+        hint_in_unit = _from_price_delta(
+            hint_delta_price,
+            sl_unit,
+            point,
+            market_price=entry,
+            atr=atr_price,
+            digits=digits,
+        )
         if hint_in_unit > symbol_cfg.sl_points_max:
             return StrategyDecision(action="ignore", reason="scalper:sl_above_max")
         sl_points = max(sl_points, hint_in_unit)
     sl_points = max(symbol_cfg.sl_points_min, min(symbol_cfg.sl_points_max, sl_points))
-    sl_delta = distance_to_price(sl_points, sl_unit, point)
+    sl_delta = distance_to_price(
+        sl_points,
+        sl_unit,
+        point,
+        market_price=entry,
+        atr=atr_price,
+        digits=digits,
+    )
     if sl_delta <= 0:
         return StrategyDecision(action="ignore", reason="scalper:invalid_sl")
     spread_price = _parse_decimal(payload, "spread_price", "spread_points", "spread")
@@ -396,7 +439,7 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
             return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
         if not (0 < tp1_close_pct <= 100):
             return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
-        if trail_start_r >= tp1_r:
+        if trail_start_r > tp1_r:
             return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
         # TP1 is a partial managed close. Sending it as the broker TP would
         # flatten the entire position before the configured close percentage

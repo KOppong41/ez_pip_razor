@@ -190,6 +190,15 @@ class Asset(models.Model):
         default="forex",
         help_text="Category used for filters and dashboard summaries.",
     )
+    recommended_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Administratively adjustable recommended settings for new bots using this asset.",
+    )
+    recommended_config_version = models.PositiveIntegerField(
+        default=1,
+        help_text="Version of the recommended bot configuration stored for this asset.",
+    )
 
     class Meta:
         ordering = ["symbol"]
@@ -316,13 +325,13 @@ class Bot(models.Model):
     max_spread_points = models.DecimalField(
         max_digits=12,
         decimal_places=4,
-        default=Decimal("30"),
+        default=Decimal("0"),
         validators=[MinValueValidator(Decimal("0"))],
-        help_text="Maximum entry spread in raw broker/MT5 points. Set to 0 to disable.",
+        help_text="Optional maximum entry spread in raw broker/MT5 points. Set to 0 to inherit the asset recommendation.",
     )
     allowed_deviation_points = models.PositiveIntegerField(
-        default=8,
-        help_text="Maximum order deviation requested from MT5, in raw broker points.",
+        default=0,
+        help_text="Optional maximum MT5 order deviation in raw broker points. Set to 0 to inherit the asset recommendation.",
     )
     allow_live_account_execution = models.BooleanField(
         default=False,
@@ -431,9 +440,8 @@ class Bot(models.Model):
         default=list,
         blank=True,
         help_text=(
-            "Select which strategies this bot may run while auto-trade is disabled (tick one or more). "
-            "Examples: Harami, Engulfing, Hammer, Marubozu, Shooting Star, Three Soldiers, "
-            "Sanpe Tonkachi FVG, Sansen Sutsumi Liquidity, Doji, Price Action Pin Bar, Doji Breakout."
+            "Allowed strategy pool in manual and automatic modes. In automatic mode the selector may "
+            "choose only from this list. Empty means inherit the asset recommendations."
         ),
     )
     decision_min_score = models.DecimalField(
@@ -544,6 +552,11 @@ class Bot(models.Model):
             "If disabled, it may open trades at any time (24/7), subject to other risk checks."
         ),
     )
+    trading_timezone = models.CharField(
+        max_length=64,
+        default=settings.TIME_ZONE,
+        help_text="IANA timezone used for this bot's trading window, including DST transitions.",
+    )
     allowed_trading_days = models.JSONField(
         default=default_trading_days,
         blank=True,
@@ -620,6 +633,16 @@ class Bot(models.Model):
         default=Decimal("1.0000"),
         help_text="Size multiplier once the hard drawdown limit is breached (e.g. 0.25 = quarter size).",
     )
+    asset_preset_version_applied = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Asset recommendation version explicitly applied to this bot.",
+    )
+    asset_preset_applied_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When asset recommendations were last explicitly applied.",
+    )
 
     class Meta:
         unique_together = (("owner", "name"),)
@@ -643,15 +666,10 @@ class Bot(models.Model):
         if not owner and not getattr(settings, "TESTING", False):
             raise ValidationError("Owner is required for bots.")
 
-        # Validate strategies when auto-trade is disabled (manual strategy mode).
+        # The same strategy allowlist is authoritative in manual and auto modes.
         invalid = [s for s in (self.enabled_strategies or []) if s not in STRATEGY_CHOICES]
         if invalid:
             raise ValidationError({"enabled_strategies": f"Unknown strategies: {', '.join(invalid)}"})
-
-        if not self.auto_trade and not self.enabled_strategies:
-            raise ValidationError(
-                {"enabled_strategies": "Select at least one strategy for this bot when auto-trade is off."}
-            )
 
         # Decision score guardrail
         try:
@@ -705,24 +723,14 @@ class Bot(models.Model):
             if invalid_days:
                 raise ValidationError({"allowed_trading_days": f"Unsupported days: {', '.join(invalid_days)}"})
 
-        # Enforce a minimum lot size based on registered assets to avoid broker rejections.
+        # Asset quantities are compatibility metadata, not broker authority.
+        # The live risk gate validates fixed sizing against MT5 volume_min and
+        # volume_step for the selected account/symbol.
         if not getattr(settings, "TESTING", False):
-            from decimal import Decimal as _D
             if not self.asset:
                 raise ValidationError({"asset": "Asset is required for bots."})
             if self.asset and not getattr(self.asset, "is_active", True):
                 raise ValidationError({"asset": f"Asset {self.asset.symbol} is not active."})
-            min_required = _D(str(self.asset.min_qty))
-            setting_model = apps.get_model("execution", "ExecutionSetting")
-            setting = setting_model.objects.first()
-            if setting and setting.bot_min_default_qty:
-                bot_min = _D(str(setting.bot_min_default_qty))
-                if bot_min > min_required:
-                    min_required = bot_min
-            if self.default_qty < min_required:
-                raise ValidationError(
-                    {"default_qty": f"Default qty {self.default_qty} is below minimum {min_required} for {self.asset.symbol}."}
-                )
 
         # Require a verified broker account before a bot can exist.
         if not getattr(settings, "TESTING", False):

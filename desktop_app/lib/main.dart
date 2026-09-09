@@ -2736,7 +2736,8 @@ class _BotsPageState extends State<BotsPage> {
     final payload = await showDialog<Map<String, dynamic>>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => _BotEditorDialog(bot: bot, options: options),
+      builder: (_) =>
+          _BotEditorDialog(bot: bot, options: options, client: widget.client),
     );
     if (payload == null) return;
     try {
@@ -2873,9 +2874,14 @@ class _BotsPageState extends State<BotsPage> {
 }
 
 class _BotEditorDialog extends StatefulWidget {
-  const _BotEditorDialog({required this.bot, required this.options});
+  const _BotEditorDialog({
+    required this.bot,
+    required this.options,
+    required this.client,
+  });
   final Map<String, dynamic>? bot;
   final Map<String, dynamic> options;
+  final ApiClient client;
 
   @override
   State<_BotEditorDialog> createState() => _BotEditorDialogState();
@@ -2906,6 +2912,18 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   late final TextEditingController softSizeMultiplier;
   late final TextEditingController hardDrawdownLimitPct;
   late final TextEditingController hardSizeMultiplier;
+  late final TextEditingController tradingTimezone;
+  late final TextEditingController slMin;
+  late final TextEditingController slMax;
+  late final TextEditingController tpRMultiple;
+  late final TextEditingController tp1R;
+  late final TextEditingController tp1ClosePct;
+  late final TextEditingController beTriggerR;
+  late final TextEditingController beBufferR;
+  late final TextEditingController trailStartR;
+  late final TextEditingController trailTriggerR;
+  late final TextEditingController recommendedSpread;
+  late final TextEditingController recommendedSlippage;
   final editorScroll = ScrollController();
   int? assetId;
   int? accountId;
@@ -2920,8 +2938,17 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   bool allowOppositeScalp = false;
   bool killSwitchEnabled = true;
   bool lossStreakAutopauseEnabled = false;
+  bool recommendedSettingsApplied = false;
+  bool customized = false;
+  bool applyAssetRecommendationsRequested = false;
+  Map<String, dynamic> brokerLotConstraints = {};
+  bool brokerLotConstraintsLoading = false;
+  String slUnit = 'pips';
+  String exitMode = 'fixed_tp';
+  String trailMode = 'ema';
   final selectedStrategies = <String>{};
   final selectedTimeframes = <String>{};
+  final selectedContextTimeframes = <String>{};
   final selectedTradingDays = <String>{};
 
   static const tradingDays = <String, String>{
@@ -2965,7 +2992,8 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
         integerValue(accounts.firstOrNull?['id']);
     engineMode = '${bot?['engine_mode'] ?? 'harami'}';
     timeframe = '${bot?['default_timeframe'] ?? '5m'}';
-    tradingProfile = '${bot?['trading_profile'] ?? 'very_safe'}';
+    tradingProfile =
+        '${bot?['trading_profile'] ?? tradingProfiles.firstOrNull?['value'] ?? 'very_safe'}';
     positionSizingMode = '${bot?['position_sizing_mode'] ?? 'risk'}';
     autoTrade = bot?['auto_trade'] != false;
     allowLiveExecution = bot?['allow_live_account_execution'] == true;
@@ -2975,6 +3003,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     allowOppositeScalp = bot?['allow_opposite_scalp'] == true;
     killSwitchEnabled = bot?['kill_switch_enabled'] != false;
     lossStreakAutopauseEnabled = bot?['loss_streak_autopause_enabled'] == true;
+    recommendedSettingsApplied = bot?['asset_preset_version_applied'] != null;
     selectedStrategies.addAll(
       bot?['enabled_strategies'] is List
           ? List<dynamic>.from(bot!['enabled_strategies']).map((v) => '$v')
@@ -2983,6 +3012,27 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     selectedTimeframes.addAll(
       bot?['allowed_timeframes'] is List
           ? List<dynamic>.from(bot!['allowed_timeframes']).map((v) => '$v')
+          : const <String>[],
+    );
+    final existingParams = mapOf(bot?['scalper_params']);
+    final existingSymbols = mapOf(existingParams['symbols']);
+    Map<String, dynamic> existingSymbolConfig = {};
+    final selectedSymbol = '${selectedAsset?['symbol'] ?? ''}'.toUpperCase();
+    final selectedCanonical = selectedSymbol.endsWith('M')
+        ? selectedSymbol.substring(0, selectedSymbol.length - 1)
+        : selectedSymbol;
+    for (final entry in existingSymbols.entries) {
+      final key = entry.key.toUpperCase();
+      if (key == selectedSymbol || key == selectedCanonical) {
+        existingSymbolConfig = mapOf(entry.value);
+        break;
+      }
+    }
+    selectedContextTimeframes.addAll(
+      existingSymbolConfig['context_timeframes'] is List
+          ? List<dynamic>.from(
+              existingSymbolConfig['context_timeframes'],
+            ).map((value) => '$value')
           : const <String>[],
     );
     selectedTradingDays.addAll(
@@ -3061,6 +3111,48 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     hardSizeMultiplier = TextEditingController(
       text: '${bot?['hard_size_multiplier'] ?? '1'}',
     );
+    tradingTimezone = TextEditingController(
+      text: '${bot?['trading_timezone'] ?? 'UTC'}',
+    );
+    final existingSl = mapOf(existingSymbolConfig['sl_points']);
+    slMin = TextEditingController(text: '${existingSl['min'] ?? '5'}');
+    slMax = TextEditingController(text: '${existingSl['max'] ?? '10'}');
+    slUnit = '${existingSl['unit'] ?? 'pips'}';
+    tpRMultiple = TextEditingController(
+      text: '${existingSymbolConfig['tp_r_multiple'] ?? '1.5'}',
+    );
+    exitMode = '${existingSymbolConfig['exit_mode'] ?? 'fixed_tp'}';
+    tp1R = TextEditingController(
+      text: '${existingSymbolConfig['tp1_r'] ?? '1.0'}',
+    );
+    tp1ClosePct = TextEditingController(
+      text: '${existingSymbolConfig['tp1_close_pct'] ?? '70'}',
+    );
+    beTriggerR = TextEditingController(
+      text: '${existingSymbolConfig['be_trigger_r'] ?? '1.0'}',
+    );
+    beBufferR = TextEditingController(
+      text: '${existingSymbolConfig['be_buffer_r'] ?? '0.15'}',
+    );
+    trailStartR = TextEditingController(
+      text: '${existingSymbolConfig['trail_start_r'] ?? '1.0'}',
+    );
+    trailTriggerR = TextEditingController(
+      text: '${existingSymbolConfig['trail_trigger_r'] ?? '1.5'}',
+    );
+    trailMode = '${existingSymbolConfig['trail_mode'] ?? 'ema'}';
+    recommendedSpread = TextEditingController(
+      text: '${existingSymbolConfig['max_spread_points'] ?? '0'}',
+    );
+    recommendedSlippage = TextEditingController(
+      text: '${existingSymbolConfig['max_slippage_points'] ?? '0'}',
+    );
+    if (bot == null) _applyRecommendations(rebuild: false);
+    if (positionSizingMode == 'fixed') {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _loadBrokerLotSuggestion(replaceQuantity: bot == null),
+      );
+    }
   }
 
   Map<String, dynamic>? get selectedAsset {
@@ -3075,6 +3167,161 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       if (integerValue(account['id']) == accountId) return account;
     }
     return null;
+  }
+
+  Map<String, dynamic> get selectedRecommendation =>
+      mapOf(selectedAsset?['recommended_config']);
+
+  String get selectedSymbolKey {
+    final symbol = '${selectedAsset?['symbol'] ?? ''}'.toUpperCase();
+    return symbol.endsWith('M')
+        ? symbol.substring(0, symbol.length - 1)
+        : symbol;
+  }
+
+  void _applyRecommendations({bool rebuild = true}) {
+    final config = selectedRecommendation;
+    if (config.isEmpty) return;
+    final symbol = mapOf(config['symbol_config']);
+    final stop = mapOf(symbol['sl_points']);
+    final schedule = mapOf(config['trading_schedule']);
+    void assign() {
+      engineMode = '${config['engine_mode'] ?? 'scalper'}';
+      timeframe = '${config['default_timeframe'] ?? '5m'}';
+      positionSizingMode = '${config['position_sizing_mode'] ?? 'risk'}';
+      selectedStrategies
+        ..clear()
+        ..addAll(
+          config['enabled_strategies'] is List
+              ? List<dynamic>.from(
+                  config['enabled_strategies'],
+                ).map((value) => '$value')
+              : const <String>[],
+        );
+      selectedTimeframes
+        ..clear()
+        ..addAll(
+          config['allowed_timeframes'] is List
+              ? List<dynamic>.from(
+                  config['allowed_timeframes'],
+                ).map((value) => '$value')
+              : const <String>[],
+        );
+      selectedContextTimeframes
+        ..clear()
+        ..addAll(
+          config['context_timeframes'] is List
+              ? List<dynamic>.from(
+                  config['context_timeframes'],
+                ).map((value) => '$value')
+              : const <String>[],
+        );
+      riskPerTrade.text = '${config['risk_per_trade_pct'] ?? '0.5'}';
+      decisionScore.text = '${config['decision_min_score'] ?? '0.5'}';
+      maxPositions.text = '${config['risk_max_concurrent_positions'] ?? '1'}';
+      maxTrades.text = '${config['max_trades_per_day'] ?? '10'}';
+      interval.text = '${config['trade_interval_minutes'] ?? '15'}';
+      maxSpread.text = '${config['max_spread_points'] ?? '0'}';
+      allowedDeviation.text = '${config['allowed_deviation_points'] ?? '0'}';
+      allowOppositeScalp = config['allow_opposite_scalp'] == true;
+      allowLiveExecution = config['allow_live_account_execution'] == true;
+      killSwitchEnabled = config['kill_switch_enabled'] != false;
+      killSwitchMaxUnrealizedPct.text =
+          '${config['kill_switch_max_unrealized_pct'] ?? '3'}';
+      lossStreakAutopauseEnabled =
+          config['loss_streak_autopause_enabled'] != false;
+      maxLossStreak.text = '${config['max_loss_streak_before_pause'] ?? '3'}';
+      lossStreakCooldown.text =
+          '${config['loss_streak_cooldown_min'] ?? '120'}';
+      softDrawdownLimitPct.text = '${config['soft_drawdown_limit_pct'] ?? '1'}';
+      softSizeMultiplier.text = '${config['soft_size_multiplier'] ?? '0.5'}';
+      hardDrawdownLimitPct.text = '${config['hard_drawdown_limit_pct'] ?? '2'}';
+      hardSizeMultiplier.text = '${config['hard_size_multiplier'] ?? '0.25'}';
+      tradingScheduleEnabled = schedule['enabled'] != false;
+      tradingTimezone.text = '${schedule['timezone'] ?? 'UTC'}';
+      selectedTradingDays
+        ..clear()
+        ..addAll(
+          schedule['allowed_days'] is List
+              ? List<dynamic>.from(
+                  schedule['allowed_days'],
+                ).map((value) => '$value')
+              : const <String>[],
+        );
+      tradingWindowStart.text = _shortTime('${schedule['start'] ?? '00:00'}');
+      tradingWindowEnd.text = _shortTime('${schedule['end'] ?? '23:59'}');
+      slMin.text = '${stop['min'] ?? '5'}';
+      slMax.text = '${stop['max'] ?? '10'}';
+      slUnit = '${stop['unit'] ?? 'pips'}';
+      tpRMultiple.text = '${symbol['tp_r_multiple'] ?? '1.5'}';
+      exitMode = '${symbol['exit_mode'] ?? 'fixed_tp'}';
+      tp1R.text = '${symbol['tp1_r'] ?? '1.0'}';
+      tp1ClosePct.text = '${symbol['tp1_close_pct'] ?? '70'}';
+      beTriggerR.text = '${symbol['be_trigger_r'] ?? '1.0'}';
+      beBufferR.text = '${symbol['be_buffer_r'] ?? '0.15'}';
+      trailStartR.text = '${symbol['trail_start_r'] ?? '1.0'}';
+      trailTriggerR.text = '${symbol['trail_trigger_r'] ?? '1.5'}';
+      trailMode = '${symbol['trail_mode'] ?? 'ema'}';
+      recommendedSpread.text = '${symbol['max_spread_points'] ?? '0'}';
+      recommendedSlippage.text = '${symbol['max_slippage_points'] ?? '0'}';
+      recommendedSettingsApplied = true;
+      customized = false;
+      applyAssetRecommendationsRequested = true;
+    }
+
+    rebuild ? setState(assign) : assign();
+  }
+
+  void _markCustomized() {
+    if (!customized) setState(() => customized = true);
+  }
+
+  Future<void> _loadBrokerLotSuggestion({bool replaceQuantity = true}) async {
+    final selectedAssetId = assetId;
+    final selectedAccountId = accountId;
+    if (selectedAssetId == null || selectedAccountId == null) return;
+    setState(() => brokerLotConstraintsLoading = true);
+    try {
+      final response = await widget.client.get(
+        '/api/bots/symbol-constraints/?asset=$selectedAssetId&broker_account=$selectedAccountId',
+      );
+      if (!mounted) return;
+      final values = mapOf(response);
+      setState(() {
+        brokerLotConstraints = values;
+        brokerLotConstraintsLoading = false;
+        final suggestion = values['suggested_quantity'];
+        if (replaceQuantity &&
+            values['available'] == true &&
+            suggestion != null) {
+          qty.text = '$suggestion';
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        brokerLotConstraints = {};
+        brokerLotConstraintsLoading = false;
+      });
+    }
+  }
+
+  String get _fixedLotHelper {
+    if (brokerLotConstraintsLoading) return 'Reading broker volume rules…';
+    if (brokerLotConstraints['available'] == true) {
+      return 'Broker minimum ${brokerLotConstraints['volume_min']} · step ${brokerLotConstraints['volume_step']}';
+    }
+    return 'The connected broker minimum and step are enforced at execution';
+  }
+
+  String _recommendedHelper(String key, {String suffix = ''}) {
+    if (customized) return 'Customized';
+    final value = selectedRecommendation[key];
+    final assetName =
+        selectedAsset?['display_name'] ?? selectedAsset?['symbol'];
+    return value == null
+        ? 'Asset recommendation'
+        : 'Recommended for $assetName: $value$suffix';
   }
 
   Map<String, dynamic> get selectedAccountLimits {
@@ -3125,6 +3372,18 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     softSizeMultiplier.dispose();
     hardDrawdownLimitPct.dispose();
     hardSizeMultiplier.dispose();
+    tradingTimezone.dispose();
+    slMin.dispose();
+    slMax.dispose();
+    tpRMultiple.dispose();
+    tp1R.dispose();
+    tp1ClosePct.dispose();
+    beTriggerR.dispose();
+    beBufferR.dispose();
+    trailStartR.dispose();
+    trailTriggerR.dispose();
+    recommendedSpread.dispose();
+    recommendedSlippage.dispose();
     super.dispose();
   }
 
@@ -3199,11 +3458,38 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       );
       return;
     }
-    if (_invalidNumber(defaultTpPips) || _invalidNumber(defaultSlPips)) {
+    if (engineMode != 'scalper' &&
+        (_invalidNumber(defaultTpPips) || _invalidNumber(defaultSlPips))) {
       _showValidationError(
         'Default stop loss and take profit must be greater than zero.',
       );
       return;
+    }
+    if (engineMode == 'scalper') {
+      final minStop = double.tryParse(slMin.text.trim());
+      final maxStop = double.tryParse(slMax.text.trim());
+      final targetR = double.tryParse(tpRMultiple.text.trim());
+      final partialR = double.tryParse(tp1R.text.trim());
+      final partialPct = int.tryParse(tp1ClosePct.text.trim());
+      final trailStart = double.tryParse(trailStartR.text.trim());
+      if (minStop == null ||
+          minStop <= 0 ||
+          maxStop == null ||
+          maxStop < minStop ||
+          (exitMode == 'fixed_tp' && (targetR == null || targetR <= 0)) ||
+          (exitMode == 'hybrid' &&
+              (partialR == null ||
+                  partialR <= 0 ||
+                  partialPct == null ||
+                  partialPct <= 0 ||
+                  partialPct > 100 ||
+                  trailStart == null ||
+                  trailStart > partialR))) {
+        _showValidationError(
+          'Review the semantic stop range and managed exit R settings.',
+        );
+        return;
+      }
     }
     final allocation = double.tryParse(allocationAmount.text.trim());
     final profitTarget = double.tryParse(allocationProfitPct.text.trim());
@@ -3222,7 +3508,8 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       return;
     }
     if (tradingScheduleEnabled &&
-        (selectedTradingDays.isEmpty ||
+        (tradingTimezone.text.trim().isEmpty ||
+            selectedTradingDays.isEmpty ||
             !_validTime(tradingWindowStart) ||
             !_validTime(tradingWindowEnd))) {
       _showValidationError(
@@ -3287,15 +3574,6 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
         );
         return;
       }
-      final assetMinimum = double.tryParse(
-        '${selectedAsset?['min_qty'] ?? ''}',
-      );
-      if (assetMinimum != null && fixedLot < assetMinimum) {
-        _showValidationError(
-          'Fixed lot size cannot be below the asset minimum of $assetMinimum lots.',
-        );
-        return;
-      }
     }
     final botPositions = int.tryParse(maxPositions.text.trim());
     final accountPositions = _accountIntegerLimit('max_total_open_positions');
@@ -3307,11 +3585,49 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       );
       return;
     }
+    final existingScalperParams = mapOf(widget.bot?['scalper_params']);
+    final symbols = mapOf(existingScalperParams['symbols']);
+    final recommendationSymbol = mapOf(selectedRecommendation['symbol_config']);
+    if (engineMode == 'scalper') {
+      symbols[selectedSymbolKey] = {
+        'aliases': [
+          if (selectedAsset?['symbol'] != null) '${selectedAsset!['symbol']}',
+        ],
+        'execution_timeframes': selectedTimeframes.toList()..sort(),
+        'context_timeframes': selectedContextTimeframes.toList()..sort(),
+        'sl_points': {
+          'min': slMin.text.trim(),
+          'max': slMax.text.trim(),
+          'unit': slUnit,
+        },
+        'tp_r_multiple': tpRMultiple.text.trim(),
+        'exit_mode': exitMode,
+        'tp1_r': exitMode == 'hybrid' ? tp1R.text.trim() : null,
+        'tp1_close_pct': exitMode == 'hybrid'
+            ? int.tryParse(tp1ClosePct.text.trim())
+            : null,
+        'be_trigger_r': beTriggerR.text.trim(),
+        'be_buffer_r': beBufferR.text.trim(),
+        'trail_start_r': exitMode == 'fixed_tp'
+            ? null
+            : trailStartR.text.trim(),
+        'trail_trigger_r': trailTriggerR.text.trim(),
+        'trail_mode': trailMode,
+        'max_spread_points': recommendedSpread.text.trim(),
+        'max_spread_unit':
+            '${recommendationSymbol['max_spread_unit'] ?? 'points'}',
+        'max_slippage_points': recommendedSlippage.text.trim(),
+        'max_slippage_unit':
+            '${recommendationSymbol['max_slippage_unit'] ?? 'points'}',
+      };
+      existingScalperParams['symbols'] = symbols;
+    }
     Navigator.pop(context, <String, dynamic>{
       'name': name.text.trim(),
       'asset': assetId,
       'broker_account': accountId,
       'engine_mode': engineMode,
+      'apply_asset_recommendations': applyAssetRecommendationsRequested,
       'default_timeframe': timeframe,
       'allowed_timeframes': selectedTimeframes.toList()..sort(),
       'default_qty': qty.text.trim(),
@@ -3320,6 +3636,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       'max_bot_lot_size': maxBotLot.text.trim(),
       'auto_trade': autoTrade,
       'enabled_strategies': selectedStrategies.toList()..sort(),
+      'scalper_params': existingScalperParams,
       'decision_min_score': decisionScore.text.trim(),
       'risk_max_concurrent_positions': maxPositions.text.trim(),
       'max_trades_per_day': maxTrades.text.trim(),
@@ -3335,6 +3652,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       'allocation_profit_pct': allocationProfitPct.text.trim(),
       'allocation_loss_pct': allocationLossPct.text.trim(),
       'trading_schedule_enabled': tradingScheduleEnabled,
+      'trading_timezone': tradingTimezone.text.trim(),
       'allowed_trading_days': selectedTradingDays.toList()..sort(),
       'trading_window_start': tradingWindowStart.text.trim(),
       'trading_window_end': tradingWindowEnd.text.trim(),
@@ -3442,6 +3760,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   fontWeight: FontWeight.w700,
                 ),
                 onSelected: (enabled) => setState(() {
+                  customized = true;
                   enabled
                       ? selectedStrategies.add(value)
                       : selectedStrategies.remove(value);
@@ -3453,37 +3772,39 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     ],
   );
 
-  Widget _configChips(Map<String, String> options, Set<String> selected) =>
-      Wrap(
-        spacing: 7,
-        runSpacing: 7,
-        children: [
-          for (final option in options.entries)
-            FilterChip(
-              label: Text(option.value),
-              selected: selected.contains(option.key),
-              selectedColor: blue.withValues(alpha: 0.65),
-              backgroundColor: const Color(0xFF0A1217),
-              side: BorderSide(
-                color: selected.contains(option.key)
-                    ? blue.withValues(alpha: 0.55)
-                    : border,
-              ),
-              labelStyle: TextStyle(
-                color: selected.contains(option.key)
-                    ? Colors.white
-                    : const Color(0xFFD8E2E6),
-                fontSize: 10,
-                fontWeight: FontWeight.w700,
-              ),
-              onSelected: (enabled) => setState(() {
-                enabled
-                    ? selected.add(option.key)
-                    : selected.remove(option.key);
-              }),
-            ),
-        ],
-      );
+  Widget _configChips(
+    Map<String, String> options,
+    Set<String> selected, {
+    bool marksCustomization = true,
+  }) => Wrap(
+    spacing: 7,
+    runSpacing: 7,
+    children: [
+      for (final option in options.entries)
+        FilterChip(
+          label: Text(option.value),
+          selected: selected.contains(option.key),
+          selectedColor: blue.withValues(alpha: 0.65),
+          backgroundColor: const Color(0xFF0A1217),
+          side: BorderSide(
+            color: selected.contains(option.key)
+                ? blue.withValues(alpha: 0.55)
+                : border,
+          ),
+          labelStyle: TextStyle(
+            color: selected.contains(option.key)
+                ? Colors.white
+                : const Color(0xFFD8E2E6),
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+          ),
+          onSelected: (enabled) => setState(() {
+            if (marksCustomization) customized = true;
+            enabled ? selected.add(option.key) : selected.remove(option.key);
+          }),
+        ),
+    ],
+  );
 
   Widget _automaticExecutionCard() => Container(
     padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
@@ -3669,6 +3990,13 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   @override
   Widget build(BuildContext context) {
     final viewport = MediaQuery.sizeOf(context);
+    final recommendedSymbolConfig = mapOf(
+      selectedRecommendation['symbol_config'],
+    );
+    final spreadUnit =
+        '${recommendedSymbolConfig['max_spread_unit'] ?? 'points'}';
+    final slippageUnit =
+        '${recommendedSymbolConfig['max_slippage_unit'] ?? 'points'}';
     return AlertDialog(
       backgroundColor: panel,
       surfaceTintColor: Colors.transparent,
@@ -3735,8 +4063,65 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (selectedRecommendation.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 9,
+                    ),
+                    decoration: BoxDecoration(
+                      color: (customized ? amber : green).withValues(
+                        alpha: 0.10,
+                      ),
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(
+                        color: (customized ? amber : green).withValues(
+                          alpha: 0.35,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              customized
+                                  ? Icons.tune_rounded
+                                  : Icons.recommend_outlined,
+                              color: customized ? amber : green,
+                              size: 17,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                customized
+                                    ? 'Customized'
+                                    : recommendedSettingsApplied
+                                    ? 'Recommended settings applied'
+                                    : 'Current settings preserved',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton(
+                            onPressed: _applyRecommendations,
+                            child: const Text('Restore Recommended Defaults'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                ],
                 _sectionHeading(
-                  'Execution setup',
+                  'Execution',
                   'Choose where and how this bot trades.',
                 ),
                 const SizedBox(height: 12),
@@ -3762,9 +4147,15 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                           ),
                         ),
                     ],
-                    onChanged: (value) => setState(() => accountId = value),
+                    onChanged: (value) async {
+                      setState(() => accountId = value);
+                      if (positionSizingMode == 'fixed') {
+                        await _loadBrokerLotSuggestion();
+                      }
+                    },
                   ),
                   DropdownButtonFormField<int>(
+                    key: ValueKey('asset-$assetId'),
                     initialValue: assetId,
                     isExpanded: true,
                     decoration: const InputDecoration(
@@ -3779,13 +4170,24 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                           ),
                         ),
                     ],
-                    onChanged: (value) {
-                      setState(() {
-                        assetId = value;
-                        if (widget.bot == null && selectedAsset != null) {
-                          qty.text = '${selectedAsset!['recommended_qty']}';
+                    onChanged: (value) async {
+                      if (value == null || value == assetId) return;
+                      if (widget.bot != null) {
+                        final replace = await confirm(
+                          context,
+                          'Replace current settings?',
+                          'Apply the selected asset\'s recommended configuration? Your current editor values will be replaced.',
+                        );
+                        if (!replace || !mounted) {
+                          setState(() {});
+                          return;
                         }
-                      });
+                      }
+                      setState(() => assetId = value);
+                      _applyRecommendations();
+                      if (positionSizingMode == 'fixed') {
+                        await _loadBrokerLotSuggestion();
+                      }
                     },
                   ),
                 ]),
@@ -3811,8 +4213,11 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     DropdownButtonFormField<String>(
                       initialValue: timeframe,
                       isExpanded: true,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Primary timeframe',
+                        helperText: customized
+                            ? 'Customized'
+                            : 'Recommended: ${'${selectedRecommendation['default_timeframe'] ?? '5m'}'.toUpperCase()}',
                       ),
                       items: [
                         for (final value in timeframes)
@@ -3821,8 +4226,10 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                             child: _dropdownText(value.toUpperCase()),
                           ),
                       ],
-                      onChanged: (value) =>
-                          setState(() => timeframe = value ?? timeframe),
+                      onChanged: (value) => setState(() {
+                        timeframe = value ?? timeframe;
+                        customized = true;
+                      }),
                     ),
                   ],
                   flexes: const [2, 1],
@@ -3858,6 +4265,15 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                 _configChips({
                   for (final value in timeframes) value: value.toUpperCase(),
                 }, selectedTimeframes),
+                const SizedBox(height: 14),
+                const Text(
+                  'Context timeframes',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 8),
+                _configChips({
+                  for (final value in timeframes) value: value.toUpperCase(),
+                }, selectedContextTimeframes),
                 const SizedBox(height: 16),
                 _automaticExecutionCard(),
                 const SizedBox(height: 24),
@@ -3866,8 +4282,8 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   children: [
                     Expanded(
                       child: _sectionHeading(
-                        'Strategy routing',
-                        'Select the signal models this bot may execute.',
+                        'Strategies',
+                        'This allowed pool is authoritative in manual and automatic modes. Empty inherits the asset recommendation.',
                       ),
                     ),
                     TextButton(
@@ -3894,7 +4310,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                 _strategyPicker(),
                 const SizedBox(height: 24),
                 _sectionHeading(
-                  'Risk & cadence',
+                  'Risk',
                   'Size positions and set this bot\'s execution guardrails.',
                 ),
                 const SizedBox(height: 12),
@@ -3902,6 +4318,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                 const SizedBox(height: 12),
                 _responsiveFields([
                   DropdownButtonFormField<String>(
+                    key: const ValueKey('position-sizing'),
                     initialValue: positionSizingMode,
                     isExpanded: true,
                     decoration: const InputDecoration(
@@ -3919,9 +4336,14 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                         child: Text('Fixed lot size'),
                       ),
                     ],
-                    onChanged: (value) => setState(
-                      () => positionSizingMode = value ?? positionSizingMode,
-                    ),
+                    onChanged: (value) async {
+                      setState(
+                        () => positionSizingMode = value ?? positionSizingMode,
+                      );
+                      if (positionSizingMode == 'fixed') {
+                        await _loadBrokerLotSuggestion();
+                      }
+                    },
                   ),
                   if (positionSizingMode == 'fixed')
                     TextField(
@@ -3932,23 +4354,26 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       decoration: InputDecoration(
                         labelText: 'Fixed lot size',
                         suffixText: 'lots',
-                        helperText: selectedAsset == null
-                            ? 'Used exactly for each entry'
-                            : 'Asset minimum ${selectedAsset!['min_qty']}',
+                        helperText: _fixedLotHelper,
                       ),
+                      onChanged: (_) => _markCustomized(),
                     )
                   else
                     TextField(
+                      key: const ValueKey('risk-per-trade'),
                       controller: riskPerTrade,
                       keyboardType: const TextInputType.numberWithOptions(
                         decimal: true,
                       ),
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Risk per trade',
                         suffixText: '% equity',
-                        helperText:
-                            'Volume is calculated from the stop distance',
+                        helperText: _recommendedHelper(
+                          'risk_per_trade_pct',
+                          suffix: '%',
+                        ),
                       ),
+                      onChanged: (_) => _markCustomized(),
                     ),
                 ]),
                 const SizedBox(height: 12),
@@ -3980,10 +4405,12 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       labelText: 'Minimum signal score',
                       hintText: '0.50',
+                      helperText: _recommendedHelper('decision_min_score'),
                     ),
+                    onChanged: (_) => _markCustomized(),
                   ),
                   TextField(
                     controller: maxTrades,
@@ -4002,6 +4429,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       labelText: 'Minimum trade interval',
                       suffixText: 'min',
                     ),
+                    onChanged: (_) => _markCustomized(),
                   ),
                   TextField(
                     controller: maxSpread,
@@ -4025,6 +4453,211 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     helperText: 'Maximum deviation sent with this bot\'s order',
                   ),
                 ),
+                if (engineMode == 'scalper') ...[
+                  const SizedBox(height: 24),
+                  _sectionHeading(
+                    'Protection / Exit',
+                    'Semantic cross-market stop, target, break-even and trailing settings.',
+                  ),
+                  const SizedBox(height: 12),
+                  _responsiveFields([
+                    TextField(
+                      controller: slMin,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(labelText: 'SL min'),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                    TextField(
+                      controller: slMax,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(labelText: 'SL max'),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                    DropdownButtonFormField<String>(
+                      initialValue: slUnit,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: 'SL unit'),
+                      items: const [
+                        DropdownMenuItem(value: 'pips', child: Text('Pips')),
+                        DropdownMenuItem(
+                          value: 'percent',
+                          child: Text('Percent of price'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'points',
+                          child: Text('Broker points'),
+                        ),
+                        DropdownMenuItem(value: 'price', child: Text('Price')),
+                        DropdownMenuItem(value: 'atr', child: Text('ATR')),
+                      ],
+                      onChanged: (value) => setState(() {
+                        slUnit = value ?? slUnit;
+                        customized = true;
+                      }),
+                    ),
+                  ]),
+                  const SizedBox(height: 12),
+                  _responsiveFields([
+                    TextField(
+                      controller: tpRMultiple,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Take-profit target',
+                        suffixText: 'R',
+                      ),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                    DropdownButtonFormField<String>(
+                      initialValue: exitMode,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: 'Exit mode'),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'fixed_tp',
+                          child: Text('Fixed TP'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'hybrid',
+                          child: Text('Hybrid TP1 + trail'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'trail_only',
+                          child: Text('Trail only'),
+                        ),
+                      ],
+                      onChanged: (value) => setState(() {
+                        exitMode = value ?? exitMode;
+                        customized = true;
+                      }),
+                    ),
+                  ]),
+                  if (exitMode == 'hybrid') ...[
+                    const SizedBox(height: 12),
+                    _responsiveFields([
+                      TextField(
+                        controller: tp1R,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'TP1 trigger',
+                          suffixText: 'R',
+                        ),
+                        onChanged: (_) => _markCustomized(),
+                      ),
+                      TextField(
+                        controller: tp1ClosePct,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'TP1 partial close',
+                          suffixText: '%',
+                        ),
+                        onChanged: (_) => _markCustomized(),
+                      ),
+                    ]),
+                  ],
+                  const SizedBox(height: 12),
+                  _responsiveFields([
+                    TextField(
+                      controller: beTriggerR,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Break-even trigger',
+                        suffixText: 'R',
+                      ),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                    TextField(
+                      controller: beBufferR,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Break-even buffer',
+                        suffixText: 'R',
+                      ),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                  ]),
+                  const SizedBox(height: 12),
+                  _responsiveFields([
+                    if (exitMode != 'fixed_tp')
+                      TextField(
+                        controller: trailStartR,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Trail starts',
+                          suffixText: 'R',
+                        ),
+                        onChanged: (_) => _markCustomized(),
+                      ),
+                    TextField(
+                      controller: trailTriggerR,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Trail trigger',
+                        suffixText: 'R',
+                      ),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                    DropdownButtonFormField<String>(
+                      initialValue: trailMode,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Trail mode',
+                      ),
+                      items: const [
+                        DropdownMenuItem(value: 'ema', child: Text('EMA')),
+                        DropdownMenuItem(
+                          value: 'structure',
+                          child: Text('Structure'),
+                        ),
+                        DropdownMenuItem(value: 'swing', child: Text('Swing')),
+                      ],
+                      onChanged: (value) => setState(() {
+                        trailMode = value ?? trailMode;
+                        customized = true;
+                      }),
+                    ),
+                  ]),
+                  const SizedBox(height: 12),
+                  _responsiveFields([
+                    TextField(
+                      controller: recommendedSpread,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: 'Recommended spread limit',
+                        suffixText: spreadUnit,
+                      ),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                    TextField(
+                      controller: recommendedSlippage,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: 'Recommended slippage limit',
+                        suffixText: slippageUnit,
+                      ),
+                      onChanged: (_) => _markCustomized(),
+                    ),
+                  ]),
+                ],
                 if (engineMode != 'scalper') ...[
                   const SizedBox(height: 12),
                   _responsiveFields([
@@ -4125,11 +4758,22 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   description:
                       'Disable for 24/7 eligibility; market-hours and risk guards still apply.',
                   value: tradingScheduleEnabled,
-                  onChanged: (value) =>
-                      setState(() => tradingScheduleEnabled = value),
+                  onChanged: (value) => setState(() {
+                    tradingScheduleEnabled = value;
+                    customized = true;
+                  }),
                   color: blue,
                 ),
                 if (tradingScheduleEnabled) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: tradingTimezone,
+                    decoration: const InputDecoration(
+                      labelText: 'Trading timezone',
+                      helperText: 'IANA timezone, for example Europe/London',
+                    ),
+                    onChanged: (_) => _markCustomized(),
+                  ),
                   const SizedBox(height: 12),
                   _configChips(tradingDays, selectedTradingDays),
                   const SizedBox(height: 12),
@@ -4154,7 +4798,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                 ],
                 const SizedBox(height: 24),
                 _sectionHeading(
-                  'Position protection',
+                  'Psychology / Cooling',
                   'Configure emergency exits and automatic cooling behavior.',
                 ),
                 const SizedBox(height: 12),

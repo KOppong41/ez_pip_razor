@@ -14,6 +14,7 @@ from django.utils import timezone
 from execution.models import BrokerPosition, ExecutionAttempt, Order
 from execution.services.orchestrator import update_order_status
 from execution.services.journal import log_journal_event
+from execution.services.protection_policy import validate_order_protection
 from .base import BaseConnector, ConnectorError
 from django.conf import settings
 
@@ -1668,13 +1669,9 @@ class MT5Connector(BaseConnector):
         if order.tp is not None:
             req["tp"] = float(order.tp)
         
-        scalper_params = ((order.decision.params or {}).get("scalper") or {}) if order.decision_id else {}
-        managed_take_profit = (
-            isinstance(scalper_params, dict)
-            and scalper_params.get("exit_mode") in {"trail_only", "hybrid"}
-        )
-        if order.sl is None or (order.tp is None and not managed_take_profit):
-            msg = f"Order {order.id} rejected: required entry protection is missing"
+        protection_ok, protection_reason = validate_order_protection(order)
+        if not protection_ok:
+            msg = f"Order {order.id} rejected: entry protection invalid ({protection_reason})"
             _clear_risk_reservation(order)
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)

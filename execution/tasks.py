@@ -67,6 +67,7 @@ from execution.tasks_market_guard import apply_market_guard
 from execution.services.scalper_config import (
     build_scalper_config,
     normalize_execution_timeframe,
+    resolve_allowed_strategy_pool,
     resolve_scalper_execution_timeframe,
 )
 from execution.services.runtime_config import get_runtime_config
@@ -1822,6 +1823,13 @@ def trade_scalper_strategies_for_bot(
         if strategy_profile and strategy_profile.enabled_strategies
         else []
     )
+    allowed_strategy_pool, strategy_pool_source = resolve_allowed_strategy_pool(
+        bot,
+        profile_strats,
+    )
+    recommended_strats = (
+        allowed_strategy_pool if strategy_pool_source == "asset" else []
+    )
     enabled_strats: list[str] = []
     strategy_context: dict[str, object] = {
         "symbol": canonical_sym,
@@ -1829,15 +1837,10 @@ def trade_scalper_strategies_for_bot(
         "profile_key": strategy_profile_key,
         "profile_symbol": getattr(strategy_profile, "symbol", None) if strategy_profile else None,
         "manual_configured": bool(manual_strats),
+        "strategy_pool_source": strategy_pool_source,
     }
     if not auto_mode:
-        enabled_strats = manual_strats
-        if not enabled_strats:
-            _log_skip(
-                "no_enabled_strategies",
-                {"strategy_context": strategy_context, "strategy_profile": strategy_profile_key},
-            )
-            return {"status": "ok", "reason": "no_enabled_strategies"}
+        enabled_strats = allowed_strategy_pool
     
     tick_snapshot = None
     spread_price = None
@@ -1949,6 +1952,7 @@ def trade_scalper_strategies_for_bot(
         "max_lot": str(broker_constraints.max_lot) if broker_constraints.max_lot is not None else None,
         "lot_step": str(broker_lot_step) if broker_lot_step is not None else None,
         "point": str(broker_point) if broker_point is not None else None,
+        "digits": getattr(broker_constraints, "digits", None),
         "stops_level_points": str(broker_constraints.stops_level_points),
         "freeze_level_points": (
             str(broker_constraints.freeze_level_points)
@@ -2040,7 +2044,10 @@ def trade_scalper_strategies_for_bot(
     
     available_pool: list[str] = []
     if auto_mode:
-        available_pool = profile_strats or list(SCALPER_STRATEGY_REGISTRY.keys())
+        available_pool = (
+            allowed_strategy_pool
+            or list(SCALPER_STRATEGY_REGISTRY.keys())
+        )
         auto_selected = select_ai_strategies(
             engine_mode="scalper",
             available=available_pool,
@@ -2057,7 +2064,12 @@ def trade_scalper_strategies_for_bot(
         enabled_strats = list(auto_selected)
         strategy_context["auto_selected"] = list(auto_selected)
 
-    disabled_profile_strats = set(strategy_profile.disabled_strategies if strategy_profile else [])
+    use_legacy_profile_pool = not manual_strats and not recommended_strats
+    disabled_profile_strats = set(
+        strategy_profile.disabled_strategies
+        if strategy_profile and use_legacy_profile_pool
+        else []
+    )
     enabled_strats = [
         s
         for s in enabled_strats
@@ -2161,6 +2173,7 @@ def trade_scalper_strategies_for_bot(
                 "tick_volume": last_entry.get("tick_volume"),
                 "spread_price": str(spread_price) if spread_price is not None else None,
                 "point": str(broker_point) if broker_point is not None else None,
+                "digits": getattr(broker_constraints, "digits", None),
                 "min_stop_points": str(broker_min_stop_points) if broker_min_stop_points else None,
                 "lot_step": str(broker_lot_step) if broker_lot_step is not None else None,
                 "broker_constraints": broker_snapshot,

@@ -56,6 +56,103 @@ class FakeApiClient extends ApiClient {
             'category': 'commodities',
             'min_qty': '0.01',
             'recommended_qty': '0.01',
+            'recommended_config_version': 1,
+            'recommended_config': {
+              'engine_mode': 'scalper',
+              'default_timeframe': '5m',
+              'allowed_timeframes': ['1m', '5m', '15m'],
+              'context_timeframes': ['15m'],
+              'enabled_strategies': [
+                'price_action_pinbar',
+                'breakout_retest',
+                'momentum_ignition',
+              ],
+              'position_sizing_mode': 'risk',
+              'risk_per_trade_pct': 0.30,
+              'risk_max_concurrent_positions': 1,
+              'decision_min_score': 0.68,
+              'trade_interval_minutes': 12,
+              'max_trades_per_day': 5,
+              'max_spread_points': 0,
+              'allowed_deviation_points': 0,
+              'kill_switch_enabled': true,
+              'kill_switch_max_unrealized_pct': 3.0,
+              'loss_streak_autopause_enabled': true,
+              'max_loss_streak_before_pause': 3,
+              'loss_streak_cooldown_min': 120,
+              'soft_drawdown_limit_pct': 1.0,
+              'soft_size_multiplier': 0.5,
+              'hard_drawdown_limit_pct': 2.0,
+              'hard_size_multiplier': 0.25,
+              'trading_schedule': {
+                'enabled': true,
+                'timezone': 'America/New_York',
+                'allowed_days': ['mon', 'tue', 'wed', 'thu', 'fri'],
+                'start': '07:30',
+                'end': '14:00',
+              },
+              'symbol_config': {
+                'sl_points': {'min': 0.10, 'max': 0.30, 'unit': 'percent'},
+                'tp_r_multiple': 1.7,
+                'exit_mode': 'hybrid',
+                'tp1_r': 1.0,
+                'tp1_close_pct': 70,
+                'be_trigger_r': 0.8,
+                'be_buffer_r': 0.1,
+                'trail_start_r': 1.0,
+                'trail_trigger_r': 1.4,
+                'trail_mode': 'structure',
+                'max_spread_points': 0.015,
+                'max_spread_unit': 'percent',
+                'max_slippage_points': 0.008,
+                'max_slippage_unit': 'percent',
+              },
+            },
+          },
+          {
+            'id': 3,
+            'symbol': 'BTCUSDm',
+            'display_name': 'Bitcoin/USD',
+            'category': 'crypto',
+            'min_qty': '0.01',
+            'recommended_qty': '0.01',
+            'recommended_config_version': 1,
+            'recommended_config': {
+              'engine_mode': 'scalper',
+              'default_timeframe': '5m',
+              'allowed_timeframes': ['1m', '5m', '15m'],
+              'context_timeframes': ['15m'],
+              'enabled_strategies': ['momentum_ignition'],
+              'position_sizing_mode': 'risk',
+              'risk_per_trade_pct': 0.25,
+              'trading_schedule': {
+                'enabled': false,
+                'timezone': 'UTC',
+                'allowed_days': [
+                  'mon',
+                  'tue',
+                  'wed',
+                  'thu',
+                  'fri',
+                  'sat',
+                  'sun',
+                ],
+                'start': '00:00',
+                'end': '23:59',
+              },
+              'symbol_config': {
+                'sl_points': {'min': 0.35, 'max': 0.90, 'unit': 'percent'},
+                'tp_r_multiple': 1.8,
+                'exit_mode': 'hybrid',
+                'tp1_r': 1.2,
+                'tp1_close_pct': 70,
+                'trail_start_r': 1.0,
+                'max_spread_points': 0.06,
+                'max_spread_unit': 'percent',
+                'max_slippage_points': 0.03,
+                'max_slippage_unit': 'percent',
+              },
+            },
           },
         ],
         'accounts': [
@@ -79,6 +176,8 @@ class FakeApiClient extends ApiClient {
         'timeframes': ['1m', '5m', '15m'],
         'strategies': [
           {'value': 'momentum_ignition', 'label': 'Momentum Ignition'},
+          {'value': 'breakout_retest', 'label': 'Breakout Retest'},
+          {'value': 'price_action_pinbar', 'label': 'Price Action Pin Bar'},
         ],
         'trading_profiles': [
           {'value': 'scalper', 'label': 'Scalper'},
@@ -465,7 +564,7 @@ void main() {
     expect(find.text('Allocation amount'), findsOneWidget);
     expect(find.text('TRADING SCHEDULE'), findsOneWidget);
     expect(find.text('Use trading schedule'), findsOneWidget);
-    expect(find.text('POSITION PROTECTION'), findsOneWidget);
+    expect(find.text('PSYCHOLOGY / COOLING'), findsOneWidget);
     expect(find.text('Enable unrealized-loss kill switch'), findsOneWidget);
     expect(find.text('DRAWDOWN SIZING'), findsOneWidget);
     expect(find.text('Soft drawdown'), findsOneWidget);
@@ -487,11 +586,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Edit bot'));
     await tester.pumpAndSettle();
-    final sizingDropdown = find
-        .byWidgetPredicate(
-          (widget) => widget is DropdownButtonFormField<String>,
-        )
-        .last;
+    final sizingDropdown = find.byKey(const ValueKey('position-sizing'));
     await tester.ensureVisible(sizingDropdown);
     await tester.pumpAndSettle();
 
@@ -503,6 +598,77 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Fixed lot size'), findsAtLeastNWidgets(1));
     expect(find.text('Risk per trade'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('asset recommendation populates and restores the create form', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: BotsPage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Create bot'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Recommended settings applied'), findsOneWidget);
+    expect(find.text('PROTECTION / EXIT'), findsOneWidget);
+    expect(find.text('Default stop loss'), findsNothing);
+    final riskField = tester.widget<TextField>(
+      find.byKey(const ValueKey('risk-per-trade')),
+    );
+    expect(riskField.controller!.text, '0.3');
+
+    await tester.enterText(
+      find.byKey(const ValueKey('risk-per-trade')),
+      '0.45',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Customized'), findsAtLeastNWidgets(1));
+
+    final restore = find.text('Restore Recommended Defaults');
+    await tester.ensureVisible(restore);
+    await tester.tap(restore);
+    await tester.pumpAndSettle();
+    expect(riskField.controller!.text, '0.3');
+    expect(find.text('Recommended settings applied'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('editing preserves values and confirms asset replacement', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: BotsPage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit bot'));
+    await tester.pumpAndSettle();
+
+    final riskField = tester.widget<TextField>(
+      find.byKey(const ValueKey('risk-per-trade')),
+    );
+    expect(riskField.controller!.text, '0.5');
+    expect(find.text('Current settings preserved'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('asset-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('BTCUSDm · Bitcoin/USD').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Replace current settings?'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await tester.pumpAndSettle();
+    expect(riskField.controller!.text, '0.5');
     expect(tester.takeException(), isNull);
   });
 

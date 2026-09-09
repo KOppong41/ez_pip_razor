@@ -348,6 +348,56 @@ class LiveRiskTest(TestCase):
         self.assertEqual(rejection.context["current_spread"], "2")
         self.assertEqual(Decimal(rejection.context["spread_limit"]), Decimal("1"))
 
+    def _enable_semantic_asset_limits(self, bot):
+        self.asset.recommended_config = {
+            "allowed_timeframes": ["5m"],
+            "context_timeframes": ["15m"],
+            "risk_per_trade_pct": 1,
+            "symbol_config": {
+                "max_spread_points": "0.03",
+                "max_spread_unit": "percent",
+                "max_slippage_points": "0.05",
+                "max_slippage_unit": "percent",
+            },
+        }
+        self.asset.save(update_fields=["recommended_config"])
+        bot.engine_mode = "scalper"
+        bot.asset_preset_version_applied = self.asset.recommended_config_version
+        bot.max_spread_points = 0
+        bot.allowed_deviation_points = 0
+        bot.save(
+            update_fields=[
+                "engine_mode",
+                "asset_preset_version_applied",
+                "max_spread_points",
+                "allowed_deviation_points",
+            ]
+        )
+
+    def test_zero_spread_and_deviation_overrides_inherit_semantic_asset_limits(self):
+        bot = self._bot(max_spread_points=0, allowed_deviation_points=0)
+        self._enable_semantic_asset_limits(bot)
+
+        result = self._enforce(self._order(bot))
+
+        self.assertGreater(result.spread_limit_points, Decimal("3"))
+        self.assertLess(result.spread_limit_points, Decimal("3.01"))
+        self.assertEqual(result.deviation_points, 5)
+
+    def test_positive_bot_overrides_are_stricter_than_asset_limits(self):
+        bot = self._bot(max_spread_points=1, allowed_deviation_points=2)
+        self._enable_semantic_asset_limits(bot)
+        bot.max_spread_points = 1
+        bot.allowed_deviation_points = 2
+        bot.save(update_fields=["max_spread_points", "allowed_deviation_points"])
+
+        self._assert_rejected("BOT_MAX_SPREAD", self._order(bot, suffix="strict-spread"))
+
+        bot.max_spread_points = 0
+        bot.save(update_fields=["max_spread_points"])
+        result = self._enforce(self._order(bot, suffix="strict-deviation"))
+        self.assertEqual(result.deviation_points, 2)
+
     def test_live_execution_requires_bot_permission(self):
         self.account_info.trade_mode = 2
         bot = self._bot(allow_live_account_execution=False)

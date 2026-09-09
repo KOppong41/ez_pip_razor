@@ -304,6 +304,24 @@ def normalize_execution_timeframe(value: str | None) -> str | None:
     return raw
 
 
+def resolve_allowed_strategy_pool(
+    bot: Bot,
+    legacy_profile_strategies: Iterable[str] = (),
+) -> tuple[list[str], str]:
+    """Resolve the authoritative bot pool; empty means inherit the asset preset."""
+    configured = list(getattr(bot, "enabled_strategies", None) or [])
+    if configured:
+        return configured, "bot"
+    recommended = list(
+        (getattr(getattr(bot, "asset", None), "recommended_config", None) or {}).get(
+            "enabled_strategies", []
+        )
+    )
+    if recommended and getattr(bot, "asset_preset_version_applied", None) is not None:
+        return recommended, "asset"
+    return list(legacy_profile_strategies or []), "legacy_profile"
+
+
 def _strategy_profile_for_symbol(
     config: ScalperConfig,
     bot: Bot,
@@ -379,6 +397,11 @@ def resolve_scalper_execution_timeframe(
         )
         if tf
     ]
+    # Database-backed asset recommendations supersede legacy symbol-profile
+    # timeframe restrictions. Bot and symbol restrictions still intersect.
+    asset_preset = getattr(getattr(bot, "asset", None), "recommended_config", None) or {}
+    if asset_preset and getattr(bot, "asset_preset_version_applied", None) is not None:
+        profile_timeframes = []
     if profile_timeframes:
         restrictions.append(profile_timeframes)
 
@@ -632,6 +655,40 @@ def _ensure_bot_asset_symbol(base: dict, bot: Bot) -> None:
     symbols[symbol_key] = template
 
 
+def _asset_recommendation_layer(bot: Bot) -> dict:
+    """Translate the bot Asset's database preset into scalper config shape."""
+    asset = getattr(bot, "asset", None)
+    preset = deepcopy(getattr(asset, "recommended_config", None) or {})
+    # Migration/backfill intentionally leaves this marker empty on existing
+    # bots. Only creation-time application or the explicit restore action opts
+    # a bot into the database-backed preset layer.
+    if (
+        not asset
+        or not preset
+        or getattr(bot, "asset_preset_version_applied", None) is None
+    ):
+        return {}
+    symbol = asset.symbol
+    key = canonical_symbol(symbol)
+    symbol_config = deepcopy(preset.get("symbol_config") or {})
+    symbol_config.update(
+        {
+            "aliases": sorted({key, symbol.upper()}),
+            "execution_timeframes": list(preset.get("allowed_timeframes") or []),
+            "context_timeframes": list(preset.get("context_timeframes") or []),
+            "risk_pct": preset.get("risk_per_trade_pct", 0.5),
+        }
+    )
+    risk_pct = preset.get("risk_per_trade_pct", 0.5)
+    return {
+        "symbols": {key: symbol_config},
+        "risk": {
+            "default_risk_pct": risk_pct,
+            "conservative_risk_pct": risk_pct,
+        },
+    }
+
+
 def build_scalper_config(bot: Bot | None) -> ScalperConfig:
     """
     Compose the effective scalper config for a bot by layering defaults, profile data, and per-bot overrides.
@@ -646,6 +703,8 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
             profile = ScalperProfile.get_or_create_default()
         slug = profile.slug
         base = profile.get_config()
+    if bot and getattr(bot, "asset_id", None):
+        base = _deep_merge(base, _asset_recommendation_layer(bot))
     if bot and bot.scalper_params:
         base = _deep_merge(base, bot.scalper_params)
 
@@ -653,6 +712,17 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
         risk_section = base.setdefault("risk", {})
         if getattr(bot, "risk_max_concurrent_positions", None):
             risk_section["max_concurrent_trades"] = int(bot.risk_max_concurrent_positions)
+        if getattr(bot, "risk_per_trade_pct", None) is not None:
+            bot_risk = Decimal(str(bot.risk_per_trade_pct))
+            risk_section["default_risk_pct"] = bot_risk
+            risk_section["conservative_risk_pct"] = min(
+                bot_risk,
+                Decimal(str(risk_section.get("conservative_risk_pct", bot_risk))),
+            )
+            risk_section["hard_cap_pct"] = min(
+                bot_risk,
+                Decimal(str(risk_section.get("hard_cap_pct", bot_risk))),
+            )
         if getattr(bot, "max_trades_per_day", None) is not None:
             risk_section["max_trades_per_day"] = int(bot.max_trades_per_day or 0)
         if base.setdefault("sessions", []):

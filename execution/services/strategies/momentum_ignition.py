@@ -61,6 +61,12 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
         )
 
     impulse_range = impulse_high - impulse_low
+    confidence = min(
+        Decimal("1"),
+        abs(impulse_change) / cfg.min_impulse_pct
+        if cfg.min_impulse_pct > 0
+        else Decimal("0"),
+    )
     if impulse_change >= cfg.min_impulse_pct:
         # Bullish impulse, seek shallow pullback (last close not below 40% retrace of impulse)
         retrace = (impulse_high - last["close"])
@@ -82,9 +88,9 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             tp=tp,
             reason="momentum_ignition_bull",
             strategy="momentum_ignition",
-            score=float(impulse_change),
+            score=float(confidence),
             metadata={
-                "confidence": float(min(Decimal("1"), impulse_change / cfg.min_impulse_pct)),
+                "confidence": float(confidence),
                 "impulse_pct": float(impulse_change),
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),
@@ -112,9 +118,9 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             tp=tp,
             reason="momentum_ignition_bear",
             strategy="momentum_ignition",
-            score=float(abs(impulse_change)),
+            score=float(confidence),
             metadata={
-                "confidence": float(min(Decimal("1"), abs(impulse_change) / cfg.min_impulse_pct)),
+                "confidence": float(confidence),
                 "impulse_pct": float(abs(impulse_change)),
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),

@@ -33,6 +33,6 @@ class ExitPolicy:
                 raise ValueError("hybrid requires tp1_r, tp1_close_pct, and trail_start_r")
             if not (0 < self.tp1_close_pct <= 100):
                 raise ValueError("tp1_close_pct must be between 1 and 100")
-            if self.trail_start_r >= self.tp1_r:
-                raise ValueError("trail_start_r must be less than tp1_r to avoid dead trailing")
+            if self.trail_start_r > self.tp1_r:
+                raise ValueError("trail_start_r must not exceed tp1_r")
             return

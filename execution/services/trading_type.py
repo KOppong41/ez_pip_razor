@@ -3,7 +3,9 @@ from datetime import datetime, time
 from functools import lru_cache
 from decimal import Decimal
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from django.conf import settings
 from django.utils import timezone
 
 from execution.models import TradingProfile, default_trading_profile_data
@@ -119,11 +121,20 @@ def get_profile_warnings(bot) -> Dict[str, str]:
 
 
 def is_within_trading_window(bot, now: Optional[datetime] = None) -> bool:
-    now = now or timezone.localtime()
+    now = now or timezone.now()
 
     # If the bot has trading schedule enforcement disabled, always allow.
     if not getattr(bot, "trading_schedule_enabled", True):
         return True
+
+    timezone_name = getattr(bot, "trading_timezone", None) or settings.TIME_ZONE
+    try:
+        bot_timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        bot_timezone = ZoneInfo(settings.TIME_ZONE)
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now, bot_timezone)
+    now = now.astimezone(bot_timezone)
 
     weekday = WEEKDAY_MAP[now.weekday()]
     days = bot.allowed_trading_days or get_profile_config(bot.trading_profile).allowed_days

@@ -8,6 +8,7 @@ from execution.models import EconomicCalendarEvent, EconomicCalendarRefreshState
 from execution.services.economic_news import (
     is_economic_news_blackout,
     refresh_economic_calendar,
+    symbol_currencies,
 )
 
 
@@ -21,6 +22,34 @@ from execution.services.economic_news import (
     ECONOMIC_NEWS_BLACKOUT_AFTER_MINUTES=30,
 )
 class EconomicNewsTests(TestCase):
+    def test_symbol_currency_mapping_covers_pairs_and_non_fx_assets(self):
+        self.assertEqual(symbol_currencies("AUDCADm"), {"AUD", "CAD"})
+        self.assertEqual(symbol_currencies("XAUUSDm"), {"USD"})
+        self.assertEqual(symbol_currencies("GER40m"), {"EUR"})
+        self.assertEqual(symbol_currencies("UK100m"), {"GBP"})
+        self.assertEqual(symbol_currencies("BTCUSDm"), {"USD"})
+
+    def test_oil_symbols_include_energy_specific_events(self):
+        now = timezone.now()
+        EconomicCalendarRefreshState.objects.create(
+            provider="tradingeconomics",
+            last_attempt_at=now,
+            last_success_at=now,
+        )
+        EconomicCalendarEvent.objects.create(
+            external_id="eia-inventory",
+            starts_at=now,
+            country="",
+            currency="",
+            title="EIA crude oil inventories",
+            category="Petroleum status",
+            importance=3,
+        )
+
+        self.assertTrue(is_economic_news_blackout("USOILm", at=now))
+        self.assertTrue(is_economic_news_blackout("UKOILm", at=now))
+        self.assertFalse(is_economic_news_blackout("EURUSDm", at=now))
+
     def test_refresh_persists_provider_events_and_drives_symbol_blackout(self):
         now = timezone.now().replace(microsecond=0)
         response = SimpleNamespace(

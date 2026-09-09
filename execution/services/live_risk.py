@@ -65,7 +65,15 @@ def _positive_min(*values: Decimal) -> Decimal:
     return min(enabled) if enabled else Decimal("0")
 
 
-def _scalper_symbol_limit_points(order: Order, point: Decimal, value_field: str, unit_field: str):
+def _scalper_symbol_limit_points(
+    order: Order,
+    point: Decimal,
+    value_field: str,
+    unit_field: str,
+    *,
+    market_price: Decimal | None = None,
+    digits: int | None = None,
+):
     bot = getattr(order, "bot", None)
     if not bot or getattr(bot, "engine_mode", "") != "scalper" or point <= 0:
         return None
@@ -75,7 +83,13 @@ def _scalper_symbol_limit_points(order: Order, point: Decimal, value_field: str,
             return None
         value = _decimal(getattr(symbol_config, value_field, 0))
         unit = getattr(symbol_config, unit_field, "points")
-        price_limit = distance_to_price(value, unit, point)
+        price_limit = distance_to_price(
+            value,
+            unit,
+            point,
+            market_price=market_price,
+            digits=digits,
+        )
         return price_limit / point if price_limit > 0 else None
     except Exception:
         return None
@@ -252,13 +266,29 @@ def enforce_pretrade_risk(
         reject("BROKER_MIN_VOLUME_EXCEEDS_MAX_ORDER_LOT", "broker_min_volume_exceeds_max_order_lot")
 
     spread_points = (ask - bid) / point
-    profile_spread = _scalper_symbol_limit_points(locked_order, point, "max_spread_points", "max_spread_unit") or Decimal("0")
+    market_price = (ask + bid) / Decimal("2")
+    digits = getattr(symbol_info, "digits", None)
+    profile_spread = _scalper_symbol_limit_points(
+        locked_order,
+        point,
+        "max_spread_points",
+        "max_spread_unit",
+        market_price=market_price,
+        digits=digits,
+    ) or Decimal("0")
     spread_limit_points = _positive_min(_decimal(bot.max_spread_points), profile_spread)
     if spread_limit_points > 0 and spread_points > spread_limit_points:
         reject("BOT_MAX_SPREAD", "Spread exceeds configured bot limit", current_spread=str(spread_points), spread_limit=str(spread_limit_points))
-    profile_deviation = _scalper_symbol_limit_points(locked_order, point, "max_slippage_points", "max_slippage_unit") or Decimal("0")
+    profile_deviation = _scalper_symbol_limit_points(
+        locked_order,
+        point,
+        "max_slippage_points",
+        "max_slippage_unit",
+        market_price=market_price,
+        digits=digits,
+    ) or Decimal("0")
     bot_deviation = _decimal(bot.allowed_deviation_points)
-    deviation_limit = min(bot_deviation, profile_deviation) if profile_deviation > 0 else bot_deviation
+    deviation_limit = _positive_min(bot_deviation, profile_deviation)
     deviation_points = int(deviation_limit)
 
     entry = ask if locked_order.side == "buy" else bid

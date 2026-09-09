@@ -12,6 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from execution.models import EconomicCalendarEvent, EconomicCalendarRefreshState
+from execution.utils.symbols import canonical_symbol
 
 
 PROVIDER = "tradingeconomics"
@@ -26,9 +27,27 @@ CURRENCY_COUNTRIES = {
     "AUD": "australia",
     "NZD": "new zealand",
 }
+SYMBOL_NEWS_CURRENCIES = {
+    "XAUUSD": {"USD"},
+    "XAGUSD": {"USD"},
+    "USOIL": {"USD"},
+    "UKOIL": {"USD"},
+    "US30": {"USD"},
+    "US500": {"USD"},
+    "NAS100": {"USD"},
+    "GER40": {"EUR"},
+    "UK100": {"GBP"},
+    "BTCUSD": {"USD"},
+    "ETHUSD": {"USD"},
+}
+ENERGY_SYMBOLS = {"USOIL", "UKOIL"}
+ENERGY_KEYWORDS = ("eia", "crude oil inventories", "petroleum status", "opec")
 
 
 def symbol_currencies(symbol: str) -> set[str]:
+    mapped = SYMBOL_NEWS_CURRENCIES.get(canonical_symbol(symbol))
+    if mapped:
+        return set(mapped)
     normalized = "".join(char for char in (symbol or "").upper() if char.isalpha())
     return {code for code in CURRENCY_COUNTRIES if code in normalized}
 
@@ -159,8 +178,14 @@ def is_economic_news_blackout(symbol: str, *, at=None) -> bool:
     before = timedelta(minutes=int(getattr(settings, "ECONOMIC_NEWS_BLACKOUT_BEFORE_MINUTES", 30)))
     after = timedelta(minutes=int(getattr(settings, "ECONOMIC_NEWS_BLACKOUT_AFTER_MINUTES", 30)))
     minimum = int(getattr(settings, "ECONOMIC_CALENDAR_MIN_IMPORTANCE", 3))
+    event_scope = Q(currency__in=currencies) | Q(country__in=countries)
+    if canonical_symbol(symbol) in ENERGY_SYMBOLS:
+        energy_scope = Q()
+        for keyword in ENERGY_KEYWORDS:
+            energy_scope |= Q(title__icontains=keyword) | Q(category__icontains=keyword)
+        event_scope |= energy_scope
     return EconomicCalendarEvent.objects.filter(
-        Q(currency__in=currencies) | Q(country__in=countries),
+        event_scope,
         importance__gte=minimum,
         starts_at__gte=current - after,
         starts_at__lte=current + before,

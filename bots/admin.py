@@ -40,6 +40,7 @@ class AssetAdmin(admin.ModelAdmin):
         "category",
         "min_qty",
         "recommended_qty",
+        "recommended_config_version",
         "max_spread",
         "min_notional",
         "is_active",
@@ -158,7 +159,10 @@ def _strategy_help_text():
         if notes:
             line += f"; {notes}"
         items.append(f"<li>{line}</li>")
-    note = "<p>Manual strategy selection only applies when auto-trade is disabled.</p>"
+    note = (
+        "<p>This allowlist is authoritative in manual and automatic scalper mode. "
+        "Leave it empty to inherit the applied asset recommendation.</p>"
+    )
     return mark_safe(note + "<div>Recommendations:<ul>" + "".join(items) + "</ul></div>")
 
 
@@ -517,6 +521,7 @@ class BotAdmin(admin.ModelAdmin):
             "fields": (
                 "trading_profile",
                 "trading_schedule_enabled",
+                "trading_timezone",
                 "allowed_trading_days",
                 "trading_window_start",
                 "trading_window_end",

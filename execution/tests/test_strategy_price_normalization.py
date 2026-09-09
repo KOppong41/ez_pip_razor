@@ -89,6 +89,7 @@ class StrategyPriceNormalizationTests(SimpleTestCase):
         self.assertEqual({decision.action for decision in decisions}, {"open"})
         self.assertEqual({decision.direction for decision in decisions}, {"buy"})
         self.assertLess(max(d.score for d in decisions) - min(d.score for d in decisions), 1e-12)
+        self.assertTrue(all(0.0 <= decision.score <= 1.0 for decision in decisions))
 
     def test_doji_breakout_is_invariant_across_price_scales(self):
         decisions = [
@@ -99,3 +100,4 @@ class StrategyPriceNormalizationTests(SimpleTestCase):
         self.assertEqual({decision.action for decision in decisions}, {"open"})
         self.assertEqual({decision.direction for decision in decisions}, {"buy"})
         self.assertEqual(len({decision.reason for decision in decisions}), 1)
+        self.assertTrue(all(0.0 <= decision.score <= 1.0 for decision in decisions))

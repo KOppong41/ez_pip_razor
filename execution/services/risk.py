@@ -10,6 +10,17 @@ from execution.services.market_hours import is_crypto_symbol
 from execution.services.trade_constraints import distance_to_price
 
 
+def _decimal_from_payload(payload, *keys):
+    for key in keys:
+        if payload.get(key) is None:
+            continue
+        try:
+            return Decimal(str(payload[key]))
+        except Exception:
+            continue
+    return None
+
+
 @dataclass
 class RiskConfig:
     max_concurrent_positions: int = 5
@@ -128,11 +139,22 @@ def _check_scalper_limits(
     except Exception:
         point = None
 
+    payload = ctx.payload_snapshot or {}
+    market_price = _decimal_from_payload(payload, "entry", "price", "close", "last_price")
+    atr = _decimal_from_payload(payload, "atr_price", "atr")
+    try:
+        digits = int(payload["digits"]) if payload.get("digits") is not None else None
+    except (TypeError, ValueError):
+        digits = None
+
     if ctx.spread_price is not None:
         allowed_spread_price = distance_to_price(
             sym_cfg.max_spread_points,
             getattr(sym_cfg, "max_spread_unit", "points"),
             point,
+            market_price=market_price,
+            atr=atr,
+            digits=digits,
         )
         if allowed_spread_price > 0 and ctx.spread_price > allowed_spread_price:
             return False, "scalper:spread_exceeded"
@@ -142,6 +164,9 @@ def _check_scalper_limits(
             sym_cfg.max_slippage_points,
             getattr(sym_cfg, "max_slippage_unit", "points"),
             point,
+            market_price=market_price,
+            atr=atr,
+            digits=digits,
         )
         if allowed_slippage_price > 0 and ctx.slippage_price > allowed_slippage_price:
             return False, "scalper:slippage_exceeded"

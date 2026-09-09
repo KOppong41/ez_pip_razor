@@ -1,12 +1,18 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from rest_framework import serializers
 
 from brokers.models import BrokerAccount
+from bots.services import recommended_bot_defaults
 
 from .models import Asset, Bot, STANDARD_TIMEFRAMES, STRATEGY_CHOICES
 
 
 class BotSerializer(serializers.ModelSerializer):
+    apply_asset_recommendations = serializers.BooleanField(
+        write_only=True,
+        required=False,
+    )
     asset = serializers.PrimaryKeyRelatedField(
         queryset=Asset.objects.filter(is_active=True),
     )
@@ -19,7 +25,6 @@ class BotSerializer(serializers.ModelSerializer):
         child=serializers.ChoiceField(choices=STRATEGY_CHOICES),
         required=False,
         allow_empty=True,
-        default=list,
     )
     allowed_timeframes = serializers.ListField(
         child=serializers.ChoiceField(choices=STANDARD_TIMEFRAMES),
@@ -46,6 +51,7 @@ class BotSerializer(serializers.ModelSerializer):
             "broker_account",
             "broker_account_details",
             "engine_mode",
+            "apply_asset_recommendations",
             "default_timeframe",
             "allowed_timeframes",
             "default_qty",
@@ -56,6 +62,7 @@ class BotSerializer(serializers.ModelSerializer):
             "default_sl_pips",
             "auto_trade",
             "enabled_strategies",
+            "scalper_params",
             "decision_min_score",
             "risk_max_concurrent_positions",
             "max_trades_per_day",
@@ -69,6 +76,7 @@ class BotSerializer(serializers.ModelSerializer):
             "allocation_loss_pct",
             "trading_profile",
             "trading_schedule_enabled",
+            "trading_timezone",
             "allowed_trading_days",
             "trading_window_start",
             "trading_window_end",
@@ -82,9 +90,18 @@ class BotSerializer(serializers.ModelSerializer):
             "soft_size_multiplier",
             "hard_drawdown_limit_pct",
             "hard_size_multiplier",
+            "asset_preset_version_applied",
+            "asset_preset_applied_at",
             "created_at",
         )
-        read_only_fields = ("id", "bot_id", "status", "created_at")
+        read_only_fields = (
+            "id",
+            "bot_id",
+            "status",
+            "asset_preset_version_applied",
+            "asset_preset_applied_at",
+            "created_at",
+        )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -106,6 +123,8 @@ class BotSerializer(serializers.ModelSerializer):
             "category": asset.category,
             "min_qty": asset.min_qty,
             "recommended_qty": asset.recommended_qty,
+            "recommended_config_version": asset.recommended_config_version,
+            "recommended_config": asset.recommended_config,
         }
 
     def get_broker_account_details(self, obj):
@@ -146,22 +165,6 @@ class BotSerializer(serializers.ModelSerializer):
                 return getattr(self.instance, field_name)
             return Bot._meta.get_field(field_name).get_default()
 
-        auto_trade = attrs.get(
-            "auto_trade",
-            getattr(self.instance, "auto_trade", True),
-        )
-        strategies = attrs.get(
-            "enabled_strategies",
-            getattr(self.instance, "enabled_strategies", []),
-        )
-        if not auto_trade and not strategies:
-            raise serializers.ValidationError(
-                {
-                    "enabled_strategies": (
-                        "Select at least one strategy when auto-trade is disabled."
-                    )
-                }
-            )
         account = attrs.get("broker_account", getattr(self.instance, "broker_account", None))
         sizing_mode = effective_value("position_sizing_mode")
         default_qty = effective_value("default_qty")
@@ -213,6 +216,16 @@ class BotSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         request = self.context["request"]
+        apply_recommendations = validated_data.pop("apply_asset_recommendations", True)
+        asset = validated_data.get("asset")
+        if apply_recommendations and asset is not None:
+            explicit_values = dict(validated_data)
+            validated_data = recommended_bot_defaults(asset)
+            validated_data.update(explicit_values)
+            validated_data["asset_preset_version_applied"] = (
+                asset.recommended_config_version
+            )
+            validated_data["asset_preset_applied_at"] = timezone.now()
         validated_data["owner"] = request.user
         validated_data["status"] = "stopped"
         try:
@@ -221,6 +234,18 @@ class BotSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(self._validation_detail(exc)) from exc
 
     def update(self, instance, validated_data):
+        apply_recommendations = validated_data.pop(
+            "apply_asset_recommendations", False
+        )
+        if apply_recommendations:
+            asset = validated_data.get("asset", instance.asset)
+            explicit_values = dict(validated_data)
+            validated_data = recommended_bot_defaults(asset)
+            validated_data.update(explicit_values)
+            validated_data["asset_preset_version_applied"] = (
+                asset.recommended_config_version
+            )
+            validated_data["asset_preset_applied_at"] = timezone.now()
         try:
             return super().update(instance, validated_data)
         except DjangoValidationError as exc:

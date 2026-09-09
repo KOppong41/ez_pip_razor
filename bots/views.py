@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from brokers.models import BrokerAccount
 from core.utils import structured_log
 from execution.models import MT5ConnectionState, RiskPolicy
+from execution.services.brokers import get_broker_symbol_constraints
 from subscription.utils import get_bot_limit
 
 from .models import (
@@ -18,6 +19,7 @@ from .models import (
     Bot,
 )
 from .serializers import BotControlSerializer, BotSerializer
+from .services import apply_recommendations_to_bot
 
 
 class BotViewSet(
@@ -50,6 +52,8 @@ class BotViewSet(
             "min_qty",
             "recommended_qty",
             "max_spread",
+            "recommended_config_version",
+            "recommended_config",
         )
         account_rows = BrokerAccount.objects.filter(
             owner=request.user,
@@ -187,3 +191,60 @@ class BotViewSet(
             owner_id=request.user.id,
         )
         return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], url_path="apply-asset-recommendations")
+    def apply_asset_recommendations(self, request, pk=None):
+        bot = self.get_object()
+        if not bot.asset_id:
+            return Response(
+                {"detail": "Assign an asset before applying recommendations."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        apply_recommendations_to_bot(bot)
+        structured_log(
+            "bot.asset_recommendations_applied",
+            bot_id=bot.id,
+            asset_id=bot.asset_id,
+            preset_version=bot.asset_preset_version_applied,
+            owner_id=request.user.id,
+        )
+        return Response(BotSerializer(bot, context={"request": request}).data)
+
+    @action(detail=False, methods=["get"], url_path="symbol-constraints")
+    def symbol_constraints(self, request):
+        """Return the connected broker's authoritative fixed-lot hints."""
+        account_id = request.query_params.get("broker_account")
+        asset_id = request.query_params.get("asset")
+        if not account_id or not asset_id:
+            return Response(
+                {"detail": "broker_account and asset are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        account = BrokerAccount.objects.filter(
+            pk=account_id,
+            owner=request.user,
+            is_active=True,
+        ).first()
+        asset = Asset.objects.filter(pk=asset_id, is_active=True).first()
+        if account is None or asset is None:
+            return Response(
+                {"detail": "Broker account or asset was not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        constraints = get_broker_symbol_constraints(account, asset.symbol)
+        available = bool(
+            constraints.min_lot is not None
+            and constraints.min_lot > 0
+            and constraints.lot_step is not None
+            and constraints.lot_step > 0
+        )
+        return Response(
+            {
+                "available": available,
+                "symbol": asset.symbol,
+                "volume_min": str(constraints.min_lot) if constraints.min_lot is not None else None,
+                "volume_max": str(constraints.max_lot) if constraints.max_lot is not None else None,
+                "volume_step": str(constraints.lot_step) if constraints.lot_step is not None else None,
+                "suggested_quantity": str(constraints.min_lot) if available else None,
+            }
+        )
