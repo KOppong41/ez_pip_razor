@@ -108,6 +108,35 @@ class Decision(models.Model):
         dirn = self.signal.direction if self.signal else "-"
         return f"{self.action} {sym} {dirn} ({self.reason or 'no-reason'})"
 
+
+class EconomicCalendarEvent(models.Model):
+    """Durable high-impact calendar data used by live entry blackouts."""
+
+    provider = models.CharField(max_length=32, default="tradingeconomics")
+    external_id = models.CharField(max_length=128)
+    starts_at = models.DateTimeField(db_index=True)
+    country = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(max_length=8, blank=True, default="")
+    title = models.CharField(max_length=255)
+    category = models.CharField(max_length=128, blank=True, default="")
+    importance = models.PositiveSmallIntegerField(default=0)
+    raw_payload = models.JSONField(default=dict, blank=True)
+    fetched_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["starts_at", "external_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "external_id"],
+                name="execution_unique_economic_calendar_event",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["importance", "starts_at"]),
+            models.Index(fields=["country", "starts_at"]),
+            models.Index(fields=["currency", "starts_at"]),
+        ]
+
 class Order(models.Model):
     INTENT = [
         ("entry", "entry"),

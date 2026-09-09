@@ -44,6 +44,7 @@ class PreTradeRiskResult:
     spread_points: Decimal
     spread_limit_points: Decimal
     deviation_points: int
+    effective_risk_pct: Decimal = Decimal("0")
 
 
 def _decimal(value, default="0") -> Decimal:
@@ -278,6 +279,22 @@ def enforce_pretrade_risk(
     effective_cap = _positive_min(account_order_cap, bot_order_cap, runtime_max_lot, volume_max)
     loss_per_lot = Decimal("0")
     risk_amount = Decimal("0")
+    bot_risk_pct = _decimal(bot.risk_per_trade_pct)
+    effective_risk_pct = bot_risk_pct
+    adaptive_risk_applied = False
+    decision_params = (locked_order.decision.params or {}) if locked_order.decision_id else {}
+    adaptive_risk = decision_params.get("risk_pct")
+    if adaptive_risk is not None:
+        adaptive_risk_pct = _decimal(adaptive_risk)
+        if not adaptive_risk_pct.is_finite() or adaptive_risk_pct <= 0:
+            reject(
+                "ADAPTIVE_RISK_INVALID",
+                "Decision risk percentage must be a positive finite value",
+                decision_risk_pct=str(adaptive_risk),
+            )
+        effective_risk_pct = min(bot_risk_pct, adaptive_risk_pct)
+        adaptive_risk_applied = effective_risk_pct < bot_risk_pct
+
     if bot.position_sizing_mode == "risk":
         tick_size = _decimal(getattr(symbol_info, "trade_tick_size", 0))
         tick_value = max(
@@ -294,7 +311,9 @@ def enforce_pretrade_risk(
         loss_per_lot = abs(connector.calc_profit_for_account(account, locked_order.side, locked_order.symbol, 1, entry, stop))
         if loss_per_lot <= 0:
             reject("RISK_CALCULATION_UNAVAILABLE", "Broker monetary loss calculation failed")
-        risk_amount = equity * _decimal(bot.risk_per_trade_pct) / Decimal("100")
+        # A strategy may reduce risk in response to current conditions, but
+        # may never use this channel to exceed the bot's configured ceiling.
+        risk_amount = equity * effective_risk_pct / Decimal("100")
         if risk_amount <= 0:
             reject("RISK_AMOUNT_INVALID", "Risk amount is not positive")
         volume = risk_amount / loss_per_lot
@@ -311,8 +330,11 @@ def enforce_pretrade_risk(
             reject("PLATFORM_MAX_ORDER_LOT", "Requested fixed lot exceeds the platform maximum", requested_volume=str(requested), platform_limit=str(runtime_max_lot))
         if requested > volume_max:
             reject("BROKER_MAX_VOLUME", "Requested fixed lot exceeds the broker maximum", requested_volume=str(requested), broker_limit=str(volume_max))
-        volume = _floor_to_step(requested, volume_step)
-        if volume != requested:
+        adjusted_requested = requested
+        if adaptive_risk_applied and bot_risk_pct > 0:
+            adjusted_requested = requested * effective_risk_pct / bot_risk_pct
+        volume = _floor_to_step(adjusted_requested, volume_step)
+        if volume != requested and not adaptive_risk_applied:
             reject("BROKER_VOLUME_STEP", "Fixed lot size does not align with the broker volume step", requested_volume=str(requested), volume_step=str(volume_step))
         try:
             loss_per_lot = abs(connector.calc_profit_for_account(account, locked_order.side, locked_order.symbol, 1, entry, stop))
@@ -363,4 +385,5 @@ def enforce_pretrade_risk(
         spread_points=spread_points,
         spread_limit_points=spread_limit_points,
         deviation_points=deviation_points,
+        effective_risk_pct=effective_risk_pct,
     )

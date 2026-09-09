@@ -15,7 +15,7 @@ class TrendPullbackConfig:
     slope_lookback: int = 5
     min_trend_slope_pct: Decimal = Decimal("0.00005")
     atr_period: int = 12
-    min_atr_points: Decimal = Decimal("0.3")
+    min_atr_pct: Decimal = Decimal("0.00005")
     pullback_atr_multiple: Decimal = Decimal("0.85")
     wick_rejection_ratio: Decimal = Decimal("1.2")
     fractal_period: int = 2
@@ -71,13 +71,14 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
     slope = ema_now - ema_prev
     slope_pct = (slope / last_close) if last_close else Decimal("0")
 
-    atr_points = _atr(candles, cfg.atr_period)
-    if atr_points < cfg.min_atr_points:
+    atr_price = _atr(candles, cfg.atr_period)
+    atr_pct = atr_price / abs(last_close) if last_close else Decimal("0")
+    if atr_price <= 0 or atr_pct < cfg.min_atr_pct:
         return EngineDecision(
             action="skip",
             reason="trend_pullback_low_atr",
             strategy="trend_pullback",
-            metadata={"reason": "low_atr", "atr": float(atr_points), "min": float(cfg.min_atr_points)},
+            metadata={"reason": "low_atr", "atr_pct": float(atr_pct), "min_atr_pct": float(cfg.min_atr_pct)},
         )
 
     bull_trend = slope_pct > cfg.min_trend_slope_pct and last_close > ema_now
@@ -92,13 +93,13 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
         )
 
     # Pullback check: price near EMA measured in ATR multiples
-    dist_points = abs(last_close - ema_now)
-    if dist_points > atr_points * cfg.pullback_atr_multiple:
+    dist_price = abs(last_close - ema_now)
+    if dist_price > atr_price * cfg.pullback_atr_multiple:
         return EngineDecision(
             action="skip",
             reason="trend_pullback_not_at_ema",
             strategy="trend_pullback",
-            metadata={"reason": "distance", "dist_points": float(dist_points), "allowed": float(atr_points * cfg.pullback_atr_multiple)},
+            metadata={"reason": "distance", "distance_price": float(dist_price), "allowed": float(atr_price * cfg.pullback_atr_multiple)},
         )
 
     def _rejection_ratio() -> Decimal:
@@ -148,8 +149,8 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
     confidence = min(
         Decimal("1"),
         max(Decimal("0"), (abs(slope_pct) / cfg.min_trend_slope_pct) * Decimal("0.5"))
-        + max(Decimal("0"), (atr_points - cfg.min_atr_points) / (cfg.min_atr_points + Decimal("0.0001"))) * Decimal("0.2")
-        + max(Decimal("0"), (cfg.pullback_atr_multiple - (dist_points / atr_points)) * Decimal("0.3")),
+        + max(Decimal("0"), (atr_pct - cfg.min_atr_pct) / (cfg.min_atr_pct + Decimal("0.000001"))) * Decimal("0.2")
+        + max(Decimal("0"), (cfg.pullback_atr_multiple - (dist_price / atr_price)) * Decimal("0.3")),
     )
 
     if bull_trend:
@@ -167,8 +168,8 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
             metadata={
                 "confidence": float(confidence),
                 "slope_pct": float(slope_pct),
-                "atr_points": float(atr_points),
-                "pullback_points": float(dist_points),
+                "atr_pct": float(atr_pct),
+                "pullback_atr": float(dist_price / atr_price),
                 "rejection_ratio": float(rejection),
             },
         )
@@ -187,8 +188,8 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
             metadata={
                 "confidence": float(confidence),
                 "slope_pct": float(abs(slope_pct)),
-                "atr_points": float(atr_points),
-                "pullback_points": float(dist_points),
+                "atr_pct": float(atr_pct),
+                "pullback_atr": float(dist_price / atr_price),
                 "rejection_ratio": float(rejection),
             },
         )

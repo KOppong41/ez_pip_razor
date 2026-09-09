@@ -338,7 +338,8 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
     if config.rollover_blackout and config.is_rollover_window():
         return StrategyDecision(action="ignore", reason="scalper:rollover")
 
-    if payload.get("news_blocked"):
+    from execution.services.economic_news import is_economic_news_blackout
+    if payload.get("news_blocked") or is_economic_news_blackout(signal.symbol):
         return StrategyDecision(action="ignore", reason="scalper:news_blackout")
 
     bias = _resolve_bias(payload)
@@ -397,7 +398,10 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
             return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
         if trail_start_r >= tp1_r:
             return StrategyDecision(action="ignore", reason="scalper:exit_invalid_hybrid")
-        effective_tp_r_multiple = tp1_r
+        # TP1 is a partial managed close. Sending it as the broker TP would
+        # flatten the entire position before the configured close percentage
+        # can be applied.
+        effective_tp_r_multiple = None
     else:
         return StrategyDecision(action="ignore", reason="scalper:exit_mode_unknown")
 

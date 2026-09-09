@@ -10,7 +10,7 @@ from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector, _MT5Proxy
-from execution.models import BrokerPosition, Decision, ExecutionAttempt, Signal
+from execution.models import BrokerPosition, Decision, Execution, ExecutionAttempt, Signal
 from execution.services.live_risk import PreTradeRiskResult, RiskRejected
 from execution.services.orchestrator import create_order_from_decision
 
@@ -77,6 +77,11 @@ class MT5ConnectorTest(TestCase):
         api.TRADE_ACTION_REMOVE = 8
         api.ORDER_TIME_GTC = 0
         api.ORDER_FILLING_FOK = 0
+        api.ORDER_FILLING_IOC = 1
+        api.ORDER_FILLING_RETURN = 2
+        api.SYMBOL_FILLING_FOK = 1
+        api.SYMBOL_FILLING_IOC = 2
+        api.SYMBOL_TRADE_EXECUTION_MARKET = 2
         api.positions_get.return_value = ()
         api.symbol_info_tick.return_value = SimpleNamespace(bid=1.1000, ask=1.1002)
         api.symbol_info.return_value = SimpleNamespace(
@@ -94,6 +99,26 @@ class MT5ConnectorTest(TestCase):
         api.order_check.return_value = SimpleNamespace(retcode=0, comment="ok")
         api.history_deals_get.return_value = ()
         api.last_error.return_value = (0, "ok")
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_filling_mode_decodes_symbol_permission_bitmask(self, api):
+        self._configure_api(api)
+        connector = MT5Connector()
+
+        self.assertEqual(connector._filling_mode(SimpleNamespace(filling_mode=1)), 0)
+        self.assertEqual(connector._filling_mode(SimpleNamespace(filling_mode=2)), 1)
+        self.assertEqual(connector._filling_mode(SimpleNamespace(filling_mode=3)), 0)
+        self.assertEqual(
+            connector._filling_mode(SimpleNamespace(filling_mode=0, trade_exemode=1)),
+            2,
+        )
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_filling_mode_rejects_market_execution_without_permission(self, api):
+        self._configure_api(api)
+
+        with self.assertRaisesRegex(ConnectorError, "no permitted filling mode"):
+            MT5Connector._filling_mode(SimpleNamespace(filling_mode=0, trade_exemode=2))
 
     @patch("execution.connectors.mt5._mt5_module", None)
     def test_missing_mt5_proxy_supports_python_introspection(self):
@@ -142,6 +167,40 @@ class MT5ConnectorTest(TestCase):
         self.assertIsNotNone(self.order.order_send_called_at)
         self.assertIsNotNone(self.order.broker_response_received_at)
         self.assertIsNotNone(self.order.execution_recorded_at)
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_trail_only_entry_is_sent_with_sl_and_without_fixed_tp(self, risk, api):
+        self._configure_api(api)
+        risk.return_value = self._risk_result()
+        decision = self.order.decision
+        decision.params = {
+            "sl": "1.0900",
+            "tp": None,
+            "scalper": {"exit_mode": "trail_only", "trail_start_r": "1.0"},
+        }
+        decision.save(update_fields=["params"])
+        self.order.tp = None
+        self.order.save(update_fields=["tp"])
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            price=1.1002,
+            volume=0.04,
+            order=121,
+            deal=122,
+            position=123,
+            comment="done",
+        )
+
+        connector = MT5Connector()
+        with patch.object(connector, "_login_from_order"), patch.object(
+            connector, "_ensure_symbol"
+        ), patch("execution.connectors.mt5._check_ready"):
+            connector.place_order(self.order)
+
+        request = api.order_send.call_args.args[0]
+        self.assertEqual(request["sl"], 1.09)
+        self.assertNotIn("tp", request)
 
     @patch("execution.connectors.mt5.mt5")
     @patch("execution.services.live_risk.enforce_pretrade_risk")
@@ -321,6 +380,19 @@ class MT5ConnectorTest(TestCase):
             position=444,
             comment="closed",
         )
+        api.history_deals_get.return_value = (
+            SimpleNamespace(
+                ticket=556,
+                order=555,
+                position_id=444,
+                volume=0.10,
+                price=1.1000,
+                profit=12.5,
+                commission=-0.4,
+                swap=-0.1,
+                comment="closed",
+            ),
+        )
 
         connector = MT5Connector()
         with patch.object(connector, "_login_from_order"), patch.object(
@@ -331,6 +403,10 @@ class MT5ConnectorTest(TestCase):
         api.order_send.assert_called_once()
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, "filled")
+        execution = Execution.objects.get(order=self.order)
+        self.assertEqual(execution.profit, Decimal("12.5"))
+        self.assertEqual(execution.commission, Decimal("-0.4"))
+        self.assertEqual(execution.swap, Decimal("-0.1"))
 
     @patch("execution.connectors.mt5.mt5")
     @patch("execution.services.live_risk.enforce_pretrade_risk")

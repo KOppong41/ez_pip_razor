@@ -43,6 +43,7 @@ from execution.services.ai_strategy_selector import select_ai_strategies
 from execution.services.engine import run_engine_on_candles
 from execution.services.fanout import fanout_orders
 from execution.services.marketdata import get_candles_for_account
+from execution.services.economic_news import refresh_economic_calendar
 from execution.services.monitor import (
     EarlyExitConfig,
     KillSwitchConfig,
@@ -473,12 +474,48 @@ def trail_positions_task(self):
             if market <= 0:
                 continue
 
-            scalper_plan = plan_scalper_position(pos, market)
+            tp1_orders = Order.objects.filter(
+                broker_account=pos.broker_account,
+                broker_position_ticket=pos.broker_position_ticket,
+                intent="exit",
+                client_order_id__startswith="close:tp1|",
+            )
+            # One deterministic TP1 attempt prevents duplicate partial closes.
+            # A definitive rejection resumes trailing protection rather than
+            # trapping the position in an endless partial-close retry loop.
+            tp1_completed = tp1_orders.exists()
+            scalper_plan = plan_scalper_position(
+                pos,
+                market,
+                tp1_completed=tp1_completed,
+            )
             if scalper_plan is not None:
                 if scalper_plan.close:
                     order, _ = create_close_order_for_position(pos, pos.broker_account)
                     _queue_or_dispatch_order(order, emergency=True)
                     closed_ids.append(pos.id)
+                elif scalper_plan.partial_close_pct is not None:
+                    info = connector.symbol_info_for_account(pos.broker_account, pos.symbol)
+                    step = Decimal(str(getattr(info, "volume_step", 0) or 0))
+                    minimum = Decimal(str(getattr(info, "volume_min", 0) or 0))
+                    requested = pos.volume * Decimal(scalper_plan.partial_close_pct) / Decimal("100")
+                    if step > 0:
+                        requested = (requested // step) * step
+                    remainder = pos.volume - requested
+                    # If the broker's minimum/step makes the configured split
+                    # impossible, flatten at TP1 rather than repeatedly
+                    # skipping both the partial close and trailing protection.
+                    if requested < minimum or (remainder > 0 and remainder < minimum):
+                        requested = pos.volume
+                    order, created = create_close_order_for_position(
+                        pos,
+                        pos.broker_account,
+                        close_qty=requested,
+                        stage="tp1",
+                    )
+                    if created:
+                        _queue_or_dispatch_order(order, emergency=True)
+                        closed_ids.append(pos.id)
                 elif scalper_plan.new_sl is not None:
                     connector.modify_broker_position(pos, sl=scalper_plan.new_sl)
                     moved_ids.append(pos.id)
@@ -545,6 +582,18 @@ def trail_positions_task(self):
     except Exception as e:
         task_failures_total.labels(task="trail_positions_task").inc()
         raise
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=300,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 5},
+)
+def refresh_economic_calendar_task(self):
+    return {"imported": refresh_economic_calendar()}
 
 
 @shared_task(

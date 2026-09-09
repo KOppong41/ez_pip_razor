@@ -8,12 +8,22 @@ from django.utils import timezone
 from execution.services.position_management import plan_scalper_position
 
 
-def _position(*, side="buy", market_sl="0.9900", age_minutes=5, ownership="ez_trade"):
+def _position(
+    *,
+    side="buy",
+    market_sl="0.9900",
+    age_minutes=5,
+    ownership="ez_trade",
+    exit_mode="fixed_tp",
+):
     decision = SimpleNamespace(
         params={
             "entry": "1.0000",
             "sl": "0.9900" if side == "buy" else "1.0100",
             "scalper": {
+                "exit_mode": exit_mode,
+                "tp1_r": "1.0",
+                "tp1_close_pct": 70,
                 "be_trigger_r": "1.0",
                 "be_buffer_r": "0.2",
                 "trail_trigger_r": "1.5",
@@ -37,9 +47,20 @@ def _position(*, side="buy", market_sl="0.9900", age_minutes=5, ownership="ez_tr
 
 class ScalperPositionPlanTests(SimpleTestCase):
     def test_break_even_and_trailing_choose_best_stop(self):
-        plan = plan_scalper_position(_position(), Decimal("1.0200"))
+        plan = plan_scalper_position(_position(), Decimal("1.0200"), tp1_completed=True)
         self.assertEqual(plan.new_sl, Decimal("1.01500"))
         self.assertFalse(plan.close)
+
+    def test_hybrid_tp1_requests_configured_partial_close_once(self):
+        pending = plan_scalper_position(_position(exit_mode="hybrid"), Decimal("1.0100"))
+        completed = plan_scalper_position(
+            _position(exit_mode="hybrid"),
+            Decimal("1.0100"),
+            tp1_completed=True,
+        )
+
+        self.assertEqual(pending.partial_close_pct, 70)
+        self.assertIsNone(completed.partial_close_pct)
 
     def test_stale_near_breakeven_requests_close(self):
         plan = plan_scalper_position(

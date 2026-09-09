@@ -209,6 +209,63 @@ class LiveRiskTest(TestCase):
         self.assertEqual(result.volume, Decimal("1"))
         self.assertNotEqual(result.volume, bot.default_qty)
 
+    def test_decision_risk_can_reduce_but_not_raise_bot_risk(self):
+        bot = self._bot(risk_per_trade_pct=Decimal("1"))
+        signal = Signal.objects.create(
+            bot=bot,
+            source="engine_v1",
+            symbol=self.asset.symbol,
+            direction="buy",
+            dedupe_key="adaptive-risk",
+        )
+        decision = Decision.objects.create(
+            bot=bot,
+            signal=signal,
+            action="open",
+            score=1,
+            params={"risk_pct": "0.25"},
+        )
+
+        result = self._enforce(self._order(bot, decision=decision))
+
+        self.assertEqual(result.effective_risk_pct, Decimal("0.25"))
+        self.assertEqual(result.risk_amount, Decimal("25.00"))
+        self.assertEqual(result.volume, Decimal("0.25"))
+
+        decision.params = {"risk_pct": "2"}
+        decision.save(update_fields=["params"])
+        second = self._enforce(self._order(bot, suffix="adaptive-ceiling", decision=decision))
+        self.assertEqual(second.effective_risk_pct, Decimal("1"))
+        self.assertEqual(second.volume, Decimal("1"))
+
+    def test_decision_risk_reduces_fixed_sizing_as_a_modifier(self):
+        bot = self._bot(
+            position_sizing_mode="fixed",
+            risk_per_trade_pct=Decimal("1"),
+            default_qty=Decimal("0.80"),
+        )
+        signal = Signal.objects.create(
+            bot=bot,
+            source="engine_v1",
+            symbol=self.asset.symbol,
+            direction="buy",
+            dedupe_key="adaptive-fixed-risk",
+        )
+        decision = Decision.objects.create(
+            bot=bot,
+            signal=signal,
+            action="open",
+            score=1,
+            params={"risk_pct": "0.25"},
+        )
+
+        result = self._enforce(
+            self._order(bot, decision=decision, qty=Decimal("0.80"))
+        )
+
+        self.assertEqual(result.effective_risk_pct, Decimal("0.25"))
+        self.assertEqual(result.volume, Decimal("0.20"))
+
     def test_risk_based_volume_is_floored_to_broker_step(self):
         bot = self._bot(risk_per_trade_pct=Decimal("0.137"))
 

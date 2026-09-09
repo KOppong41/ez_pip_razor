@@ -11,6 +11,7 @@ from django.utils import timezone
 class ScalperPositionPlan:
     new_sl: Decimal | None = None
     close: bool = False
+    partial_close_pct: int | None = None
     reason: str = ""
 
 
@@ -23,7 +24,13 @@ def _decimal(value) -> Decimal | None:
         return None
 
 
-def plan_scalper_position(position, market_price, *, now: datetime | None = None):
+def plan_scalper_position(
+    position,
+    market_price,
+    *,
+    now: datetime | None = None,
+    tp1_completed: bool = False,
+):
     """Plan broker-side management for one EZ Trade-owned scalper position.
 
     ``None`` means the position was not opened from a scalper decision and the
@@ -68,6 +75,19 @@ def plan_scalper_position(position, market_price, *, now: datetime | None = None
 
     if reward <= 0:
         return ScalperPositionPlan(reason="scalper_not_profitable")
+
+    if str(scalper.get("exit_mode") or "fixed_tp").lower() == "hybrid" and not tp1_completed:
+        tp1_r = _decimal(scalper.get("tp1_r"))
+        try:
+            tp1_close_pct = int(scalper.get("tp1_close_pct") or 0)
+        except (TypeError, ValueError):
+            tp1_close_pct = 0
+        if tp1_r is not None and tp1_r > 0 and 0 < tp1_close_pct <= 100:
+            if reward >= risk * tp1_r:
+                return ScalperPositionPlan(
+                    partial_close_pct=tp1_close_pct,
+                    reason="scalper_hybrid_tp1",
+                )
 
     candidates: list[Decimal] = []
     be_trigger_value = _decimal(scalper.get("be_trigger_r"))

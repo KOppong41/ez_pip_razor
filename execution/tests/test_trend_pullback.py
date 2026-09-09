@@ -31,7 +31,7 @@ class TrendPullbackFractalTests(SimpleTestCase):
             slope_lookback=1,
             min_trend_slope_pct=Decimal("0.001"),
             atr_period=2,
-            min_atr_points=Decimal("0.1"),
+            min_atr_pct=Decimal("0.01"),
             pullback_atr_multiple=Decimal("1"),
             wick_rejection_ratio=Decimal("1"),
             fractal_period=2,

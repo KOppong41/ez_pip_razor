@@ -81,11 +81,21 @@ def make_client_order_id(decision: Decision, broker_account: BrokerAccount) -> s
     return hashlib.sha1(base.encode()).hexdigest()[:20]  # deterministic idempotency
 
 
-def make_close_order_id(position, broker_account: BrokerAccount) -> str:
+def make_close_order_id(position, broker_account: BrokerAccount, *, stage: str = "full") -> str:
     ticket = getattr(position, "broker_position_ticket", None)
-    base = f"close|{ticket}|{broker_account.id}|{position.symbol}"
+    base = (
+        f"close|{ticket}|{broker_account.id}|{position.symbol}"
+        if stage == "full"
+        else f"close|{stage}|{ticket}|{broker_account.id}|{position.symbol}"
+    )
     # Prefix with "close|" so downstream validation can recognize close orders
-    return "close|" + hashlib.sha1(base.encode()).hexdigest()[:20]
+    prefix = "close|" if stage == "full" else f"close:{stage}|"
+    return prefix + hashlib.sha1(base.encode()).hexdigest()[:20]
+
+
+def _allows_managed_take_profit(decision: Decision) -> bool:
+    scalper = (decision.params or {}).get("scalper")
+    return isinstance(scalper, dict) and scalper.get("exit_mode") in {"trail_only", "hybrid"}
 
 @dataclass
 class OrderSpec:
@@ -186,7 +196,13 @@ def _enforce_minimum_stop_distance(symbol: str, side: str, entry_px: Decimal | N
     return sl, tp
 
 
-def create_close_order_for_position(position, broker_account: BrokerAccount) -> Tuple[Order, bool]:
+def create_close_order_for_position(
+    position,
+    broker_account: BrokerAccount,
+    *,
+    close_qty: Decimal | None = None,
+    stage: str = "full",
+) -> Tuple[Order, bool]:
     """
     Idempotently create a close order sized to flatten the given position.
     """
@@ -202,8 +218,11 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
         if bot is None:
             raise ValueError("Cannot close a paper position without its bot")
         side = "sell" if position.qty > 0 else "buy"
-        qty = abs(position.qty)
-        client_id = make_close_order_id(position, broker_account)
+        available_qty = abs(position.qty)
+        qty = Decimal(str(close_qty)) if close_qty is not None else available_qty
+        if qty <= 0 or qty > available_qty:
+            raise ValueError("Close quantity must be positive and no greater than the open position")
+        client_id = make_close_order_id(position, broker_account, stage=stage)
         order, created = Order.objects.get_or_create(
             client_order_id=client_id,
             defaults={
@@ -241,7 +260,11 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
         raise ValueError("Manual or unknown MT5 positions cannot be managed automatically")
 
     side = "sell" if broker_position.side == "buy" else "buy"
-    client_id = make_close_order_id(broker_position, broker_account)
+    available_qty = broker_position.volume
+    qty = Decimal(str(close_qty)) if close_qty is not None else available_qty
+    if qty <= 0 or qty > available_qty:
+        raise ValueError("Close quantity must be positive and no greater than the open position")
+    client_id = make_close_order_id(broker_position, broker_account, stage=stage)
 
     # Prefer a bot on this broker account that actually trades the position's symbol
     bot = None
@@ -264,8 +287,8 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
         "broker_account": broker_account,
         "symbol": broker_position.symbol,
         "side": side,
-        "qty": str(broker_position.volume),
-        "remaining_qty": broker_position.volume,
+        "qty": str(qty),
+        "remaining_qty": qty,
         "intent": "exit",
         "broker_position_ticket": broker_position.broker_position_ticket,
         "status": "new",
@@ -280,7 +303,7 @@ def create_close_order_for_position(position, broker_account: BrokerAccount) -> 
     # Never recycle a resolved close order into a fresh submission. Ambiguous
     # retries must reconcile this deterministic order before another send.
     if not created and order.status not in {"filled", "canceled", "rejected", "error"}:
-        desired_qty = broker_position.volume
+        desired_qty = qty
         updates = []
         if order.qty != desired_qty:
             order.qty = desired_qty
@@ -340,8 +363,9 @@ def create_order_from_decision(
     params = decision.params or {}
     sl = params.get("sl")
     tp = params.get("tp")
-    if sl is None or tp is None:
-        raise ValueError("Automated entry decisions must provide both SL and TP")
+    managed_take_profit = _allows_managed_take_profit(decision)
+    if sl is None or (tp is None and not managed_take_profit):
+        raise ValueError("Automated entry decisions require SL and either TP or a managed exit policy")
 
     # Base defaults for a new order
     defaults = {
@@ -403,8 +427,8 @@ def create_order_from_decision(
         order.save(update_fields=dirty_fields)
     
     # Enforce broker-side protection before a new live entry can exist.
-    if not (order.sl and order.tp):
-        raise ValueError(f"Order {order.id} missing required SL/TP protection")
+    if not order.sl or (not order.tp and not managed_take_profit):
+        raise ValueError(f"Order {order.id} missing required entry protection")
 
     if created:
         orders_created_total.labels(

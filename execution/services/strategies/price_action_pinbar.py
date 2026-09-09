@@ -14,13 +14,13 @@ PinType = Literal["bullish", "bearish"]
 class PinBarConfig:
     ema_period: int = 20
     lookback_for_levels: int = 80
-    wick_level_tolerance: Decimal = Decimal("0.0005")
+    wick_level_tolerance_atr: Decimal = Decimal("0.5")
     rr: Decimal = Decimal("2.0")
     entry_buffer_factor: Decimal = Decimal("0.1")
     sl_buffer_factor: Decimal = Decimal("0.1")
-    min_range: Decimal = Decimal("0.00001")
+    min_range_atr: Decimal = Decimal("0.05")
     atr_period: int = 12
-    min_atr_points: Decimal = Decimal("0.3")
+    min_atr_pct: Decimal = Decimal("0.00005")
     session_hours: Tuple[Tuple[int, int], ...] = ((5, 21),)
 
 
@@ -57,10 +57,10 @@ def _session_ok(candles: List[Candle], cfg: PinBarConfig) -> bool:
     return any(start <= hour < end for start, end in cfg.session_hours)
 
 
-def _classify_pin_bar(c: Candle, cfg: PinBarConfig) -> Optional[PinType]:
+def _classify_pin_bar(c: Candle, min_range: Decimal) -> Optional[PinType]:
     high, low, open_, close = c["high"], c["low"], c["open"], c["close"]
     total_range = high - low
-    if total_range <= cfg.min_range:
+    if total_range <= min_range:
         return None
 
     body = abs(close - open_)
@@ -99,13 +99,15 @@ def _trend_ok(pin: PinType, ema: List[Decimal], idx: int, close: Decimal) -> boo
     return close < ema_now and ema_now < ema_prev
 
 
-def _collect_wick_levels(candles: List[Candle], cfg: PinBarConfig) -> List[Decimal]:
+def _collect_wick_levels(
+    candles: List[Candle], cfg: PinBarConfig, *, min_range: Decimal, tolerance: Decimal
+) -> List[Decimal]:
     raw_levels: List[Decimal] = []
     window = candles[-cfg.lookback_for_levels :] if candles else []
     for c in window:
         high, low, open_, close = c["high"], c["low"], c["open"], c["close"]
         total_range = high - low
-        if total_range <= cfg.min_range:
+        if total_range <= min_range:
             continue
         upper_wick = high - max(open_, close)
         lower_wick = min(open_, close) - low
@@ -119,16 +121,16 @@ def _collect_wick_levels(candles: List[Candle], cfg: PinBarConfig) -> List[Decim
         if not clustered:
             clustered.append(lvl)
             continue
-        if all(abs(lvl - existing) > cfg.wick_level_tolerance for existing in clustered):
+        if all(abs(lvl - existing) > tolerance for existing in clustered):
             clustered.append(lvl)
     return clustered
 
 
-def _pin_has_valid_level(pin: PinType, c: Candle, levels: List[Decimal], cfg: PinBarConfig) -> bool:
+def _pin_has_valid_level(pin: PinType, c: Candle, levels: List[Decimal], tolerance: Decimal) -> bool:
     if not levels:
         return False
     wick_price = c["low"] if pin == "bullish" else c["high"]
-    return any(abs(wick_price - lvl) <= cfg.wick_level_tolerance for lvl in levels)
+    return any(abs(wick_price - lvl) <= tolerance for lvl in levels)
 
 
 def _build_orders(pin: PinType, c: Candle, cfg: PinBarConfig) -> tuple[Decimal, Decimal, Decimal]:
@@ -171,13 +173,15 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
             metadata={"reason": "session", "time": str(candles[-1].get("time"))},
         )
 
-    atr_points = _atr(candles, cfg.atr_period)
-    if atr_points < cfg.min_atr_points:
+    atr_price = _atr(candles, cfg.atr_period)
+    last_close = candles[-1]["close"]
+    atr_pct = atr_price / abs(last_close) if last_close else Decimal("0")
+    if atr_price <= 0 or atr_pct < cfg.min_atr_pct:
         return EngineDecision(
             action="skip",
             reason="pinbar_low_volatility",
             strategy="price_action_pinbar",
-            metadata={"reason": "low_atr", "atr": float(atr_points)},
+            metadata={"reason": "low_atr", "atr_pct": float(atr_pct), "min_atr_pct": float(cfg.min_atr_pct)},
         )
 
     closes = [c["close"] for c in candles]
@@ -185,7 +189,9 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
     last = candles[-1]
     idx = len(candles) - 1
 
-    pin_type = _classify_pin_bar(last, cfg)
+    min_range = atr_price * cfg.min_range_atr
+    level_tolerance = atr_price * cfg.wick_level_tolerance_atr
+    pin_type = _classify_pin_bar(last, min_range)
     if pin_type is None:
         return EngineDecision(
             action="skip",
@@ -202,8 +208,10 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
             metadata={"reason": "trend_fail"},
         )
 
-    levels = _collect_wick_levels(candles[:-1], cfg)
-    if not _pin_has_valid_level(pin_type, last, levels, cfg):
+    levels = _collect_wick_levels(
+        candles[:-1], cfg, min_range=min_range, tolerance=level_tolerance
+    )
+    if not _pin_has_valid_level(pin_type, last, levels, level_tolerance):
         return EngineDecision(
             action="skip",
             reason="no_sr_confluence",
@@ -215,7 +223,7 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
     wick = abs(last["high"] - last["low"])
     confidence = min(
         Decimal("1"),
-        max(Decimal("0.4"), wick / (atr_points * Decimal("2"))),
+        max(Decimal("0.4"), wick / (atr_price * Decimal("2"))),
     )
 
     return EngineDecision(
@@ -229,7 +237,7 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
         metadata={
             "confidence": float(confidence),
             "wick_range": float(wick),
-            "atr_points": float(atr_points),
+            "atr_pct": float(atr_pct),
             "level_count": len(levels),
         },
     )

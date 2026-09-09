@@ -69,6 +69,8 @@ def count_total_open_positions_for_bot(bot) -> int:
     if bot.broker_account.connector == "mt5_local":
         return BrokerPosition.objects.filter(
             broker_account=bot.broker_account,
+            bot=bot,
+            ownership="ez_trade",
             status="open",
         ).count()
     return Position.objects.filter(
@@ -80,6 +82,8 @@ def count_open_positions_for_bot(bot, symbol: str | None = None) -> int:
     if bot and bot.broker_account_id and bot.broker_account.connector == "mt5_local":
         qs = BrokerPosition.objects.filter(
             broker_account=bot.broker_account,
+            bot=bot,
+            ownership="ez_trade",
             status="open",
         )
     else:
@@ -124,6 +128,8 @@ def detect_position_conflict(
         symbol=symbol,
         status="open",
     )
+    if live_account:
+        positions = positions.filter(bot=bot, ownership="ez_trade")
     if not positions.exists():
         return None
 

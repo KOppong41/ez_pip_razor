@@ -56,6 +56,7 @@ def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> bool:
     if bot.broker_account.connector == "mt5_local":
         positions = BrokerPosition.objects.filter(
             broker_account=bot.broker_account,
+            bot=bot,
             symbol=symbol,
             status="open",
             ownership="ez_trade",
@@ -128,6 +129,7 @@ def prepare_flip_decisions(open_decision: Decision, flip_info: dict) -> bool:
             return False
 
     still_open = bot.broker_account.broker_positions.filter(
+        bot=bot,
         symbol=symbol,
         ownership="ez_trade",
         status="open",

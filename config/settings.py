@@ -220,6 +220,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "execution.tasks.trail_positions_task",
         "schedule": 60.0,
     },
+    "economic-calendar-every-15m": {
+        "task": "execution.tasks.refresh_economic_calendar_task",
+        "schedule": 900.0,
+    },
     "reconcile-daily-23-55": {
         "task": "execution.tasks.reconcile_daily_task",
         "schedule": crontab(hour=23, minute=55),
@@ -259,6 +263,33 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 300.0,
     },
 }
+
+
+# Live high-impact economic calendar. Enable only with a Trading Economics key;
+# the strategy keeps accepting explicit upstream ``news_blocked`` flags too.
+ECONOMIC_CALENDAR_ENABLED = env.bool("ECONOMIC_CALENDAR_ENABLED", default=False)
+TRADING_ECONOMICS_API_KEY = env("TRADING_ECONOMICS_API_KEY", default="")
+ECONOMIC_CALENDAR_COUNTRIES = env.list(
+    "ECONOMIC_CALENDAR_COUNTRIES",
+    default=[
+        "united states",
+        "euro area",
+        "united kingdom",
+        "japan",
+        "switzerland",
+        "canada",
+        "australia",
+        "new zealand",
+    ],
+)
+ECONOMIC_CALENDAR_MIN_IMPORTANCE = int(env("ECONOMIC_CALENDAR_MIN_IMPORTANCE", default=3))
+ECONOMIC_CALENDAR_TIMEOUT_SECONDS = int(env("ECONOMIC_CALENDAR_TIMEOUT_SECONDS", default=10))
+ECONOMIC_NEWS_BLACKOUT_BEFORE_MINUTES = int(
+    env("ECONOMIC_NEWS_BLACKOUT_BEFORE_MINUTES", default=30)
+)
+ECONOMIC_NEWS_BLACKOUT_AFTER_MINUTES = int(
+    env("ECONOMIC_NEWS_BLACKOUT_AFTER_MINUTES", default=30)
+)
 
 
 #TradingView

@@ -868,19 +868,29 @@ class MT5Connector(BaseConnector):
 
     @staticmethod
     def _filling_mode(symbol_info):
-        configured = getattr(symbol_info, "filling_mode", None)
-        valid = {
-            getattr(mt5, "ORDER_FILLING_FOK", None),
-            getattr(mt5, "ORDER_FILLING_IOC", None),
-            getattr(mt5, "ORDER_FILLING_RETURN", None),
-        }
-        if configured in valid:
-            return configured
-        for name in ("ORDER_FILLING_FOK", "ORDER_FILLING_IOC", "ORDER_FILLING_RETURN"):
-            value = getattr(mt5, name, None)
-            if value is not None:
-                return value
-        raise ConnectorError("MT5 filling mode is unavailable")
+        """Resolve SYMBOL_FILLING_MODE permissions to an ORDER_FILLING value.
+
+        MT5 exposes ``symbol_info.filling_mode`` as a bitmask (FOK=1,
+        IOC=2), while order requests require the separate ORDER_FILLING enum
+        (FOK=0, IOC=1, RETURN=2). Treating the former as the latter silently
+        selects the wrong policy for FOK-only symbols.
+        """
+        permissions = int(getattr(symbol_info, "filling_mode", 0) or 0)
+        symbol_fok = int(getattr(mt5, "SYMBOL_FILLING_FOK", 1))
+        symbol_ioc = int(getattr(mt5, "SYMBOL_FILLING_IOC", 2))
+
+        if permissions & symbol_fok:
+            return mt5.ORDER_FILLING_FOK
+        if permissions & symbol_ioc:
+            return mt5.ORDER_FILLING_IOC
+
+        # RETURN is implicitly available for Request, Instant and Exchange
+        # execution, but MT5 explicitly prohibits it for Market execution.
+        execution_mode = getattr(symbol_info, "trade_exemode", None)
+        market_execution = getattr(mt5, "SYMBOL_TRADE_EXECUTION_MARKET", 2)
+        if execution_mode != market_execution:
+            return mt5.ORDER_FILLING_RETURN
+        raise ConnectorError("MT5 symbol exposes no permitted filling mode for market execution")
 
     @staticmethod
     def _deal_time(value):
@@ -1281,8 +1291,52 @@ class MT5Connector(BaseConnector):
                 order.save(update_fields=["last_error"])
                 raise ConnectorError(msg)
 
-            filled = reported_close_qty if reported_close_qty > 0 else requested
-            fill_price = Decimal(str(getattr(result, "price", 0) or 0))
+            matching_deals = ()
+            if order.broker_deal_ticket:
+                try:
+                    matching_deals = mt5.history_deals_get(ticket=order.broker_deal_ticket) or ()
+                except Exception:
+                    logger.warning(
+                        "Unable to load authoritative MT5 closing deal for order %s",
+                        order.id,
+                        exc_info=True,
+                    )
+            if not matching_deals:
+                msg = (
+                    "MT5 accepted the close but its authoritative deal is not yet available; "
+                    "reconciliation is required before PnL is finalized"
+                )
+                attempt.status = "ambiguous"
+                attempt.error = msg
+                attempt.save(
+                    update_fields=[
+                        "mt5_retcode",
+                        "mt5_retcode_description",
+                        "broker_order_ticket",
+                        "broker_deal_ticket",
+                        "broker_position_ticket",
+                        "response_metadata",
+                        "status",
+                        "error",
+                    ]
+                )
+                order.last_error = msg
+                order.save(update_fields=["last_error"])
+                raise ConnectorError(msg)
+
+            closing_deal = matching_deals[-1]
+            deal_qty = Decimal(str(getattr(closing_deal, "volume", 0) or 0))
+            filled = deal_qty if deal_qty > 0 else (
+                reported_close_qty if reported_close_qty > 0 else requested
+            )
+            deal_price = Decimal(str(getattr(closing_deal, "price", 0) or 0))
+            fill_price = deal_price if deal_price > 0 else Decimal(
+                str(getattr(result, "price", 0) or 0)
+            )
+            broker_profit = Decimal(str(getattr(closing_deal, "profit", 0) or 0))
+            commission = Decimal(str(getattr(closing_deal, "commission", 0) or 0))
+            swap = Decimal(str(getattr(closing_deal, "swap", 0) or 0))
+            deal_metadata = _safe_mt5_metadata(closing_deal)
             order.filled_qty += filled
             order.remaining_qty = max(Decimal("0"), order.qty - order.filled_qty)
             order.save(update_fields=["filled_qty", "remaining_qty"])
@@ -1292,14 +1346,23 @@ class MT5Connector(BaseConnector):
             attempt.status = "partial" if order.remaining_qty > 0 else "accepted"
             attempt.resolved_at = timezone.now()
             attempt.save()
+            close_account_info = mt5.account_info()
             record_fill(
                 order,
                 filled,
                 fill_price,
+                account_balance=(
+                    Decimal(str(close_account_info.balance))
+                    if close_account_info is not None
+                    else None
+                ),
                 broker_order_ticket=order.broker_order_ticket,
                 broker_deal_ticket=order.broker_deal_ticket,
                 broker_position_ticket=int(ticket),
-                broker_metadata=_safe_mt5_metadata(result),
+                broker_profit=broker_profit,
+                commission=commission,
+                swap=swap,
+                broker_metadata=deal_metadata,
             )
             mark_execution_recorded(order)
             remaining = mt5.positions_get(ticket=int(ticket)) or ()
@@ -1545,15 +1608,21 @@ class MT5Connector(BaseConnector):
             "type_filling": self._filling_mode(sinfo),
         }
 
-        # CRITICAL: Enforce SL/TP on every order (risk management)
+        # Every entry has a broker-side SL. TP may be managed by the hybrid or
+        # trail-only position manager instead of sent as a fixed broker target.
         if order.sl is not None:
             req["sl"] = float(order.sl)
 
         if order.tp is not None:
             req["tp"] = float(order.tp)
         
-        if order.sl is None or order.tp is None:
-            msg = f"Order {order.id} rejected: SL or TP missing (risk management enforced)"
+        scalper_params = ((order.decision.params or {}).get("scalper") or {}) if order.decision_id else {}
+        managed_take_profit = (
+            isinstance(scalper_params, dict)
+            and scalper_params.get("exit_mode") in {"trail_only", "hybrid"}
+        )
+        if order.sl is None or (order.tp is None and not managed_take_profit):
+            msg = f"Order {order.id} rejected: required entry protection is missing"
             _clear_risk_reservation(order)
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)

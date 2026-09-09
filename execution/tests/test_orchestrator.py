@@ -1,8 +1,11 @@
+from decimal import Decimal
+
 from django.test import TestCase
 from django.urls import reverse
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.models import Signal, Decision, Order
+from execution.services.orchestrator import create_order_from_decision
 from django.contrib.auth import get_user_model
 
 class OrchestratorTest(TestCase):
@@ -23,6 +26,20 @@ class OrchestratorTest(TestCase):
         self.assertEqual(r1.status_code, 201)
         self.assertEqual(r2.status_code, 200)  # same client_order_id hit
         self.assertEqual(Order.objects.count(), 1)
+
+    def test_trail_only_entry_requires_sl_but_not_fixed_tp(self):
+        self.dec.params = {
+            "sl": "1.0",
+            "tp": None,
+            "scalper": {"exit_mode": "trail_only", "trail_start_r": "1.0"},
+        }
+        self.dec.save(update_fields=["params"])
+
+        order, created = create_order_from_decision(self.dec, self.ba, "0.10")
+
+        self.assertTrue(created)
+        self.assertEqual(order.sl, Decimal("1.0"))
+        self.assertIsNone(order.tp)
 
     def test_order_transitions(self):
         # create
