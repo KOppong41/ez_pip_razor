@@ -16,7 +16,8 @@ class MomentumIgnitionConfig:
     # Allow shallower pullbacks plus a buffer so continuations trigger more often.
     pullback_ratio: Decimal = Decimal("0.75")     # pullback must be <= 75% of impulse
     min_tick_volume: int = 80
-    session_hours: Tuple[Tuple[int, int], ...] = ((5, 21),)  # extended UTC windows
+    # Entry eligibility is controlled by the bot's visible trading schedule.
+    session_hours: Tuple[Tuple[int, int], ...] = ()
     rr: Decimal = Decimal("2.2")
 
 
@@ -40,7 +41,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
     last = candles[-1]
 
     last_time = last.get("time")
-    if last_time is not None:
+    if last_time is not None and cfg.session_hours:
         hour = last_time.hour
         in_session = any(start_h <= hour < end_h for start_h, end_h in cfg.session_hours)
         if not in_session:
@@ -61,12 +62,42 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
         )
 
     impulse_range = impulse_high - impulse_low
-    confidence = min(
-        Decimal("1"),
-        abs(impulse_change) / cfg.min_impulse_pct
-        if cfg.min_impulse_pct > 0
-        else Decimal("0"),
-    )
+    def setup_quality(retrace: Decimal, max_retrace: Decimal):
+        impulse_progress = min(
+            Decimal("1"),
+            max(
+                Decimal("0"),
+                (abs(impulse_change) - cfg.min_impulse_pct)
+                / max(cfg.min_impulse_pct * Decimal("2"), Decimal("0.00000001")),
+            ),
+        )
+        impulse_quality = Decimal("0.5") + impulse_progress * Decimal("0.5")
+        pullback_progress = max(
+            Decimal("0"),
+            Decimal("1") - retrace / max(max_retrace, Decimal("0.00000001")),
+        )
+        pullback_quality = Decimal("0.5") + pullback_progress * Decimal("0.5")
+        volume_progress = min(
+            Decimal("1"),
+            max(
+                Decimal("0"),
+                (Decimal(str(prev["tick_volume"])) - Decimal(str(cfg.min_tick_volume)))
+                / max(Decimal(str(cfg.min_tick_volume)), Decimal("1")),
+            ),
+        )
+        volume_quality = Decimal("0.5") + volume_progress * Decimal("0.5")
+        components = {
+            "impulse": impulse_quality,
+            "pullback": pullback_quality,
+            "volume": volume_quality,
+        }
+        score = min(
+            Decimal("1"),
+            impulse_quality * Decimal("0.45")
+            + pullback_quality * Decimal("0.35")
+            + volume_quality * Decimal("0.20"),
+        )
+        return score, {key: float(value) for key, value in components.items()}
     if impulse_change >= cfg.min_impulse_pct:
         # Bullish impulse, seek shallow pullback (last close not below 40% retrace of impulse)
         retrace = (impulse_high - last["close"])
@@ -78,6 +109,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 strategy="momentum_ignition",
                 metadata={"reason": "pullback", "retrace": float(retrace), "max": float(max_retrace)},
             )
+        confidence, score_components = setup_quality(retrace, max_retrace)
         sl = last["low"]
         risk = end - sl
         tp = end + risk * cfg.rr if risk > 0 else None
@@ -94,6 +126,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 "impulse_pct": float(impulse_change),
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),
+                "score_components": score_components,
             },
         )
 
@@ -108,6 +141,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 strategy="momentum_ignition",
                 metadata={"reason": "pullback", "retrace": float(retrace), "max": float(max_retrace)},
             )
+        confidence, score_components = setup_quality(retrace, max_retrace)
         sl = last["high"]
         risk = sl - end
         tp = end - risk * cfg.rr if risk > 0 else None
@@ -124,6 +158,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 "impulse_pct": float(abs(impulse_change)),
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),
+                "score_components": score_components,
             },
         )
 

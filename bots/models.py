@@ -643,6 +643,14 @@ class Bot(models.Model):
         blank=True,
         help_text="When asset recommendations were last explicitly applied.",
     )
+    asset_strategy_overrides_applied = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Frozen detector tuning copied from the asset recommendation when "
+            "that preset version was applied."
+        ),
+    )
 
     class Meta:
         unique_together = (("owner", "name"),)

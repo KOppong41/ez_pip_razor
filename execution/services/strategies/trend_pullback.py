@@ -19,6 +19,7 @@ class TrendPullbackConfig:
     pullback_atr_multiple: Decimal = Decimal("0.85")
     wick_rejection_ratio: Decimal = Decimal("1.2")
     fractal_period: int = 2
+    fractal_confirmation_lookback: int = 3
     require_fractal_confirmation: bool = True
     rr: Decimal = Decimal("2")
 
@@ -132,23 +133,32 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
                 strategy="trend_pullback",
                 metadata={"reason": "fractal_unconfirmed"},
             )
-        latest_confirmed = fractal_markers[confirmed_index]
         # Indicator semantics: ``down`` marks a local low and ``up`` marks a
         # local high. Bullish pullbacks confirm against a swing low; bearish
         # pullbacks confirm against a swing high.
-        if bull_trend and not latest_confirmed.get("down"):
+        marker_name = "down" if bull_trend else "up"
+        first_index = max(
+            0,
+            confirmed_index - max(1, cfg.fractal_confirmation_lookback) + 1,
+        )
+        matched_index = next(
+            (
+                index
+                for index in range(confirmed_index, first_index - 1, -1)
+                if fractal_markers[index].get(marker_name)
+            ),
+            None,
+        )
+        if matched_index is None:
             return EngineDecision(
                 action="skip",
                 reason="trend_pullback_no_fractal",
                 strategy="trend_pullback",
-                metadata={"reason": "fractal_missing", "direction": "buy"},
-            )
-        if bear_trend and not latest_confirmed.get("up"):
-            return EngineDecision(
-                action="skip",
-                reason="trend_pullback_no_fractal",
-                strategy="trend_pullback",
-                metadata={"reason": "fractal_missing", "direction": "sell"},
+                metadata={
+                    "reason": "fractal_missing",
+                    "direction": "buy" if bull_trend else "sell",
+                    "confirmed_lookback": cfg.fractal_confirmation_lookback,
+                },
             )
 
     confidence = min(

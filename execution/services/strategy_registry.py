@@ -37,15 +37,17 @@ def _coerce_override(value, current):
         return int(value)
     if isinstance(current, float):
         return float(value)
+    if isinstance(current, tuple) and isinstance(value, (list, tuple)):
+        return tuple(
+            tuple(item) if isinstance(item, (list, tuple)) else item
+            for item in value
+        )
     return value
 
 
-def build_strategy_config(strategy_name: str, asset=None):
-    """Build generic strategy config, then apply the asset's stored tuning."""
-    entry = SCALPER_STRATEGY_REGISTRY[strategy_name]
-    config = entry.config_factory()
-    preset = getattr(asset, "recommended_config", None) or {}
-    overrides = (preset.get("strategy_overrides") or {}).get(strategy_name) or {}
+def apply_strategy_config_overrides(config, overrides):
+    """Apply known, type-coerced values to a strategy dataclass."""
+    overrides = overrides if isinstance(overrides, dict) else {}
     allowed_fields = {field.name for field in fields(config)}
     values = {
         key: _coerce_override(value, getattr(config, key))
@@ -53,3 +55,35 @@ def build_strategy_config(strategy_name: str, asset=None):
         if key in allowed_fields
     }
     return replace(config, **values) if values else config
+
+
+def build_strategy_config(strategy_name: str, asset=None, *, strategy_overrides=None):
+    """Build generic strategy config and apply explicitly supplied tuning."""
+    entry = SCALPER_STRATEGY_REGISTRY[strategy_name]
+    config = entry.config_factory()
+    if strategy_overrides is None:
+        preset = getattr(asset, "recommended_config", None) or {}
+        strategy_overrides = (
+            preset.get("strategy_overrides") or {}
+            if isinstance(preset, dict)
+            else {}
+        )
+    overrides = (
+        strategy_overrides.get(strategy_name) or {}
+        if isinstance(strategy_overrides, dict)
+        else {}
+    )
+    return apply_strategy_config_overrides(config, overrides)
+
+
+def build_strategy_config_for_bot(strategy_name: str, bot):
+    """Use the detector tuning frozen when this bot's preset was applied."""
+    overrides = (
+        getattr(bot, "asset_strategy_overrides_applied", None) or {}
+        if getattr(bot, "asset_preset_version_applied", None) is not None
+        else {}
+    )
+    return build_strategy_config(
+        strategy_name,
+        strategy_overrides=overrides,
+    )

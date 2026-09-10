@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime, time, timezone as dt_timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from execution.services.strategies.momentum_ignition import (
     MomentumIgnitionConfig,
     run_momentum_ignition,
 )
+from execution.services.strategies.price_action_pinbar import PinBarConfig
 from execution.services.strategies.range_reversion import (
     RangeReversionConfig,
     run_range_reversion,
@@ -118,6 +120,14 @@ class AssetPresetScoreTests(SimpleTestCase):
             run_breakout_retest(candles, BreakoutRetestConfig(lookback=3))
         )
 
+        stronger = deepcopy(candles)
+        stronger[-2]["tick_volume"] = 160
+        weak = run_breakout_retest(candles, BreakoutRetestConfig(lookback=3))
+        strong = run_breakout_retest(stronger, BreakoutRetestConfig(lookback=3))
+        self.assertLess(weak.score, strong.score)
+        self.assertLess(weak.score, 1.0)
+        self.assertIn("score_components", weak.metadata)
+
     def test_momentum_ignition_score_is_normalized(self):
         candles = [
             {"open": Decimal("99.9"), "high": Decimal("100.1"), "low": Decimal("99.8"), "close": Decimal("100"), "tick_volume": 100},
@@ -132,6 +142,26 @@ class AssetPresetScoreTests(SimpleTestCase):
                 MomentumIgnitionConfig(impulse_lookback=3, session_hours=()),
             )
         )
+
+        stronger = deepcopy(candles)
+        stronger[-2]["tick_volume"] = 160
+        stronger[-1]["close"] = Decimal("101.15")
+        stronger[-1]["high"] = Decimal("101.2")
+        weak = run_momentum_ignition(
+            candles,
+            MomentumIgnitionConfig(impulse_lookback=3),
+        )
+        strong = run_momentum_ignition(
+            stronger,
+            MomentumIgnitionConfig(impulse_lookback=3),
+        )
+        self.assertLess(weak.score, strong.score)
+        self.assertLess(weak.score, 1.0)
+        self.assertIn("score_components", weak.metadata)
+
+    def test_strategy_detectors_have_no_hidden_default_session_gate(self):
+        self.assertEqual(MomentumIgnitionConfig().session_hours, ())
+        self.assertEqual(PinBarConfig().session_hours, ())
 
     def test_range_reversion_score_is_normalized(self):
         candles = [

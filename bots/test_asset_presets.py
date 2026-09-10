@@ -1,3 +1,4 @@
+from copy import deepcopy
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -18,9 +19,11 @@ from execution.services.scalper_config import (
     build_scalper_config,
     resolve_allowed_strategy_pool,
 )
+from execution.services.strategies.momentum_ignition import MomentumIgnitionConfig
 from execution.services.strategy_registry import (
     SCALPER_STRATEGY_REGISTRY,
     build_strategy_config,
+    build_strategy_config_for_bot,
 )
 
 
@@ -58,6 +61,9 @@ class AssetPresetCatalogTests(TestCase):
             bot = Bot(
                 asset=asset,
                 asset_preset_version_applied=asset.recommended_config_version,
+                asset_strategy_overrides_applied=deepcopy(
+                    asset.recommended_config["strategy_overrides"]
+                ),
                 **recommended_bot_defaults(asset),
             )
             self.assertEqual(
@@ -137,6 +143,10 @@ class AssetPresetApiTests(TestCase):
         self.assertFalse(bot.trading_schedule_enabled)
         self.assertEqual(bot.trading_timezone, "UTC")
         self.assertEqual(bot.asset_preset_version_applied, ASSET_PRESET_VERSION)
+        self.assertEqual(
+            bot.asset_strategy_overrides_applied,
+            btc.recommended_config["strategy_overrides"],
+        )
 
     def test_scalper_rejects_strategy_without_registered_runner(self):
         gold = Asset.objects.get(symbol="XAUUSDm")
@@ -183,6 +193,78 @@ class AssetPresetApiTests(TestCase):
         self.assertEqual(
             build_strategy_config("momentum_ignition", gold).min_impulse_pct,
             Decimal("0.0025"),
+        )
+
+    def test_existing_bot_uses_frozen_strategy_tuning_until_reapplied(self):
+        btc = Asset.objects.get(symbol="BTCUSDm")
+        create_response = self.client.post(
+            "/api/bots/",
+            data={
+                "name": "Frozen BTC tuning",
+                "asset": btc.id,
+                "broker_account": self.account.id,
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.json())
+        bot = Bot.objects.get(pk=create_response.json()["id"])
+        self.assertEqual(
+            build_strategy_config_for_bot("momentum_ignition", bot).min_impulse_pct,
+            Decimal("0.0015"),
+        )
+        updated = deepcopy(btc.recommended_config)
+        updated["strategy_overrides"]["momentum_ignition"][
+            "min_impulse_pct"
+        ] = 0.009
+        btc.recommended_config = updated
+        btc.save(update_fields=["recommended_config"])
+        bot.refresh_from_db()
+
+        self.assertEqual(
+            build_strategy_config_for_bot("momentum_ignition", bot).min_impulse_pct,
+            Decimal("0.0015"),
+        )
+        self.assertEqual(asset_recommendation_state(bot), "customized")
+
+        apply_response = self.client.post(
+            f"/api/bots/{bot.id}/apply-asset-recommendations/",
+            data={},
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.json())
+        bot.refresh_from_db()
+        self.assertEqual(
+            build_strategy_config_for_bot("momentum_ignition", bot).min_impulse_pct,
+            Decimal("0.009"),
+        )
+
+    def test_asset_change_without_restore_clears_previous_tuning_snapshot(self):
+        eur = Asset.objects.get(symbol="EURUSDm")
+        btc = Asset.objects.get(symbol="BTCUSDm")
+        create_response = self.client.post(
+            "/api/bots/",
+            data={
+                "name": "Market switch",
+                "asset": eur.id,
+                "broker_account": self.account.id,
+            },
+            content_type="application/json",
+        )
+        bot_id = create_response.json()["id"]
+
+        response = self.client.patch(
+            f"/api/bots/{bot_id}/",
+            data={"asset": btc.id},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        bot = Bot.objects.get(pk=bot_id)
+        self.assertIsNone(bot.asset_preset_version_applied)
+        self.assertEqual(bot.asset_strategy_overrides_applied, {})
+        self.assertEqual(
+            build_strategy_config_for_bot("momentum_ignition", bot).min_impulse_pct,
+            MomentumIgnitionConfig().min_impulse_pct,
         )
 
     def test_recommendation_state_tracks_match_customization_and_update(self):

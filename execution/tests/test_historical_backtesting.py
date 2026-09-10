@@ -354,6 +354,35 @@ class HistoricalBacktestApiTests(TestCase):
         self.assertEqual(self.client.get(f"/api/personal/backtests/{record['id']}/").status_code, 404)
         self.assertEqual(self.client.get("/api/personal/backtests/").json()["count"], 0)
 
+    def test_run_freezes_and_persists_the_bots_live_strategy_config(self):
+        self.bot.asset_preset_version_applied = 1
+        self.bot.asset_strategy_overrides_applied = {
+            "trend_pullback": {"min_atr_pct": "0.123"},
+        }
+        self.bot.save(
+            update_fields=[
+                "asset_preset_version_applied",
+                "asset_strategy_overrides_applied",
+            ]
+        )
+
+        response = self.client.post(
+            "/api/personal/backtests/",
+            {
+                **payload(),
+                "bot_id": self.bot.id,
+                "csv": csv_data(),
+                "source_name": "frozen-config.csv",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        stored_config = HistoricalBacktest.objects.get(
+            id=response.json()["id"]
+        ).config
+        self.assertEqual(stored_config["strategy_config"]["min_atr_pct"], "0.123")
+
     def test_options_and_submission_are_owner_scoped(self):
         self.client.force_login(self.other)
         options = self.client.get("/api/personal/backtests/options/").json()

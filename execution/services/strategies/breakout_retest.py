@@ -26,6 +26,20 @@ def _range_levels(candles: List[Candle], lookback: int) -> Tuple[Decimal, Decima
     return max(highs), min(lows)
 
 
+def _quality_above_minimum(
+    value: Decimal,
+    minimum: Decimal,
+    *,
+    strong_multiple: Decimal = Decimal("3"),
+) -> Decimal:
+    """Return 0.5 at the validity threshold and 1 only when clearly stronger."""
+    if minimum <= 0 or value < minimum:
+        return Decimal("0")
+    span = minimum * (strong_multiple - Decimal("1"))
+    progress = min(Decimal("1"), (value - minimum) / span) if span > 0 else Decimal("1")
+    return Decimal("0.5") + progress * Decimal("0.5")
+
+
 def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None = None) -> EngineDecision:
     cfg = cfg or BreakoutRetestConfig()
     if len(candles) < cfg.lookback + 2:
@@ -76,17 +90,62 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
     if not broke_up and not broke_down:
         return EngineDecision(action="skip", reason="breakout_retest_no_break", strategy="breakout_retest")
 
-    range_threshold = range_low * cfg.min_range_pct
-    range_confidence = min(
-        Decimal("1"),
-        range_width / range_threshold if range_threshold > 0 else Decimal("0"),
+    range_width_pct = range_width / range_low if range_low else Decimal("0")
+    range_quality = _quality_above_minimum(
+        range_width_pct,
+        cfg.min_range_pct,
     )
+    body_quality = _quality_above_minimum(
+        prev_body_pct,
+        cfg.min_breakout_body_pct,
+    )
+    volume_quality = _quality_above_minimum(
+        Decimal(str(prev["tick_volume"])),
+        Decimal(str(cfg.min_breakout_volume)),
+        strong_multiple=Decimal("2"),
+    )
+    breakout_extension = (
+        (prev["close"] - range_high) / range_high
+        if broke_up and range_high
+        else (range_low - prev["close"]) / range_low
+        if broke_down and range_low
+        else Decimal("0")
+    )
+    extension_quality = _quality_above_minimum(
+        breakout_extension,
+        cfg.breakout_extension_pct,
+    )
+
+    def setup_quality(level_distance: Decimal, tolerance: Decimal):
+        retest_quality = max(
+            Decimal("0"),
+            Decimal("1") - level_distance / tolerance,
+        ) if tolerance > 0 else Decimal("1")
+        components = {
+            "range": range_quality,
+            "breakout_body": body_quality,
+            "volume": volume_quality,
+            "extension": extension_quality,
+            "retest": retest_quality,
+        }
+        score = min(
+            Decimal("1"),
+            range_quality * Decimal("0.20")
+            + body_quality * Decimal("0.25")
+            + volume_quality * Decimal("0.15")
+            + extension_quality * Decimal("0.20")
+            + retest_quality * Decimal("0.20"),
+        )
+        return score, {key: float(value) for key, value in components.items()}
 
     if broke_up:
         # Retest current bar into old range high
-        near_level = abs(last["low"] - range_high) <= range_high * cfg.retest_tolerance
+        level_distance = abs(last["low"] - range_high)
+        tolerance = range_high * cfg.retest_tolerance
+        near_level = level_distance <= tolerance
         if not near_level or last["close"] < range_high:
             return EngineDecision(action="skip", reason="breakout_retest_no_retest_up", strategy="breakout_retest")
+        confidence, score_components = setup_quality(level_distance, tolerance)
         sl = max(range_low, prev["low"])
         risk = last["close"] - sl
         tp = last["close"] + risk * cfg.rr if risk > 0 else None
@@ -97,19 +156,24 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             tp=tp,
             reason="breakout_retest_up",
             strategy="breakout_retest",
-            score=float(range_confidence),
+            score=float(confidence),
             metadata={
-                "confidence": float(range_confidence),
+                "confidence": float(confidence),
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),
+                "breakout_extension_pct": float(breakout_extension),
+                "score_components": score_components,
             },
         )
 
     if broke_down:
-        near_level = abs(last["high"] - range_low) <= range_low * cfg.retest_tolerance
+        level_distance = abs(last["high"] - range_low)
+        tolerance = range_low * cfg.retest_tolerance
+        near_level = level_distance <= tolerance
         if not near_level or last["close"] > range_low:
             return EngineDecision(action="skip", reason="breakout_retest_no_retest_down", strategy="breakout_retest")
+        confidence, score_components = setup_quality(level_distance, tolerance)
         sl = min(range_high, prev["high"])
         risk = sl - last["close"]
         tp = last["close"] - risk * cfg.rr if risk > 0 else None
@@ -120,12 +184,14 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             tp=tp,
             reason="breakout_retest_down",
             strategy="breakout_retest",
-            score=float(range_confidence),
+            score=float(confidence),
             metadata={
-                "confidence": float(range_confidence),
+                "confidence": float(confidence),
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),
+                "breakout_extension_pct": float(breakout_extension),
+                "score_components": score_components,
             },
         )
 

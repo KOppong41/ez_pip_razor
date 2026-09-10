@@ -21,7 +21,8 @@ class PinBarConfig:
     min_range_atr: Decimal = Decimal("0.05")
     atr_period: int = 12
     min_atr_pct: Decimal = Decimal("0.00005")
-    session_hours: Tuple[Tuple[int, int], ...] = ((5, 21),)
+    # Entry eligibility is controlled by the bot's visible trading schedule.
+    session_hours: Tuple[Tuple[int, int], ...] = ()
 
 
 def _ema(values: List[Decimal], period: int) -> List[Decimal]:

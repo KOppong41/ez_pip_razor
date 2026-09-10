@@ -3,7 +3,11 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from brokers.models import BrokerAccount
-from bots.services import asset_recommendation_state, recommended_bot_defaults
+from bots.services import (
+    asset_recommendation_state,
+    recommended_bot_defaults,
+    recommended_strategy_overrides,
+)
 
 from .models import Asset, Bot, STANDARD_TIMEFRAMES, STRATEGY_CHOICES
 
@@ -246,6 +250,9 @@ class BotSerializer(serializers.ModelSerializer):
                 asset.recommended_config_version
             )
             validated_data["asset_preset_applied_at"] = timezone.now()
+            validated_data["asset_strategy_overrides_applied"] = (
+                recommended_strategy_overrides(asset)
+            )
         validated_data["owner"] = request.user
         validated_data["status"] = "stopped"
         try:
@@ -266,6 +273,15 @@ class BotSerializer(serializers.ModelSerializer):
                 asset.recommended_config_version
             )
             validated_data["asset_preset_applied_at"] = timezone.now()
+            validated_data["asset_strategy_overrides_applied"] = (
+                recommended_strategy_overrides(asset)
+            )
+        elif "asset" in validated_data and validated_data["asset"].pk != instance.asset_id:
+            # Changing markets without applying its preset must not retain the
+            # previous market's detector tuning or preset marker.
+            validated_data["asset_preset_version_applied"] = None
+            validated_data["asset_preset_applied_at"] = None
+            validated_data["asset_strategy_overrides_applied"] = {}
         try:
             return super().update(instance, validated_data)
         except DjangoValidationError as exc:

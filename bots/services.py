@@ -63,6 +63,15 @@ def recommended_bot_defaults(asset):
     return values
 
 
+def recommended_strategy_overrides(asset):
+    """Return a safe copy of detector tuning managed by an asset preset."""
+    config = getattr(asset, "recommended_config", None) or {}
+    if not isinstance(config, dict):
+        return {}
+    overrides = config.get("strategy_overrides") or {}
+    return deepcopy(overrides) if isinstance(overrides, dict) else {}
+
+
 def apply_recommendations_to_bot(bot, *, save=True):
     """Explicitly replace preset-controlled fields without touching RiskPolicy."""
     if not bot.asset_id:
@@ -84,6 +93,7 @@ def apply_recommendations_to_bot(bot, *, save=True):
     bot.scalper_params = params
     bot.asset_preset_version_applied = bot.asset.recommended_config_version
     bot.asset_preset_applied_at = timezone.now()
+    bot.asset_strategy_overrides_applied = recommended_strategy_overrides(bot.asset)
     if save:
         bot.full_clean()
         bot.save(
@@ -92,6 +102,7 @@ def apply_recommendations_to_bot(bot, *, save=True):
                 "scalper_params",
                 "asset_preset_version_applied",
                 "asset_preset_applied_at",
+                "asset_strategy_overrides_applied",
             ]
         )
     return bot
@@ -111,6 +122,10 @@ def asset_recommendation_state(bot) -> str:
     direct_match = all(
         _preset_values_equal(field, getattr(bot, field, None), value)
         for field, value in recommended.items()
+    )
+    strategy_match = (
+        (getattr(bot, "asset_strategy_overrides_applied", None) or {})
+        == recommended_strategy_overrides(asset)
     )
 
     symbol_match = True
@@ -145,7 +160,7 @@ def asset_recommendation_state(bot) -> str:
                 for field, value in expected_fields.items()
             )
 
-    if direct_match and symbol_match:
+    if direct_match and symbol_match and strategy_match:
         return "recommended"
     if applied_version < asset.recommended_config_version:
         return "update_available"

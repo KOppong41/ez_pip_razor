@@ -1,5 +1,6 @@
 """Authenticated, isolated historical simulation API. Never dispatches orders."""
 import logging
+from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
 
 from django.db.models import F
@@ -14,7 +15,10 @@ from execution.services.historical_backtest import (
     MAX_BARS, MAX_CSV_BYTES, MAX_REPLAY_WORK, TIMEFRAMES, int_field, json_safe, parse_csv,
     run_simulation, validate_config,
 )
-from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
+from execution.services.strategy_registry import (
+    SCALPER_STRATEGY_REGISTRY,
+    build_strategy_config_for_bot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +155,9 @@ def historical_backtests(request):
         if bot is None:
             return Response({"detail": "Bot not found."}, status=404)
         config = validate_config(request.data)
+        config["strategy_config"] = json_safe(
+            asdict(build_strategy_config_for_bot(config["strategy"], bot))
+        )
         bars, dataset = parse_csv(request.data.get("csv"), config)
         if (dataset["last_index"] - dataset["first_index"] + 1) * config["warmup"] > MAX_REPLAY_WORK:
             raise ValueError("Reduce the date range or warmup: this request exceeds the replay work limit.")

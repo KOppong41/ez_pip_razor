@@ -68,6 +68,23 @@ class TrendPullbackFractalTests(SimpleTestCase):
     @patch("execution.services.strategies.trend_pullback._atr", return_value=Decimal("1"))
     @patch("execution.services.strategies.trend_pullback._ema")
     @patch("execution.services.strategies.trend_pullback.fractals")
+    def test_accepts_recent_fractal_before_latest_confirmed_bar(self, fractals, ema, _atr):
+        ema.return_value = [
+            Decimal("9.5"), Decimal("9.6"), Decimal("9.7"),
+            Decimal("9.8"), Decimal("9.9"), Decimal("10.0"),
+        ]
+        markers = [{"up": False, "down": False} for _ in range(6)]
+        markers[2]["down"] = True
+        fractals.return_value = markers
+
+        result = run_trend_pullback(_candles(), self._config())
+
+        self.assertEqual(result.action, "open")
+        self.assertEqual(result.direction, "buy")
+
+    @patch("execution.services.strategies.trend_pullback._atr", return_value=Decimal("1"))
+    @patch("execution.services.strategies.trend_pullback._ema")
+    @patch("execution.services.strategies.trend_pullback.fractals")
     def test_rejection_uses_true_wick_not_candle_body(self, fractals, ema, _atr):
         ema.return_value = [
             Decimal("9.5"), Decimal("9.6"), Decimal("9.7"),

@@ -13,7 +13,10 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
+from execution.services.strategy_registry import (
+    SCALPER_STRATEGY_REGISTRY,
+    apply_strategy_config_overrides,
+)
 
 MAX_CSV_BYTES = 25_000_000
 MAX_BARS = 150_000
@@ -228,7 +231,10 @@ def parse_csv(text, config, *, now=None):
 def run_simulation(bars, config, dataset, symbol, *, runner=None):
     """Return immutable JSON results; no account, signal, order or broker writes."""
     entry = SCALPER_STRATEGY_REGISTRY[config["strategy"]]
-    cfg = entry.config_factory()
+    cfg = apply_strategy_config_overrides(
+        entry.config_factory(),
+        config.get("strategy_config") or {},
+    )
     runner = runner or (lambda window: entry.runner(symbol, window, cfg) if entry.requires_symbol else entry.runner(window, cfg))
     spread = config["spread_points"] * config["point_size"]
     slippage = config["slippage_points"] * config["point_size"]
