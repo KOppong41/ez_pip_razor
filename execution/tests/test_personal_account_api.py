@@ -1,11 +1,13 @@
-from unittest.mock import patch
+from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from brokers.models import BrokerAccount
-from execution.models import RiskPolicy
+from execution.models import BrokerPosition, RiskPolicy
 
 
 class PersonalAccountApiTest(TestCase):
@@ -108,3 +110,52 @@ class PersonalAccountApiTest(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("max_aggregate_open_lots", response.json())
+
+    def test_positions_lists_current_open_positions_first_and_newest_first(self):
+        now = timezone.now()
+        rows = [
+            BrokerPosition.objects.create(
+                broker_account=self.account,
+                broker_position_ticket=300,
+                ownership="ez_trade",
+                symbol="EURUSDm",
+                side="buy",
+                volume="0.10",
+                open_price="1.1000",
+                status="closed",
+                opened_at=now,
+                last_reconciled_at=now,
+            ),
+            BrokerPosition.objects.create(
+                broker_account=self.account,
+                broker_position_ticket=100,
+                ownership="ez_trade",
+                symbol="XAUUSDm",
+                side="buy",
+                volume="0.01",
+                open_price="3000",
+                status="open",
+                opened_at=now - timedelta(hours=2),
+                last_reconciled_at=now - timedelta(minutes=5),
+            ),
+            BrokerPosition.objects.create(
+                broker_account=self.account,
+                broker_position_ticket=200,
+                ownership="ez_trade",
+                symbol="BTCUSDm",
+                side="sell",
+                volume="0.01",
+                open_price="100000",
+                status="open",
+                opened_at=now - timedelta(hours=1),
+                last_reconciled_at=now,
+            ),
+        ]
+
+        response = self.client.get("/api/personal/positions/")
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(
+            [item["id"] for item in response.json()],
+            [rows[2].id, rows[1].id, rows[0].id],
+        )

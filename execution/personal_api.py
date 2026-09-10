@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.db.models import Case, F, IntegerField, Value, When
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -338,7 +339,23 @@ def personal_positions(request):
         account = _account_for(request)
     except (BrokerAccount.DoesNotExist, ValueError) as exc:
         return Response({"detail": str(exc)}, status=400)
-    return Response([_position_dict(row) for row in BrokerPosition.objects.filter(broker_account=account)])
+    positions = (
+        BrokerPosition.objects.filter(broker_account=account)
+        .annotate(
+            _current_rank=Case(
+                When(status="open", then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            )
+        )
+        .order_by(
+            "_current_rank",
+            F("last_reconciled_at").desc(nulls_last=True),
+            F("opened_at").desc(nulls_last=True),
+            "-broker_position_ticket",
+        )
+    )
+    return Response([_position_dict(row) for row in positions])
 
 
 @api_view(["POST"])
