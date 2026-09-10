@@ -104,7 +104,10 @@ def asset_recommendation_state(bot) -> str:
     if asset is None or applied_version is None:
         return "not_applied"
 
-    recommended = recommended_bot_defaults(asset)
+    try:
+        recommended = recommended_bot_defaults(asset)
+    except (ArithmeticError, AttributeError, LookupError, TypeError, ValueError):
+        return "customized"
     direct_match = all(
         _preset_values_equal(field, getattr(bot, field, None), value)
         for field, value in recommended.items()
@@ -115,7 +118,10 @@ def asset_recommendation_state(bot) -> str:
     if preset_symbol:
         from execution.services.scalper_config import build_scalper_config
 
-        effective = build_scalper_config(bot).resolve_symbol(asset.symbol)
+        try:
+            effective = build_scalper_config(bot).resolve_symbol(asset.symbol)
+        except (ArithmeticError, AttributeError, LookupError, TypeError, ValueError):
+            effective = None
         if effective is None:
             symbol_match = False
         else:

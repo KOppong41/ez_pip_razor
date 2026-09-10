@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from bots.models import Asset, Bot
+from bots.services import asset_recommendation_state, recommended_bot_defaults
 from brokers.models import BrokerAccount
 from core.asset_trading_presets import (
     ASSET_CATALOG,
@@ -50,6 +51,19 @@ class AssetPresetCatalogTests(TestCase):
             self.assertEqual(
                 asset.recommended_config_version,
                 ASSET_PRESET_VERSION,
+            )
+
+    def test_every_asset_recommendation_has_a_serializable_state(self):
+        for asset in Asset.objects.filter(symbol__in=ASSET_CATALOG):
+            bot = Bot(
+                asset=asset,
+                asset_preset_version_applied=asset.recommended_config_version,
+                **recommended_bot_defaults(asset),
+            )
+            self.assertEqual(
+                asset_recommendation_state(bot),
+                "recommended",
+                asset.symbol,
             )
 
 
@@ -213,6 +227,25 @@ class AssetPresetApiTests(TestCase):
             refreshed_response.json()["asset_preset_state"],
             "update_available",
         )
+
+    def test_invalid_stored_recommendation_cannot_break_bot_list(self):
+        gold = Asset.objects.get(symbol="XAUUSDm")
+        bot = Bot.objects.create(
+            owner=self.user,
+            name="Invalid stored recommendation",
+            asset=gold,
+            broker_account=self.account,
+            asset_preset_version_applied=gold.recommended_config_version,
+        )
+        invalid_config = dict(gold.recommended_config)
+        invalid_config["risk_per_trade_pct"] = "not-a-number"
+        gold.recommended_config = invalid_config
+        gold.save(update_fields=["recommended_config"])
+
+        response = self.client.get(f"/api/bots/{bot.id}/")
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.json()["asset_preset_state"], "customized")
 
     def test_existing_bot_changes_only_after_explicit_apply(self):
         eur = Asset.objects.get(symbol="EURUSDm")

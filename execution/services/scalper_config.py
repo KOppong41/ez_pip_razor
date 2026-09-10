@@ -441,6 +441,9 @@ def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], D
         sl_unit = settings.get("sl_points", {}).get("unit") or "points"
         spread_unit = settings.get("max_spread_unit") or "points"
         slippage_unit = settings.get("max_slippage_unit") or "points"
+        trail_start_raw = settings.get("trail_start_r")
+        if trail_start_raw is None and "trail_start_r" not in settings:
+            trail_start_raw = settings.get("be_trigger_r", 1.0)
         cfg = SymbolConfig(
             key=key,
             aliases=aliases,
@@ -461,7 +464,11 @@ def _build_symbol_configs(raw_symbols: dict) -> Tuple[Dict[str, SymbolConfig], D
             allow_countertrend=bool(settings.get("allow_countertrend", False)),
             risk_pct=Decimal(str(settings.get("risk_pct", 0.5))),
             exit_mode=settings.get("exit_mode", "fixed_tp"),
-            trail_start_r=Decimal(str(settings.get("trail_start_r", settings.get("be_trigger_r", 1.0)))),
+            trail_start_r=(
+                Decimal(str(trail_start_raw))
+                if trail_start_raw is not None
+                else None
+            ),
             tp1_r=(Decimal(str(settings["tp1_r"])) if settings.get("tp1_r") is not None else None),
             tp1_close_pct=(int(settings["tp1_close_pct"]) if settings.get("tp1_close_pct") is not None else None),
         )
