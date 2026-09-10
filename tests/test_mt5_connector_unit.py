@@ -1,3 +1,4 @@
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -49,10 +50,19 @@ class MT5ConnectorReconnectTests(unittest.TestCase):
         fake_mt5 = FakeMT5()
         connector = mt5_module.MT5Connector()
 
-        with mock.patch.object(mt5_module, "mt5", fake_mt5):
+        with tempfile.NamedTemporaryFile(suffix=".exe") as terminal, mock.patch.object(
+            mt5_module,
+            "mt5",
+            fake_mt5,
+        ):
             mt5_module._MT5Session._initialized = False
             connector.check_health(
-                {"login": 1, "password": "p", "server": "s", "path": "C:/tmp/terminal64.exe"},
+                {
+                    "login": 1,
+                    "password": "p",
+                    "server": "s",
+                    "path": terminal.name,
+                },
                 "EURUSDm",
             )
             self.assertGreaterEqual(fake_mt5.select_calls, 2)
