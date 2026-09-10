@@ -18,6 +18,7 @@ from execution.services.strategies.range_reversion import (
     run_range_reversion,
 )
 from execution.services.strategies.scalper import _estimate_sl_distance_points
+from execution.services.strategies.scalper import _score_components
 from execution.services.trading_type import is_within_trading_window
 
 
@@ -135,10 +136,61 @@ class AssetPresetScoreTests(SimpleTestCase):
     def test_range_reversion_score_is_normalized(self):
         candles = [
             {"open": Decimal("101"), "high": Decimal("102"), "low": Decimal("100"), "close": Decimal("101"), "tick_volume": 100},
-            {"open": Decimal("101"), "high": Decimal("101.8"), "low": Decimal("100.2"), "close": Decimal("101"), "tick_volume": 100},
-            {"open": Decimal("101"), "high": Decimal("101.9"), "low": Decimal("100.3"), "close": Decimal("101.4"), "tick_volume": 100},
+            {"open": Decimal("101"), "high": Decimal("101.8"), "low": Decimal("100.2"), "close": Decimal("101.7"), "tick_volume": 100},
+            {"open": Decimal("101"), "high": Decimal("101.9"), "low": Decimal("100.3"), "close": Decimal("100.4"), "tick_volume": 100},
             {"open": Decimal("101.4"), "high": Decimal("101.9"), "low": Decimal("100.5"), "close": Decimal("101.8"), "tick_volume": 100},
         ]
         self.assert_normalized_open(
             run_range_reversion(candles, RangeReversionConfig(lookback=3))
+        )
+
+    def test_range_reversion_rejects_directionally_efficient_trend(self):
+        candles = [
+            {
+                "open": Decimal(index),
+                "high": Decimal(index) + Decimal("1.2"),
+                "low": Decimal(index) - Decimal("0.2"),
+                "close": Decimal(index) + Decimal("1"),
+                "tick_volume": 100,
+            }
+            for index in range(100, 106)
+        ]
+
+        decision = run_range_reversion(
+            candles,
+            RangeReversionConfig(lookback=5),
+        )
+
+        self.assertEqual(decision.action, "skip")
+        self.assertEqual(decision.reason, "range_reversion_trending_regime")
+
+    def test_scalper_score_uses_percent_spread_and_atr_context(self):
+        symbol = SimpleNamespace(
+            sl_points_min=Decimal("0.10"),
+            sl_points_max=Decimal("0.30"),
+            sl_points_unit="percent",
+            max_spread_points=Decimal("0.015"),
+            max_spread_unit="percent",
+        )
+        config = SimpleNamespace(sessions=())
+        payload = {
+            "point": "0.001",
+            "digits": 3,
+            "close": "3000",
+            "atr_price": "3",
+            "spread_price": "0.40",
+        }
+
+        _, components = _score_components(
+            "buy", "buy", False, Decimal("0.20"), symbol, config, payload
+        )
+        self.assertEqual(Decimal(str(components["market"])), Decimal("0.2"))
+
+        payload["spread_price"] = "0.50"
+        _, wide_components = _score_components(
+            "buy", "buy", False, Decimal("0.20"), symbol, config, payload
+        )
+        self.assertEqual(
+            Decimal(str(wide_components["market"])),
+            Decimal("0.08"),
         )

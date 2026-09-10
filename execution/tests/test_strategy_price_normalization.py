@@ -1,8 +1,12 @@
 from decimal import Decimal
+from copy import deepcopy
 
 from django.test import SimpleTestCase
 
-from execution.services.strategies.doji_breakout import run_doji_breakout
+from execution.services.strategies.doji_breakout import (
+    _atr as _doji_atr,
+    run_doji_breakout,
+)
 from execution.services.strategies.price_action_pinbar import PinBarConfig, run_price_action_pinbar
 from execution.services.strategies.trend_pullback import _atr
 
@@ -101,3 +105,23 @@ class StrategyPriceNormalizationTests(SimpleTestCase):
         self.assertEqual({decision.direction for decision in decisions}, {"buy"})
         self.assertEqual(len({decision.reason for decision in decisions}), 1)
         self.assertTrue(all(0.0 <= decision.score <= 1.0 for decision in decisions))
+
+    def test_doji_score_changes_with_breakout_quality(self):
+        strong_candles = _scaled_doji_breakout_candles(Decimal("2300"))
+        weak_candles = deepcopy(strong_candles)
+        atr_price = _doji_atr(weak_candles[:-1], 12)
+        boundary = weak_candles[-2]["high"]
+        weak_close = boundary + atr_price * Decimal("0.11")
+        weak_candles[-1] = {
+            "open": boundary + atr_price * Decimal("0.105"),
+            "high": weak_close + atr_price * Decimal("0.01"),
+            "low": boundary,
+            "close": weak_close,
+        }
+
+        strong = run_doji_breakout("TEST", strong_candles)
+        weak = run_doji_breakout("TEST", weak_candles)
+
+        self.assertEqual({strong.action, weak.action}, {"open"})
+        self.assertNotEqual(strong.score, weak.score)
+        self.assertIn("score_components", strong.metadata)

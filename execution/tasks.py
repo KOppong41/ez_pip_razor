@@ -78,7 +78,10 @@ from execution.services.portfolio import record_fill
 from execution.services.equity import update_equity_high_water
 from execution.services.trade_constraints import distance_to_price
 from execution.services.strategies.harami import detect_harami
-from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
+from execution.services.strategy_registry import (
+    SCALPER_STRATEGY_REGISTRY,
+    build_strategy_config,
+)
 from execution.utils.symbols import canonical_symbol
 
 
@@ -2106,7 +2109,7 @@ def trade_scalper_strategies_for_bot(
 
         engine_decision = None
         try:
-            cfg = strategy_entry.config_factory()
+            cfg = build_strategy_config(strategy_name, getattr(bot, "asset", None))
             if strategy_entry.requires_symbol:
                 engine_decision = strategy_entry.runner(symbol, entry_candles, cfg)
             else:

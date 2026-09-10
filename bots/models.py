@@ -670,6 +670,23 @@ class Bot(models.Model):
         invalid = [s for s in (self.enabled_strategies or []) if s not in STRATEGY_CHOICES]
         if invalid:
             raise ValidationError({"enabled_strategies": f"Unknown strategies: {', '.join(invalid)}"})
+        if self.engine_mode == "scalper" and self.enabled_strategies:
+            from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
+
+            unsupported = [
+                strategy
+                for strategy in self.enabled_strategies
+                if strategy not in SCALPER_STRATEGY_REGISTRY
+            ]
+            if unsupported:
+                raise ValidationError(
+                    {
+                        "enabled_strategies": (
+                            "Scalper mode supports only executable strategies: "
+                            f"{', '.join(unsupported)}"
+                        )
+                    }
+                )
 
         # Decision score guardrail
         try:

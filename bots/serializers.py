@@ -3,7 +3,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from brokers.models import BrokerAccount
-from bots.services import recommended_bot_defaults
+from bots.services import asset_recommendation_state, recommended_bot_defaults
 
 from .models import Asset, Bot, STANDARD_TIMEFRAMES, STRATEGY_CHOICES
 
@@ -21,6 +21,7 @@ class BotSerializer(serializers.ModelSerializer):
     )
     asset_details = serializers.SerializerMethodField()
     broker_account_details = serializers.SerializerMethodField()
+    asset_preset_state = serializers.SerializerMethodField()
     enabled_strategies = serializers.ListField(
         child=serializers.ChoiceField(choices=STRATEGY_CHOICES),
         required=False,
@@ -92,6 +93,7 @@ class BotSerializer(serializers.ModelSerializer):
             "hard_size_multiplier",
             "asset_preset_version_applied",
             "asset_preset_applied_at",
+            "asset_preset_state",
             "created_at",
         )
         read_only_fields = (
@@ -100,6 +102,7 @@ class BotSerializer(serializers.ModelSerializer):
             "status",
             "asset_preset_version_applied",
             "asset_preset_applied_at",
+            "asset_preset_state",
             "created_at",
         )
 
@@ -141,6 +144,9 @@ class BotSerializer(serializers.ModelSerializer):
             "risk_limits": self._account_risk_limits(account),
         }
 
+    def get_asset_preset_state(self, obj):
+        return asset_recommendation_state(obj)
+
     @staticmethod
     def _account_risk_limits(account):
         try:
@@ -171,11 +177,25 @@ class BotSerializer(serializers.ModelSerializer):
         bot_lot = effective_value("max_bot_lot_size")
         bot_positions = effective_value("risk_max_concurrent_positions")
         risk_pct = effective_value("risk_per_trade_pct")
+        engine_mode = effective_value("engine_mode")
         soft_drawdown = effective_value("soft_drawdown_limit_pct")
         hard_drawdown = effective_value("hard_drawdown_limit_pct")
         soft_multiplier = effective_value("soft_size_multiplier")
         hard_multiplier = effective_value("hard_size_multiplier")
         errors = {}
+        if engine_mode == "scalper" and "enabled_strategies" in attrs:
+            from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
+
+            unsupported = [
+                strategy
+                for strategy in attrs.get("enabled_strategies") or []
+                if strategy not in SCALPER_STRATEGY_REGISTRY
+            ]
+            if unsupported:
+                errors["enabled_strategies"] = (
+                    "Scalper mode supports only executable scalper strategies. "
+                    f"Unsupported: {', '.join(unsupported)}."
+                )
         if sizing_mode == "risk" and (risk_pct is None or risk_pct <= 0):
             errors["risk_per_trade_pct"] = "Risk per trade must be greater than 0 in risk-based mode."
         if sizing_mode == "fixed" and default_qty is not None and bot_lot is not None and default_qty > bot_lot:

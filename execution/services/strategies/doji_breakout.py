@@ -105,19 +105,6 @@ def _collect_wick_levels(
     return clustered
 
 
-def _has_level(
-    pin: PinType,
-    doji: Candle,
-    levels: List[Decimal],
-    *,
-    tolerance: Decimal,
-) -> bool:
-    if not levels:
-        return False
-    wick_price = doji["low"] if pin == "bullish" else doji["high"]
-    return any(abs(wick_price - lvl) <= tolerance for lvl in levels)
-
-
 def _trend_ok(pin: PinType, ema: List[Decimal], idx: int, close: Decimal) -> bool:
     if idx < 1:
         return False
@@ -126,6 +113,77 @@ def _trend_ok(pin: PinType, ema: List[Decimal], idx: int, close: Decimal) -> boo
     if pin == "bullish":
         return close > now and now > prev
     return close < now and now < prev
+
+
+def _quality_score(
+    *,
+    doji: Candle,
+    breakout: Candle,
+    doji_type: PinType,
+    ema: List[Decimal],
+    ema_index: int,
+    atr_price: Decimal,
+    level_distance: Decimal,
+    level_tolerance: Decimal,
+    cfg: DojiBreakoutConfig,
+) -> tuple[Decimal, dict[str, float]]:
+    """Score already-observed setup quality on a comparable 0..1 scale."""
+    doji_range = doji["high"] - doji["low"]
+    doji_body = abs(doji["close"] - doji["open"])
+    upper_wick = doji["high"] - max(doji["open"], doji["close"])
+    lower_wick = min(doji["open"], doji["close"]) - doji["low"]
+    long_wick = max(upper_wick, lower_wick)
+    short_wick = min(upper_wick, lower_wick)
+    doji_quality = max(
+        Decimal("0"),
+        Decimal("1")
+        - doji_body
+        / max(doji_range * cfg.body_ratio_max, Decimal("0.00000001")),
+    )
+    wick_quality = max(
+        Decimal("0"),
+        Decimal("1")
+        - short_wick
+        / max(long_wick * cfg.wick_dom_ratio, Decimal("0.00000001")),
+    )
+    level_quality = max(
+        Decimal("0"),
+        Decimal("1") - level_distance / max(level_tolerance, Decimal("0.00000001")),
+    )
+    boundary = doji["high"] if doji_type == "bullish" else doji["low"]
+    displacement = abs(breakout["close"] - boundary)
+    displacement_quality = min(
+        Decimal("1"),
+        displacement / max(atr_price * Decimal("0.3"), Decimal("0.00000001")),
+    )
+    ema_slope = abs(ema[ema_index] - ema[ema_index - 1])
+    trend_quality = min(
+        Decimal("1"),
+        ema_slope / max(atr_price * Decimal("0.1"), Decimal("0.00000001")),
+    )
+    breakout_body = abs(breakout["close"] - breakout["open"])
+    candle_quality = min(
+        Decimal("1"),
+        breakout_body / max(atr_price * Decimal("0.3"), Decimal("0.00000001")),
+    )
+    components = {
+        "doji": float(doji_quality),
+        "wick": float(wick_quality),
+        "level": float(level_quality),
+        "displacement": float(displacement_quality),
+        "trend": float(trend_quality),
+        "breakout_candle": float(candle_quality),
+    }
+    score = min(
+        Decimal("1"),
+        doji_quality * Decimal("0.20")
+        + wick_quality * Decimal("0.15")
+        + level_quality * Decimal("0.20")
+        + displacement_quality * Decimal("0.25")
+        + trend_quality * Decimal("0.10")
+        + candle_quality * Decimal("0.10"),
+    )
+    return score, components
 
 
 def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBreakoutConfig] = None) -> EngineDecision:
@@ -172,7 +230,9 @@ def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBrea
         min_range=min_range,
         tolerance=level_tolerance,
     )
-    if not _has_level(doji_type, doji, levels, tolerance=level_tolerance):
+    wick_price = doji["low"] if doji_type == "bullish" else doji["high"]
+    level_distances = [abs(wick_price - level) for level in levels]
+    if not level_distances or min(level_distances) > level_tolerance:
         return EngineDecision(action="skip", reason="no_sr_confluence", strategy="doji_breakout")
 
     doji_high = doji["high"]
@@ -192,6 +252,17 @@ def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBrea
         tp = entry - cfg.rr * (sl - entry)
         direction = "sell"
 
+    score, score_components = _quality_score(
+        doji=doji,
+        breakout=last,
+        doji_type=doji_type,
+        ema=ema,
+        ema_index=len(candles) - 2,
+        atr_price=atr_price,
+        level_distance=min(level_distances),
+        level_tolerance=level_tolerance,
+        cfg=cfg,
+    )
     return EngineDecision(
         action="open",
         direction=direction,
@@ -199,8 +270,10 @@ def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBrea
         tp=tp,
         reason="doji_breakout_sr_confluence",
         strategy="doji_breakout",
-        score=0.6,
+        score=float(score),
         metadata={
+            "confidence": float(score),
+            "score_components": score_components,
             "atr_pct": float(atr_pct),
             "level_tolerance_atr": float(cfg.wick_level_tolerance_atr),
             "breakout_buffer_atr": float(cfg.breakout_buffer_atr),

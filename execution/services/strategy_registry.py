@@ -1,5 +1,6 @@
 """Pure candle strategies shared by the live scalper and historical simulations."""
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
+from decimal import Decimal
 from typing import Callable
 
 from execution.services.strategies.breakout_retest import BreakoutRetestConfig, run_breakout_retest
@@ -25,3 +26,30 @@ SCALPER_STRATEGY_REGISTRY = {
     "breakout_retest": ScalperStrategyEntry(run_breakout_retest, BreakoutRetestConfig),
     "momentum_ignition": ScalperStrategyEntry(run_momentum_ignition, MomentumIgnitionConfig),
 }
+
+
+def _coerce_override(value, current):
+    if isinstance(current, Decimal):
+        return Decimal(str(value))
+    if isinstance(current, bool):
+        return bool(value)
+    if isinstance(current, int):
+        return int(value)
+    if isinstance(current, float):
+        return float(value)
+    return value
+
+
+def build_strategy_config(strategy_name: str, asset=None):
+    """Build generic strategy config, then apply the asset's stored tuning."""
+    entry = SCALPER_STRATEGY_REGISTRY[strategy_name]
+    config = entry.config_factory()
+    preset = getattr(asset, "recommended_config", None) or {}
+    overrides = (preset.get("strategy_overrides") or {}).get(strategy_name) or {}
+    allowed_fields = {field.name for field in fields(config)}
+    values = {
+        key: _coerce_override(value, getattr(config, key))
+        for key, value in overrides.items()
+        if key in allowed_fields
+    }
+    return replace(config, **values) if values else config

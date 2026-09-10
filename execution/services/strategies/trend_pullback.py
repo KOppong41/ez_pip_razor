@@ -104,7 +104,9 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
 
     def _rejection_ratio() -> Decimal:
         body = abs(last["close"] - last["open"])
-        wick = (last_high - last_close) if bear_trend else (last_close - last_low)
+        upper_wick = last_high - max(last["open"], last_close)
+        lower_wick = min(last["open"], last_close) - last_low
+        wick = upper_wick if bear_trend else lower_wick
         if body == 0:
             return Decimal("0")
         return (wick / body) if body else Decimal("0")
@@ -131,14 +133,17 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
                 metadata={"reason": "fractal_unconfirmed"},
             )
         latest_confirmed = fractal_markers[confirmed_index]
-        if bull_trend and not latest_confirmed.get("up"):
+        # Indicator semantics: ``down`` marks a local low and ``up`` marks a
+        # local high. Bullish pullbacks confirm against a swing low; bearish
+        # pullbacks confirm against a swing high.
+        if bull_trend and not latest_confirmed.get("down"):
             return EngineDecision(
                 action="skip",
                 reason="trend_pullback_no_fractal",
                 strategy="trend_pullback",
                 metadata={"reason": "fractal_missing", "direction": "buy"},
             )
-        if bear_trend and not latest_confirmed.get("down"):
+        if bear_trend and not latest_confirmed.get("up"):
             return EngineDecision(
                 action="skip",
                 reason="trend_pullback_no_fractal",

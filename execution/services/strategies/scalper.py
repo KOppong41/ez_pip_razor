@@ -39,20 +39,24 @@ def _pip_size(point: Decimal | None, digits: int | None = None) -> Decimal | Non
     return point * Decimal("10") if digits in (3, 5) else point
 
 
-def _to_price_delta(value: Decimal, unit: str, point: Decimal | None) -> Decimal:
-    """
-    Normalize a distance to price units given the declared unit and broker point size.
-    Units supported: "price" (passthrough), "points", "pips".
-    """
-    unit = (unit or "points").lower()
-    if unit == "price":
-        return value
-    if unit == "points":
-        return value * point if point else value
-    if unit == "pips":
-        pip = _pip_size(point) or Decimal("0.0001")
-        return value * pip
-    return value
+def _to_price_delta(
+    value: Decimal,
+    unit: str,
+    point: Decimal | None,
+    *,
+    market_price: Decimal | None = None,
+    atr: Decimal | None = None,
+    digits: int | None = None,
+) -> Decimal:
+    """Convert semantic distances through the shared broker-aware helper."""
+    return distance_to_price(
+        value,
+        unit,
+        point,
+        market_price=market_price,
+        atr=atr,
+        digits=digits,
+    )
 
 
 def _from_price_delta(
@@ -257,6 +261,18 @@ def _score_components(
     components: Dict[str, float] = {}
     total = Decimal("0")
     point = _parse_decimal(payload, "point")
+    market_price = _parse_decimal(
+        payload,
+        "entry",
+        "price",
+        "close",
+        "last_price",
+    )
+    atr_price = _parse_decimal(payload, "atr_price", "atr")
+    try:
+        digits = int(payload["digits"]) if payload.get("digits") is not None else None
+    except (TypeError, ValueError):
+        digits = None
 
     bias_detail = payload.get("htf_bias_detail") or {}
     bias_strength = Decimal("0")
@@ -293,21 +309,42 @@ def _score_components(
     total += structure_weight
     components["structure"] = float(structure_weight)
 
-    spread_points = _parse_decimal(payload, "spread_price", "spread_points", "spread")
+    actual_spread = _parse_decimal(payload, "spread_price")
+    if actual_spread is None:
+        raw_spread_points = _parse_decimal(payload, "spread_points")
+        if raw_spread_points is not None:
+            actual_spread = _to_price_delta(
+                raw_spread_points,
+                "points",
+                point,
+                market_price=market_price,
+                atr=atr_price,
+                digits=digits,
+            )
+    if actual_spread is None:
+        actual_spread = _parse_decimal(payload, "spread")
     market_weight = DEFAULT_MARKET_WEIGHT
-    if spread_points is not None:
-        allowed_spread = _to_price_delta(symbol_cfg.max_spread_points, symbol_cfg.max_spread_unit, point)
-        actual_spread = spread_points
+    if actual_spread is not None:
+        allowed_spread = _to_price_delta(
+            symbol_cfg.max_spread_points,
+            symbol_cfg.max_spread_unit,
+            point,
+            market_price=market_price,
+            atr=atr_price,
+            digits=digits,
+        )
         if allowed_spread > 0 and actual_spread > allowed_spread:
             market_weight *= Decimal("0.4")
     else:
         market_weight *= Decimal("0.85")
-    atr_price = _parse_decimal(payload, "atr_price")
     atr_points = (
         _from_price_delta(
             atr_price,
             getattr(symbol_cfg, "sl_points_unit", "points"),
             point,
+            market_price=market_price,
+            atr=atr_price,
+            digits=digits,
         )
         if atr_price is not None
         else _parse_decimal(payload, "atr_points")

@@ -7,6 +7,7 @@ from brokers.models import BrokerAccount
 from core.utils import structured_log
 from execution.models import MT5ConnectionState, RiskPolicy
 from execution.services.brokers import get_broker_symbol_constraints
+from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
 from subscription.utils import get_bot_limit
 
 from .models import (
@@ -98,6 +99,16 @@ class BotViewSet(
                         **STRATEGY_GUIDES.get(value, {"label": value.replace("_", " ").title()}),
                     }
                     for value in STRATEGY_CHOICES
+                ],
+                "scalper_strategies": [
+                    {
+                        "value": value,
+                        **STRATEGY_GUIDES.get(
+                            value,
+                            {"label": value.replace("_", " ").title()},
+                        ),
+                    }
+                    for value in SCALPER_STRATEGY_REGISTRY
                 ],
                 "trading_profiles": [
                     {"value": value, "label": label}

@@ -22,6 +22,22 @@ ASSET_PRESET_DIRECT_FIELDS = (
     "soft_drawdown_limit_pct", "soft_size_multiplier", "hard_drawdown_limit_pct",
     "hard_size_multiplier",
 )
+UNORDERED_PRESET_FIELDS = {
+    "allowed_timeframes",
+    "enabled_strategies",
+    "allowed_trading_days",
+}
+
+
+def _preset_values_equal(field, current, recommended):
+    if field in UNORDERED_PRESET_FIELDS:
+        return set(current or []) == set(recommended or [])
+    if isinstance(current, Decimal) or isinstance(recommended, (Decimal, float)):
+        try:
+            return Decimal(str(current)) == Decimal(str(recommended))
+        except Exception:
+            return False
+    return current == recommended
 
 
 def recommended_bot_defaults(asset):
@@ -79,6 +95,55 @@ def apply_recommendations_to_bot(bot, *, save=True):
             ]
         )
     return bot
+
+
+def asset_recommendation_state(bot) -> str:
+    """Describe whether an applied preset still matches the bot's settings."""
+    asset = getattr(bot, "asset", None)
+    applied_version = getattr(bot, "asset_preset_version_applied", None)
+    if asset is None or applied_version is None:
+        return "not_applied"
+
+    recommended = recommended_bot_defaults(asset)
+    direct_match = all(
+        _preset_values_equal(field, getattr(bot, field, None), value)
+        for field, value in recommended.items()
+    )
+
+    symbol_match = True
+    preset_symbol = (asset.recommended_config or {}).get("symbol_config") or {}
+    if preset_symbol:
+        from execution.services.scalper_config import build_scalper_config
+
+        effective = build_scalper_config(bot).resolve_symbol(asset.symbol)
+        if effective is None:
+            symbol_match = False
+        else:
+            stop = preset_symbol.get("sl_points") or {}
+            expected_fields = {
+                "sl_points_min": stop.get("min"),
+                "sl_points_max": stop.get("max"),
+                "sl_points_unit": stop.get("unit"),
+                **{
+                    key: value
+                    for key, value in preset_symbol.items()
+                    if key != "sl_points"
+                },
+            }
+            symbol_match = all(
+                _preset_values_equal(
+                    field,
+                    getattr(effective, field, None),
+                    value,
+                )
+                for field, value in expected_fields.items()
+            )
+
+    if direct_match and symbol_match:
+        return "recommended"
+    if applied_version < asset.recommended_config_version:
+        return "update_available"
+    return "customized"
 
 def route_bot_for_signal(symbol: str, timeframe: str) -> Optional[Bot]:
     # naive: first ACTIVE bot that accepts symbol/timeframe

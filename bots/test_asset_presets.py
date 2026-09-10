@@ -6,14 +6,21 @@ from django.test import TestCase
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
-from core.asset_trading_presets import ASSET_CATALOG, ASSET_TRADING_PRESETS
+from core.asset_trading_presets import (
+    ASSET_CATALOG,
+    ASSET_PRESET_VERSION,
+    ASSET_TRADING_PRESETS,
+)
 from execution.models import RiskPolicy
 from execution.services.brokers import BrokerSymbolConstraints
 from execution.services.scalper_config import (
     build_scalper_config,
     resolve_allowed_strategy_pool,
 )
-from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
+from execution.services.strategy_registry import (
+    SCALPER_STRATEGY_REGISTRY,
+    build_strategy_config,
+)
 
 
 class AssetPresetCatalogTests(TestCase):
@@ -36,7 +43,14 @@ class AssetPresetCatalogTests(TestCase):
         self.assertEqual(assets.count(), 34)
         for asset in assets:
             self.assertEqual(asset.category, ASSET_CATALOG[asset.symbol]["category"])
-            self.assertTrue(asset.recommended_config)
+            self.assertEqual(
+                asset.recommended_config,
+                ASSET_TRADING_PRESETS[asset.symbol],
+            )
+            self.assertEqual(
+                asset.recommended_config_version,
+                ASSET_PRESET_VERSION,
+            )
 
 
 class AssetPresetApiTests(TestCase):
@@ -62,8 +76,12 @@ class AssetPresetApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         gold = next(row for row in response.json()["assets"] if row["symbol"] == "XAUUSDm")
         self.assertEqual(gold["category"], "commodities")
-        self.assertEqual(gold["recommended_config_version"], 1)
+        self.assertEqual(gold["recommended_config_version"], ASSET_PRESET_VERSION)
         self.assertEqual(gold["recommended_config"]["default_timeframe"], "5m")
+        self.assertEqual(
+            {row["value"] for row in response.json()["scalper_strategies"]},
+            set(SCALPER_STRATEGY_REGISTRY),
+        )
 
     @patch("bots.views.get_broker_symbol_constraints")
     def test_fixed_lot_hint_uses_connected_broker_constraints(self, constraints):
@@ -104,7 +122,97 @@ class AssetPresetApiTests(TestCase):
         self.assertEqual(bot.enabled_strategies, ASSET_TRADING_PRESETS["BTCUSDm"]["enabled_strategies"])
         self.assertFalse(bot.trading_schedule_enabled)
         self.assertEqual(bot.trading_timezone, "UTC")
-        self.assertEqual(bot.asset_preset_version_applied, 1)
+        self.assertEqual(bot.asset_preset_version_applied, ASSET_PRESET_VERSION)
+
+    def test_scalper_rejects_strategy_without_registered_runner(self):
+        gold = Asset.objects.get(symbol="XAUUSDm")
+        response = self.client.post(
+            "/api/bots/",
+            data={
+                "name": "Unsupported scalper",
+                "asset": gold.id,
+                "broker_account": self.account.id,
+                "engine_mode": "scalper",
+                "enabled_strategies": ["engulfing"],
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.json())
+        self.assertIn("enabled_strategies", response.json())
+
+    def test_strategy_config_merges_category_asset_and_stored_overrides(self):
+        gold = Asset.objects.get(symbol="XAUUSDm")
+        silver = Asset.objects.get(symbol="XAGUSDm")
+        euro = Asset.objects.get(symbol="EURUSDm")
+
+        self.assertEqual(
+            build_strategy_config("momentum_ignition", euro).min_impulse_pct,
+            Decimal("0.0005"),
+        )
+        self.assertEqual(
+            build_strategy_config("momentum_ignition", gold).min_impulse_pct,
+            Decimal("0.0007"),
+        )
+        self.assertEqual(
+            build_strategy_config("momentum_ignition", silver).min_impulse_pct,
+            Decimal("0.0011"),
+        )
+
+        stored = dict(gold.recommended_config)
+        stored["strategy_overrides"] = dict(stored["strategy_overrides"])
+        stored["strategy_overrides"]["momentum_ignition"] = {
+            "min_impulse_pct": 0.0025,
+        }
+        gold.recommended_config = stored
+        gold.save(update_fields=["recommended_config"])
+        self.assertEqual(
+            build_strategy_config("momentum_ignition", gold).min_impulse_pct,
+            Decimal("0.0025"),
+        )
+
+    def test_recommendation_state_tracks_match_customization_and_update(self):
+        gold = Asset.objects.get(symbol="XAUUSDm")
+        create_response = self.client.post(
+            "/api/bots/",
+            data={
+                "name": "Recommendation state",
+                "asset": gold.id,
+                "broker_account": self.account.id,
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.json())
+        self.assertEqual(create_response.json()["asset_preset_state"], "recommended")
+        bot_id = create_response.json()["id"]
+
+        customized_response = self.client.patch(
+            f"/api/bots/{bot_id}/",
+            data={"risk_per_trade_pct": "0.19"},
+            content_type="application/json",
+        )
+        self.assertEqual(customized_response.status_code, 200, customized_response.json())
+        self.assertEqual(customized_response.json()["asset_preset_state"], "customized")
+
+        apply_response = self.client.post(
+            f"/api/bots/{bot_id}/apply-asset-recommendations/",
+            data={},
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.json())
+        self.assertEqual(apply_response.json()["asset_preset_state"], "recommended")
+
+        updated_config = dict(gold.recommended_config)
+        updated_config["risk_per_trade_pct"] = 0.31
+        gold.recommended_config = updated_config
+        gold.recommended_config_version += 1
+        gold.save(update_fields=["recommended_config", "recommended_config_version"])
+        refreshed_response = self.client.get(f"/api/bots/{bot_id}/")
+        self.assertEqual(refreshed_response.status_code, 200, refreshed_response.json())
+        self.assertEqual(
+            refreshed_response.json()["asset_preset_state"],
+            "update_available",
+        )
 
     def test_existing_bot_changes_only_after_explicit_apply(self):
         eur = Asset.objects.get(symbol="EURUSDm")

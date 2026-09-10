@@ -5,9 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class FakeApiClient extends ApiClient {
-  FakeApiClient({this.markets}) : super('http://127.0.0.1:8000');
+  FakeApiClient({this.markets, this.assetPresetState})
+    : super('http://127.0.0.1:8000');
 
   final List<Map<String, dynamic>>? markets;
+  final String? assetPresetState;
 
   @override
   Future<dynamic> get(String path) async {
@@ -43,6 +45,8 @@ class FakeApiClient extends ApiClient {
           'auto_trade': true,
           'enabled_strategies': ['momentum_ignition'],
           'trading_profile': 'scalper',
+          if (assetPresetState != null) 'asset_preset_state': assetPresetState,
+          if (assetPresetState != null) 'asset_preset_version_applied': 1,
         },
       ];
     }
@@ -175,6 +179,12 @@ class FakeApiClient extends ApiClient {
         ],
         'timeframes': ['1m', '5m', '15m'],
         'strategies': [
+          {'value': 'momentum_ignition', 'label': 'Momentum Ignition'},
+          {'value': 'breakout_retest', 'label': 'Breakout Retest'},
+          {'value': 'price_action_pinbar', 'label': 'Price Action Pin Bar'},
+          {'value': 'engulfing', 'label': 'Engulfing'},
+        ],
+        'scalper_strategies': [
           {'value': 'momentum_ignition', 'label': 'Momentum Ignition'},
           {'value': 'breakout_retest', 'label': 'Breakout Retest'},
           {'value': 'price_action_pinbar', 'label': 'Price Action Pin Bar'},
@@ -617,6 +627,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Recommended settings applied'), findsOneWidget);
+    expect(find.text('Engulfing'), findsNothing);
     expect(find.text('PROTECTION / EXIT'), findsOneWidget);
     expect(find.text('Default stop loss'), findsNothing);
     final riskField = tester.widget<TextField>(
@@ -637,6 +648,41 @@ void main() {
     await tester.pumpAndSettle();
     expect(riskField.controller!.text, '0.3');
     expect(find.text('Recommended settings applied'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('bot editor renders recommendation state from the API', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    Future<void> openEditor(String state) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          key: ValueKey('app-$state'),
+          theme: ThemeData.dark(),
+          home: Scaffold(
+            body: BotsPage(
+              key: ValueKey(state),
+              client: FakeApiClient(assetPresetState: state),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Edit bot'));
+      await tester.pumpAndSettle();
+    }
+
+    await openEditor('recommended');
+    expect(find.text('Recommended settings applied'), findsOneWidget);
+
+    await openEditor('customized');
+    expect(find.text('Customized'), findsAtLeastNWidgets(1));
+
+    await openEditor('update_available');
+    expect(find.text('Preset update available'), findsAtLeastNWidgets(1));
     expect(tester.takeException(), isNull);
   });
 

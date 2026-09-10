@@ -2939,6 +2939,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   bool killSwitchEnabled = true;
   bool lossStreakAutopauseEnabled = false;
   bool recommendedSettingsApplied = false;
+  bool presetUpdateAvailable = false;
   bool customized = false;
   bool applyAssetRecommendationsRequested = false;
   Map<String, dynamic> brokerLotConstraints = {};
@@ -2971,8 +2972,24 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       listOfMaps(widget.options['accounts']);
   List<Map<String, dynamic>> get engineModes =>
       listOfMaps(widget.options['engine_modes']);
-  List<Map<String, dynamic>> get strategies =>
-      listOfMaps(widget.options['strategies']);
+  List<Map<String, dynamic>> get strategies {
+    final all = listOfMaps(widget.options['strategies']);
+    if (engineMode != 'scalper') return all;
+    final executable = listOfMaps(widget.options['scalper_strategies']);
+    if (executable.isNotEmpty) return executable;
+    const supported = {
+      'price_action_pinbar',
+      'trend_pullback',
+      'doji_breakout',
+      'range_reversion',
+      'breakout_retest',
+      'momentum_ignition',
+    };
+    return all
+        .where((strategy) => supported.contains('${strategy['value']}'))
+        .toList();
+  }
+
   List<Map<String, dynamic>> get tradingProfiles =>
       listOfMaps(widget.options['trading_profiles']);
   List<String> get timeframes => widget.options['timeframes'] is List
@@ -3003,7 +3020,12 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     allowOppositeScalp = bot?['allow_opposite_scalp'] == true;
     killSwitchEnabled = bot?['kill_switch_enabled'] != false;
     lossStreakAutopauseEnabled = bot?['loss_streak_autopause_enabled'] == true;
-    recommendedSettingsApplied = bot?['asset_preset_version_applied'] != null;
+    final presetState = '${bot?['asset_preset_state'] ?? ''}';
+    recommendedSettingsApplied =
+        presetState == 'recommended' ||
+        (presetState.isEmpty && bot?['asset_preset_version_applied'] != null);
+    presetUpdateAvailable = presetState == 'update_available';
+    customized = presetState == 'customized';
     selectedStrategies.addAll(
       bot?['enabled_strategies'] is List
           ? List<dynamic>.from(bot!['enabled_strategies']).map((v) => '$v')
@@ -3265,6 +3287,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       recommendedSpread.text = '${symbol['max_spread_points'] ?? '0'}';
       recommendedSlippage.text = '${symbol['max_slippage_points'] ?? '0'}';
       recommendedSettingsApplied = true;
+      presetUpdateAvailable = false;
       customized = false;
       applyAssetRecommendationsRequested = true;
     }
@@ -3273,7 +3296,15 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   }
 
   void _markCustomized() {
-    if (!customized) setState(() => customized = true);
+    if (!customized || presetUpdateAvailable || recommendedSettingsApplied) {
+      setState(_setCustomizedState);
+    }
+  }
+
+  void _setCustomizedState() {
+    customized = true;
+    presetUpdateAvailable = false;
+    recommendedSettingsApplied = false;
   }
 
   Future<void> _loadBrokerLotSuggestion({bool replaceQuantity = true}) async {
@@ -3316,6 +3347,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
 
   String _recommendedHelper(String key, {String suffix = ''}) {
     if (customized) return 'Customized';
+    if (presetUpdateAvailable) return 'Preset update available';
     final value = selectedRecommendation[key];
     final assetName =
         selectedAsset?['display_name'] ?? selectedAsset?['symbol'];
@@ -3760,7 +3792,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   fontWeight: FontWeight.w700,
                 ),
                 onSelected: (enabled) => setState(() {
-                  customized = true;
+                  _setCustomizedState();
                   enabled
                       ? selectedStrategies.add(value)
                       : selectedStrategies.remove(value);
@@ -3799,7 +3831,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
             fontWeight: FontWeight.w700,
           ),
           onSelected: (enabled) => setState(() {
-            if (marksCustomization) customized = true;
+            if (marksCustomization) _setCustomizedState();
             enabled ? selected.add(option.key) : selected.remove(option.key);
           }),
         ),
@@ -4070,14 +4102,16 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       vertical: 9,
                     ),
                     decoration: BoxDecoration(
-                      color: (customized ? amber : green).withValues(
-                        alpha: 0.10,
-                      ),
+                      color:
+                          (customized || presetUpdateAvailable ? amber : green)
+                              .withValues(alpha: 0.10),
                       borderRadius: BorderRadius.circular(9),
                       border: Border.all(
-                        color: (customized ? amber : green).withValues(
-                          alpha: 0.35,
-                        ),
+                        color:
+                            (customized || presetUpdateAvailable
+                                    ? amber
+                                    : green)
+                                .withValues(alpha: 0.35),
                       ),
                     ),
                     child: Column(
@@ -4088,8 +4122,12 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                             Icon(
                               customized
                                   ? Icons.tune_rounded
+                                  : presetUpdateAvailable
+                                  ? Icons.update_rounded
                                   : Icons.recommend_outlined,
-                              color: customized ? amber : green,
+                              color: customized || presetUpdateAvailable
+                                  ? amber
+                                  : green,
                               size: 17,
                             ),
                             const SizedBox(width: 8),
@@ -4097,6 +4135,8 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                               child: Text(
                                 customized
                                     ? 'Customized'
+                                    : presetUpdateAvailable
+                                    ? 'Preset update available'
                                     : recommendedSettingsApplied
                                     ? 'Recommended settings applied'
                                     : 'Current settings preserved',
@@ -4207,8 +4247,16 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                             child: _dropdownText('${mode['label']}'),
                           ),
                       ],
-                      onChanged: (value) =>
-                          setState(() => engineMode = value ?? engineMode),
+                      onChanged: (value) => setState(() {
+                        engineMode = value ?? engineMode;
+                        final visible = strategies
+                            .map((strategy) => '${strategy['value']}')
+                            .toSet();
+                        selectedStrategies.removeWhere(
+                          (strategy) => !visible.contains(strategy),
+                        );
+                        _setCustomizedState();
+                      }),
                     ),
                     DropdownButtonFormField<String>(
                       initialValue: timeframe,
@@ -4228,7 +4276,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       ],
                       onChanged: (value) => setState(() {
                         timeframe = value ?? timeframe;
-                        customized = true;
+                        _setCustomizedState();
                       }),
                     ),
                   ],
@@ -4496,7 +4544,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       ],
                       onChanged: (value) => setState(() {
                         slUnit = value ?? slUnit;
-                        customized = true;
+                        _setCustomizedState();
                       }),
                     ),
                   ]),
@@ -4533,7 +4581,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       ],
                       onChanged: (value) => setState(() {
                         exitMode = value ?? exitMode;
-                        customized = true;
+                        _setCustomizedState();
                       }),
                     ),
                   ]),
@@ -4628,7 +4676,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       ],
                       onChanged: (value) => setState(() {
                         trailMode = value ?? trailMode;
-                        customized = true;
+                        _setCustomizedState();
                       }),
                     ),
                   ]),
@@ -4760,7 +4808,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   value: tradingScheduleEnabled,
                   onChanged: (value) => setState(() {
                     tradingScheduleEnabled = value;
-                    customized = true;
+                    _setCustomizedState();
                   }),
                   color: blue,
                 ),

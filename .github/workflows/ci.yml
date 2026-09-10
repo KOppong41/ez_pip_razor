@@ -26,8 +26,8 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python manage.py check
       - run: python manage.py makemigrations --check --dry-run
-      - name: Run execution and risk regression tests
-        run: python manage.py test execution.tests --verbosity 2
+      - name: Run complete Django test suite
+        run: python manage.py test --verbosity 2
 
   desktop-client:
     runs-on: ubuntu-latest
