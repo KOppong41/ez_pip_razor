@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -272,6 +273,95 @@ class LiveRiskTest(TestCase):
         result = self._enforce(self._order(bot))
 
         self.assertEqual(result.volume, Decimal("0.13"))
+
+    def test_risk_budget_below_minimum_explains_zero_volume_without_rounding_up(self):
+        bot = self._bot(
+            risk_per_trade_pct=Decimal("0.25"),
+            default_qty=Decimal("0.01"),
+        )
+        self.account_info.equity = self.account_info.balance = Decimal("492.86")
+        self.tick = SimpleNamespace(bid=Decimal("78002.21"), ask=Decimal("78002.23"))
+        self.connector.calc_profit_for_account = Mock(return_value=Decimal("-273.01"))
+        self.connector.calc_margin_for_account = Mock()
+        order = self._order(bot, side="sell", sl=Decimal("78275.217735"), tp=None)
+
+        rejection = self._assert_rejected("BROKER_MIN_VOLUME", order)
+
+        context = rejection.context
+        self.assertEqual(context["sizing_mode"], "risk")
+        self.assertEqual(context["limiting_factor"], "risk_budget")
+        self.assertEqual(Decimal(context["effective_volume"]), Decimal("0"))
+        self.assertEqual(Decimal(context["calculated_volume"]), Decimal("1.23215") / Decimal("273.01"))
+        self.assertEqual(Decimal(context["risk_budget"]), Decimal("1.23215"))
+        self.assertEqual(Decimal(context["minimum_volume_risk"]), Decimal("2.7301"))
+        self.assertEqual(
+            Decimal(context["minimum_volume_risk_pct"]),
+            Decimal("2.7301") / Decimal("492.86") * Decimal("100"),
+        )
+        self.assertEqual(context["account_currency"], "USD")
+        self.assertEqual(Decimal(context["volume_step"]), Decimal("0.01"))
+        self.assertIn("1.23215 USD", rejection.message)
+        self.assertIn("2.7301 USD", rejection.message)
+        self.assertIn("risk-based sizing", rejection.message)
+        self.connector.calc_margin_for_account.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.qty, Decimal("0.01"))
+        self.assertIsNone(order.risk_reserved_at)
+
+    def test_risk_budget_exactly_covers_broker_minimum(self):
+        bot = self._bot(risk_per_trade_pct=Decimal("0.01"))
+
+        result = self._enforce(self._order(bot))
+
+        self.assertEqual(result.volume, Decimal("0.01"))
+        self.assertEqual(result.risk_amount, Decimal("1"))
+
+    def test_lot_cap_below_minimum_is_distinguished_from_insufficient_risk(self):
+        for cap_source in ("bot", "account"):
+            with self.subTest(cap_source=cap_source):
+                bot = self._bot(suffix=cap_source)
+                if cap_source == "bot":
+                    bot.max_bot_lot_size = Decimal("0.005")
+                    bot.save(update_fields=["max_bot_lot_size"])
+                else:
+                    self.policy.max_order_lot_size = Decimal("0.005")
+                    self.policy.save(update_fields=["max_order_lot_size"])
+
+                rejection = self._assert_rejected("BROKER_MIN_VOLUME", self._order(bot))
+
+                self.assertEqual(rejection.context["limiting_factor"], "lot_cap")
+                self.assertEqual(Decimal(rejection.context["calculated_volume"]), Decimal("1"))
+                self.assertEqual(Decimal(rejection.context["volume_before_rounding"]), Decimal("0.005"))
+                self.assertIn("lot limit", rejection.message)
+
+    def test_adaptive_fixed_lot_below_minimum_is_not_rounded_up(self):
+        bot = self._bot(position_sizing_mode="fixed", default_qty=Decimal("0.01"))
+        signal = Signal.objects.create(
+            bot=bot, source="engine_v1", symbol=self.asset.symbol,
+            direction="buy", dedupe_key="adaptive-fixed-below-minimum",
+        )
+        decision = Decision.objects.create(
+            bot=bot, signal=signal, action="open", score=1,
+            params={"risk_pct": "0.25"},
+        )
+
+        rejection = self._assert_rejected("BROKER_MIN_VOLUME", self._order(bot, decision=decision))
+
+        self.assertEqual(rejection.context["limiting_factor"], "adaptive_risk")
+        self.assertEqual(Decimal(rejection.context["calculated_volume"]), Decimal("0.0025"))
+        self.assertEqual(Decimal(rejection.context["effective_volume"]), Decimal("0"))
+        self.assertNotIn("risk_budget", rejection.context)
+        self.assertIn("Adaptive risk reduction", rejection.message)
+
+    def test_fixed_lot_below_minimum_explains_requested_volume(self):
+        bot = self._bot(position_sizing_mode="fixed", default_qty=Decimal("0.03"))
+        self.symbol_info.volume_min = Decimal("0.10")
+
+        rejection = self._assert_rejected("BROKER_MIN_VOLUME", self._order(bot))
+
+        self.assertEqual(rejection.context["limiting_factor"], "requested_volume")
+        self.assertIn("Requested fixed lot", rejection.message)
+        self.assertNotIn("risk_budget", rejection.context)
 
     def test_risk_based_volume_is_safely_capped_by_strictest_lot_limit(self):
         bot = self._bot(

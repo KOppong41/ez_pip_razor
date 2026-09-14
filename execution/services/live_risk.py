@@ -346,9 +346,11 @@ def enforce_pretrade_risk(
         risk_amount = equity * effective_risk_pct / Decimal("100")
         if risk_amount <= 0:
             reject("RISK_AMOUNT_INVALID", "Risk amount is not positive")
-        volume = risk_amount / loss_per_lot
+        calculated_volume = risk_amount / loss_per_lot
+        volume = calculated_volume
         if effective_cap > 0:
             volume = min(volume, effective_cap)
+        volume_before_rounding = volume
         volume = _floor_to_step(volume, volume_step)
     else:
         requested = _decimal(locked_order.qty)
@@ -363,6 +365,8 @@ def enforce_pretrade_risk(
         adjusted_requested = requested
         if adaptive_risk_applied and bot_risk_pct > 0:
             adjusted_requested = requested * effective_risk_pct / bot_risk_pct
+        calculated_volume = adjusted_requested
+        volume_before_rounding = adjusted_requested
         volume = _floor_to_step(adjusted_requested, volume_step)
         if volume != requested and not adaptive_risk_applied:
             reject("BROKER_VOLUME_STEP", "Fixed lot size does not align with the broker volume step", requested_volume=str(requested), volume_step=str(volume_step))
@@ -374,7 +378,60 @@ def enforce_pretrade_risk(
             risk_amount = Decimal("0")
 
     if volume <= 0 or volume < volume_min:
-        reject("BROKER_MIN_VOLUME", "Effective volume is below the broker minimum", effective_volume=str(volume), broker_limit=str(volume_min))
+        sizing_context = {
+            "sizing_mode": bot.position_sizing_mode,
+            "calculated_volume": str(calculated_volume),
+            "volume_before_rounding": str(volume_before_rounding),
+            "effective_volume": str(volume),
+            "broker_limit": str(volume_min),
+            "volume_step": str(volume_step),
+            "effective_lot_cap": str(effective_cap),
+            "effective_risk_pct": str(effective_risk_pct),
+        }
+        limiting_factor = "volume_step"
+        message = "Rounding down to the broker volume step leaves less than the minimum lot size."
+        if bot.position_sizing_mode == "risk":
+            account_currency = str(getattr(account_info, "currency", "") or "").strip()
+            currency_label = account_currency or "account-currency units"
+            minimum_volume_risk = loss_per_lot * volume_min
+            sizing_context.update(
+                equity=str(equity),
+                account_currency=account_currency,
+                risk_budget=str(risk_amount),
+                loss_per_lot=str(loss_per_lot),
+                minimum_volume_risk=str(minimum_volume_risk),
+                minimum_volume_risk_pct=str(minimum_volume_risk / equity * Decimal("100")),
+            )
+            if calculated_volume < volume_min:
+                limiting_factor = "risk_budget"
+                message = (
+                    f"With risk-based sizing, the risk budget of {risk_amount.normalize():f} {currency_label} "
+                    f"allows {calculated_volume.normalize():f} lots; the broker minimum of "
+                    f"{volume_min.normalize():f} lots would risk "
+                    f"{minimum_volume_risk.normalize():f} {currency_label} at the current stop loss."
+                )
+            elif volume_before_rounding < volume_min:
+                limiting_factor = "lot_cap"
+                message = (
+                    f"The configured lot limit of {effective_cap.normalize():f} lots reduces "
+                    f"the risk-based volume of {calculated_volume.normalize():f} lots below the broker minimum."
+                )
+        elif requested < volume_min:
+            limiting_factor = "requested_volume"
+            message = f"Requested fixed lot of {requested.normalize():f} lots is below the broker minimum."
+        elif adaptive_risk_applied and calculated_volume < volume_min:
+            limiting_factor = "adaptive_risk"
+            message = (
+                f"Adaptive risk reduction lowers the requested fixed lot of {requested.normalize():f} "
+                f"to {calculated_volume.normalize():f} lots, below the broker minimum."
+            )
+        reject(
+            "BROKER_MIN_VOLUME",
+            f"{message} Effective volume after rounding down is {volume.normalize():f} lots "
+            f"(broker minimum {volume_min.normalize():f}, step {volume_step.normalize():f}).",
+            limiting_factor=limiting_factor,
+            **sizing_context,
+        )
 
     aggregate_lots = owned_positions.aggregate(total=Sum("volume"))["total"] or Decimal("0")
     reserved_lots = reservations.aggregate(total=Sum("qty"))["total"] or Decimal("0")
