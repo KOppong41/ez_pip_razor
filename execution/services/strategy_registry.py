@@ -83,7 +83,12 @@ def build_strategy_config_for_bot(strategy_name: str, bot):
         if getattr(bot, "asset_preset_version_applied", None) is not None
         else {}
     )
-    return build_strategy_config(
+    config = build_strategy_config(
         strategy_name,
         strategy_overrides=overrides,
     )
+    # The visible bot schedule is authoritative, including for older tuning
+    # snapshots that still contain detector-specific UTC session windows.
+    if hasattr(config, "session_hours"):
+        config = replace(config, session_hours=())
+    return config

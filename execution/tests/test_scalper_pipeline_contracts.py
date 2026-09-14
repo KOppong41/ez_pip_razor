@@ -14,6 +14,7 @@ from execution.services.brokers import BrokerSymbolConstraints
 from execution.services.decision import _build_scalp_params, make_decision_from_signal
 from execution.services.scalper_config import build_scalper_config, resolve_allowed_strategy_pool
 from execution.services.strategies.scalper import _score_components, plan_scalper_trade
+from execution.services.strategy_registry import build_strategy_config_for_bot
 
 
 class ScalperPipelineContracts(TestCase):
@@ -69,6 +70,15 @@ class ScalperPipelineContracts(TestCase):
         decision = plan_scalper_trade(signal, self.bot, config)
         self.assertEqual(decision.action, "open")
 
+    def test_legacy_detector_tuning_cannot_install_a_second_schedule(self):
+        self.bot.asset_preset_version_applied = 1
+        self.bot.asset_strategy_overrides_applied = {
+            name: {"session_hours": [[5, 21]]}
+            for name in ("price_action_pinbar", "momentum_ignition")
+        }
+        for name in self.bot.asset_strategy_overrides_applied:
+            self.assertEqual(build_strategy_config_for_bot(name, self.bot).session_hours, ())
+
     def test_configured_window_applies_to_forex_and_crypto(self):
         self.bot.trading_schedule_enabled = True
         self.bot.trading_timezone = "UTC"
@@ -86,7 +96,6 @@ class ScalperPipelineContracts(TestCase):
         self.assertEqual(blocked.reason, "outside_trading_window")
 
     def test_engine_signal_still_enforces_news_and_score(self):
-        self.news.return_value = True
         with patch("execution.services.economic_news.is_economic_news_blackout", return_value=True):
             self.assertEqual(make_decision_from_signal(self.signal()).reason, "scalper:news_blackout")
         signal = self.signal()

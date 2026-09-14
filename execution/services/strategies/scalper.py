@@ -238,19 +238,19 @@ def scalper_management_metadata(symbol_cfg: SymbolConfig, config: ScalperConfig,
     if exit_mode in ("hybrid", "trail_only") and symbol_cfg.trail_start_r is not None:
         trail_trigger_r = symbol_cfg.trail_start_r
     return {
-            "profile": config.profile_slug,
-            "symbol": symbol_cfg.key,
-            "exit_mode": exit_mode,
-            "trail_start_r": str(symbol_cfg.trail_start_r) if symbol_cfg.trail_start_r is not None else None,
-            "tp1_r": str(symbol_cfg.tp1_r) if symbol_cfg.tp1_r is not None else None,
-            "tp1_close_pct": symbol_cfg.tp1_close_pct,
-            "be_trigger_r": str(symbol_cfg.be_trigger_r),
-            "be_buffer_r": str(symbol_cfg.be_buffer_r),
-            "trail_trigger_r": str(trail_trigger_r),
-            "trail_mode": symbol_cfg.trail_mode,
-            "time_in_trade_limit_min": config.time_in_trade_limit_min,
-            "countertrend": countertrend,
-            "decided_at": timezone.now().isoformat(),
+        "profile": config.profile_slug,
+        "symbol": symbol_cfg.key,
+        "exit_mode": exit_mode,
+        "trail_start_r": str(symbol_cfg.trail_start_r) if symbol_cfg.trail_start_r is not None else None,
+        "tp1_r": str(symbol_cfg.tp1_r) if symbol_cfg.tp1_r is not None else None,
+        "tp1_close_pct": symbol_cfg.tp1_close_pct,
+        "be_trigger_r": str(symbol_cfg.be_trigger_r),
+        "be_buffer_r": str(symbol_cfg.be_buffer_r),
+        "trail_trigger_r": str(trail_trigger_r),
+        "trail_mode": symbol_cfg.trail_mode,
+        "time_in_trade_limit_min": config.time_in_trade_limit_min,
+        "countertrend": countertrend,
+        "decided_at": timezone.now().isoformat(),
     }
 
 

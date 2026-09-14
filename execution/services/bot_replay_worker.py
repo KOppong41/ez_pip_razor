@@ -212,7 +212,7 @@ def replay(payload):
     from django.db import connection
     from bots.models import Asset, Bot
     from brokers.models import BrokerAccount
-    from execution.models import AccountRiskDay, BrokerPosition, Decision, ExecutionSetting, RiskPolicy, ScalperProfile
+    from execution.models import AccountRiskDay, BrokerPosition, Decision, ExecutionSetting, RiskPolicy, ScalperProfile, ScalperRunLog
     from execution.services.daily_risk import risk_day_window
     from execution.services.historical_backtest import MAX_EQUITY_POINTS, json_safe
     from execution import tasks
@@ -279,7 +279,11 @@ def replay(payload):
                 "starting_balance": sim.balance, "starting_equity": info.equity, "high_equity": info.equity,
                 "first_snapshot_at": sim.now, "baseline_locked": True, "baseline_source": "manual",
             })
-            tasks.run_scalper_engine_for_all_bots.run(timeframe=config["timeframe"], n_bars=config["warmup"])
+            cycle = tasks.run_scalper_engine_for_all_bots.run(timeframe=config["timeframe"], n_bars=config["warmup"])
+            # Runner-level gates do not produce a signal or a strategy run log.
+            for key, count in cycle.items():
+                if key.startswith("skipped_") and count:
+                    sim.rejections[key.removeprefix("skipped_")] += count
             sim.broker_stops(bar)
             # Management observes the completed close. New protection only
             # affects subsequent bars, avoiding invented intrabar sequencing.
@@ -298,6 +302,15 @@ def replay(payload):
                 equity.append({"time": sim.now, "balance": sim.balance, "equity": mark, "drawdown_pct": dd_pct})
     for reason in Decision.objects.filter(action="ignore").values_list("reason", flat=True):
         sim.rejections[reason] += 1
+    for cycle in ScalperRunLog.objects.values_list("summary", flat=True):
+        # Decision rejections are counted above; include earlier scan gates and
+        # later allocation/dispatch gates without counting the same decision twice.
+        if not cycle.get("decisions") or cycle.get("outcome") in {
+            "account_slot_lost", "account_slot_unavailable", "dispatch_rejected",
+        }:
+            reason = cycle.get("rejection_reason")
+            if reason:
+                sim.rejections[reason] += 1
     # Group partial fills when calculating trade-level performance.
     pnls = Counter()
     for trade in sim.trades:

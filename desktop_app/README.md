@@ -18,14 +18,24 @@ complete `dist/EzTradeDesktop.zip` package.
 The Backtesting workspace has two tabs: **Historical backtests** runs isolated
 simulations; **Run evidence** shows the recent live/demo strategy-cycle journal.
 
-In Historical backtests, select a bot (for its instrument identity), one of the
-six supported candle strategies, and the CSV timeframe. Import historical **bid**
-OHLC candles, then enter the contract size, point size, fixed lot quantity,
-initial balance, symbol profit currency, spread, slippage, and round-trip
-commission per lot. Instrument defaults first reuse your latest completed run
+In Historical backtests, select a bot and a replay mode. Scalper bots default to
+**Bot pipeline**, which uses a frozen copy of the bot, scalper profile, execution
+settings and account risk limits. It runs the shared live strategy selection,
+candidate allocation, decision, order creation, final risk gate and position
+management services in a separate process with an in-memory database. Broker
+IPC and outbound networking are disabled in that process. **Single strategy**
+retains the simpler fixed-size replay of one of the six candle strategies.
+
+Import historical **bid** OHLC candles, then enter contract size, point size,
+initial balance, profit currency, spread, slippage and round-trip commission.
+Bot pipeline additionally requires broker minimum/maximum volume, volume step,
+price digits, minimum stop distance and margin required per lot. Quantity and
+score thresholds come from the bot. Single strategy uses the form's fixed
+quantity and raw-score threshold. Instrument defaults first reuse your latest completed run
 for the same bot and symbol; otherwise, a read-only lookup of the matching
 connected MT5 account supplies available contract size, point size, profit
-currency, and current spread. This lookup never starts the terminal, logs in,
+currency, current spread, volume limits and price digits. Margin per lot must be
+entered explicitly. This lookup never starts the terminal, logs in,
 switches accounts, enables trading, or places orders. If specifications are
 unavailable, unknown sizes/currency remain blank for manual entry. The source
 and read/save time appear above the fields. Reloading defaults resets instrument
@@ -45,7 +55,7 @@ accepted, including UTF-8 and BOM-marked UTF-16 files. Timestamps must increase,
 and candles must already be completed. Explicit timestamp offsets are converted
 to UTC; for timestamps without offsets, enter the CSV's UTC offset in minutes
 (for example, `120` for UTC+2). Gaps are retained and counted. Volume is required
-for the volume-dependent breakout and momentum strategies.
+for bot pipeline replay and the volume-dependent breakout and momentum strategies.
 
 Upload the original MT5 export. Excel commonly displays a tab-separated MT5
 file entirely in column A; this does not damage the file until it is resaved.
@@ -64,24 +74,38 @@ additional data. Changing timeframe, strategy, timezone offset or warmup clears
 the date preview; use **Use full CSV date range** to validate it again. Running
 also revalidates if needed. Replay work is capped at 15 million candle-window
 evaluations; with the default 100-bar warmup, all 150,000 imported candles can
-be replayed. The saved equity curve is sampled to at most 5,000 display points
+be replayed in Single strategy mode. Bot pipeline is capped at 2,000 test
+candles and 240 seconds per run. Use a narrower date range with earlier CSV
+history retained: the live HTF gate needs at least 30 completed, contiguous
+15-minute context candles. The saved equity curve is sampled to at most 5,000 display points
 to keep results responsive, while summary drawdown still evaluates every candle.
 
-Each run saves its source data hash, CSV, strategy defaults, replay settings,
+Each run saves its source data hash, CSV, strategy defaults, bot snapshot when
+applicable, replay settings,
 performance summary, equity curve, skip counts, and simulated trades. Select a
 trade for exact prices and cost details, or export all trades to CSV. Saved
 backtests are private to their creator. A zero-trade run is a valid result,
 with skip reasons explaining why signals did not qualify.
 
-The model evaluates completed candles, enters on the next available open, and
-holds one fixed-size position using the selected strategy's SL/TP. Stop gaps
+Both modes evaluate completed candles and enter on the next available open.
+Single strategy holds one fixed-size position using its SL/TP. Bot pipeline
+uses the configured sizing mode, broker lot rounding, account exposure and
+capital limits, automatic strategy selection, schedule and managed exits.
+Stop gaps
 fill at the worse open; when both SL and TP fall within one candle, the chosen
 stop-first/target-first policy applies. Short exits use the simulated ask.
-Drawdown is measured from candle-close liquidation equity. This is a standalone
-strategy simulation, not an exact live-bot replay: live HTF gating, automatic
-strategy selection, news, portfolio risk, trailing/partial exits, swap, margin
-liquidation, and currency conversion are not included. These assumptions are
-also shown with every result.
+Drawdown is measured from candle-close equity. Trailing, breakeven and partial
+exits run at candle close, with updated stops active on later candles. Fills
+still depend on OHLC assumptions; tick sequencing, changing spreads/margin,
+currency conversion, swap and broker liquidation are not reconstructed.
+
+Bot pipeline starts the selected bot active on an empty simulated account.
+Operational stops, prior loss streaks and cached market context are reset;
+numeric risk limits remain in force. Other bots and manual positions are not
+included in this single-instrument dataset. Each risk day starts at its first
+observed quote. If the live news calendar is enabled, the absence of archived
+refresh coverage blocks entries; missing news data is never treated as a clear
+calendar. These limits and assumptions are saved with every result.
 
 Apply `python manage.py migrate` when updating an existing source backend.
 Restart Flutter after adding the native file-selector plugin; hot reload alone

@@ -112,3 +112,10 @@ class BotPipelineReplayTests(TestCase):
         }, content_type="application/json")
         self.assertEqual(response.status_code, 400)
         self.assertIn("volume_min", response.json()["detail"])
+
+    def test_missing_completed_context_explains_zero_trade_result(self):
+        bars, _ = self.scenario()
+        result = run_bot_replay(bars, self.config(), {"first_index": 50, "last_index": 52}, self.asset.symbol)
+        self.assertEqual(result["summary"]["trades"], 0)
+        reasons = {row["reason"]: row["count"] for row in result["skip_reasons"]}
+        self.assertEqual(reasons.get("htf_bias_unavailable"), 3)

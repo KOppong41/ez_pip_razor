@@ -586,6 +586,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                   ),
                   DropdownButtonFormField<String>(
                     key: ValueKey('replay-mode-$pipelineMode'),
+                    isExpanded: true,
                     initialValue: pipelineMode,
                     decoration: const InputDecoration(labelText: 'Replay mode'),
                     items: [
