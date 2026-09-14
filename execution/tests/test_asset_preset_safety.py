@@ -214,7 +214,8 @@ class AssetPresetScoreTests(SimpleTestCase):
         _, components = _score_components(
             "buy", "buy", False, Decimal("0.20"), symbol, config, payload
         )
-        self.assertEqual(Decimal(str(components["market"])), Decimal("0.2"))
+        # Spread uses 0.40 / 0.45 of the allowance, smoothly reducing quality.
+        self.assertAlmostEqual(components["market"], float(Decimal("0.2") * (1 - Decimal("0.6") * Decimal("0.40") / Decimal("0.45"))))
 
         payload["spread_price"] = "0.50"
         _, wide_components = _score_components(

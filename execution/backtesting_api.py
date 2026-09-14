@@ -19,6 +19,7 @@ from execution.services.strategy_registry import (
     SCALPER_STRATEGY_REGISTRY,
     build_strategy_config_for_bot,
 )
+from execution.services.bot_replay import MAX_BOT_REPLAY_BARS, configure_bot_replay, run_bot_replay
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +48,12 @@ def backtest_options(request):
     return Response({
         "bots": [
             {"id": bot.id, "name": bot.name, "symbol": bot.asset.symbol,
-             "timeframe": bot.default_timeframe, "quantity": str(bot.default_qty)}
+             "timeframe": bot.default_timeframe, "quantity": str(bot.default_qty), "engine_mode": bot.engine_mode}
             for bot in _owned_bots(request.user).filter(asset__isnull=False)
         ],
         "strategies": list(SCALPER_STRATEGY_REGISTRY),
         "timeframes": list(TIMEFRAMES), "max_bars": MAX_BARS, "max_csv_bytes": MAX_CSV_BYTES,
+        "max_bot_replay_bars": MAX_BOT_REPLAY_BARS,
     })
 
 
@@ -62,7 +64,7 @@ def backtest_defaults(request, bot_id):
     if bot is None:
         return Response({"detail": "Bot not found."}, status=404)
     keys = ("contract_size", "point_size", "currency", "spread_points",
-            "slippage_points", "commission_per_lot")
+            "slippage_points", "commission_per_lot", "volume_min", "volume_max", "volume_step", "digits", "stops_level_points", "margin_per_lot")
     previous = HistoricalBacktest.objects.filter(
         owner=request.user, bot=bot, symbol=bot.asset.symbol, status="completed",
     ).only("config", "created_at").first()
@@ -78,12 +80,17 @@ def backtest_defaults(request, bot_id):
         try:
             from execution.connectors.mt5 import MT5Connector
             info = MT5Connector().current_symbol_info_for_account(account, bot.asset.symbol)
-            for key, attribute in (("contract_size", "trade_contract_size"), ("point_size", "point")):
+            for key, attribute in (("contract_size", "trade_contract_size"), ("point_size", "point"),
+                                   ("volume_min", "volume_min"), ("volume_max", "volume_max"), ("volume_step", "volume_step")):
                 try:
                     value = Decimal(str(getattr(info, attribute, "")))
                 except (InvalidOperation, ValueError, TypeError):
                     continue
                 if value.is_finite() and Decimal("1e-12") <= value <= Decimal("1e12"):
+                    values[key] = str(value)
+            for key, attribute in (("digits", "digits"), ("stops_level_points", "trade_stops_level")):
+                value = getattr(info, attribute, None)
+                if isinstance(value, int) and value >= 0:
                     values[key] = str(value)
             currency = str(getattr(info, "currency_profit", "")).upper()
             if len(currency) == 3 and currency.isascii() and currency.isalpha():
@@ -158,7 +165,13 @@ def historical_backtests(request):
         config["strategy_config"] = json_safe(
             asdict(build_strategy_config_for_bot(config["strategy"], bot))
         )
+        if config["pipeline_mode"] == "bot_pipeline":
+            if not request.user.is_superuser and bot.broker_account and bot.broker_account.owner_id != request.user.id:
+                return Response({"detail": "Broker account not found."}, status=404)
+            configure_bot_replay(bot, config, request.data)
         bars, dataset = parse_csv(request.data.get("csv"), config)
+        if config["pipeline_mode"] == "bot_pipeline" and dataset["last_index"] - dataset["first_index"] + 1 > MAX_BOT_REPLAY_BARS:
+            raise ValueError(f"Bot replay supports at most {MAX_BOT_REPLAY_BARS} test candles per run.")
         if (dataset["last_index"] - dataset["first_index"] + 1) * config["warmup"] > MAX_REPLAY_WORK:
             raise ValueError("Reduce the date range or warmup: this request exceeds the replay work limit.")
     except ValueError as exc:
@@ -170,7 +183,8 @@ def historical_backtests(request):
         config=json_safe(config), dataset=json_safe(dataset),
     )
     try:
-        run.result = run_simulation(bars, config, dataset, bot.asset.symbol)
+        replay = run_bot_replay if config["pipeline_mode"] == "bot_pipeline" else run_simulation
+        run.result = replay(bars, config, dataset, bot.asset.symbol)
         run.status = "completed"
     except Exception:
         logger.exception("Historical backtest %s failed", run.id)

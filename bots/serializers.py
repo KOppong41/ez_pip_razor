@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from rest_framework import serializers
@@ -250,6 +252,7 @@ class BotSerializer(serializers.ModelSerializer):
                 asset.recommended_config_version
             )
             validated_data["asset_preset_applied_at"] = timezone.now()
+            validated_data["asset_recommended_config_applied"] = deepcopy(asset.recommended_config or {})
             validated_data["asset_strategy_overrides_applied"] = (
                 recommended_strategy_overrides(asset)
             )
@@ -273,6 +276,7 @@ class BotSerializer(serializers.ModelSerializer):
                 asset.recommended_config_version
             )
             validated_data["asset_preset_applied_at"] = timezone.now()
+            validated_data["asset_recommended_config_applied"] = deepcopy(asset.recommended_config or {})
             validated_data["asset_strategy_overrides_applied"] = (
                 recommended_strategy_overrides(asset)
             )
@@ -282,6 +286,7 @@ class BotSerializer(serializers.ModelSerializer):
             validated_data["asset_preset_version_applied"] = None
             validated_data["asset_preset_applied_at"] = None
             validated_data["asset_strategy_overrides_applied"] = {}
+            validated_data["asset_recommended_config_applied"] = {}
         try:
             return super().update(instance, validated_data)
         except DjangoValidationError as exc:

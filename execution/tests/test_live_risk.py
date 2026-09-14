@@ -453,12 +453,14 @@ class LiveRiskTest(TestCase):
         self.asset.save(update_fields=["recommended_config"])
         bot.engine_mode = "scalper"
         bot.asset_preset_version_applied = self.asset.recommended_config_version
+        bot.asset_recommended_config_applied = self.asset.recommended_config
         bot.max_spread_points = 0
         bot.allowed_deviation_points = 0
         bot.save(
             update_fields=[
                 "engine_mode",
                 "asset_preset_version_applied",
+                "asset_recommended_config_applied",
                 "max_spread_points",
                 "allowed_deviation_points",
             ]

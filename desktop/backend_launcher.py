@@ -503,18 +503,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "worker",
             "mt5-worker",
             "beat",
+            "bot-replay",
         ),
     )
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--parent-pid", type=int, default=None)
     parser.add_argument("--shutdown-file", type=Path, default=None)
+    parser.add_argument("--replay-input", type=Path, default=None)
+    parser.add_argument("--replay-output", type=Path, default=None)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
+        if args.service == "bot-replay":
+            if args.replay_input is None or args.replay_output is None:
+                raise ValueError("Bot replay requires input and output paths")
+            from execution.services.bot_replay_worker import main as replay_main
+            replay_main(input_path=args.replay_input, output_path=args.replay_output)
+            return 0
         config = load_config(host=args.host, port=args.port)
         if args.check_runtime:
             return check_packaged_runtime(config)

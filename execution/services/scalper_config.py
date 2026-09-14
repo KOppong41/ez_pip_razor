@@ -313,7 +313,7 @@ def resolve_allowed_strategy_pool(
     if configured:
         return configured, "bot"
     recommended = list(
-        (getattr(getattr(bot, "asset", None), "recommended_config", None) or {}).get(
+        (getattr(bot, "asset_recommended_config_applied", None) or {}).get(
             "enabled_strategies", []
         )
     )
@@ -399,7 +399,7 @@ def resolve_scalper_execution_timeframe(
     ]
     # Database-backed asset recommendations supersede legacy symbol-profile
     # timeframe restrictions. Bot and symbol restrictions still intersect.
-    asset_preset = getattr(getattr(bot, "asset", None), "recommended_config", None) or {}
+    asset_preset = getattr(bot, "asset_recommended_config_applied", None) or {}
     if asset_preset and getattr(bot, "asset_preset_version_applied", None) is not None:
         profile_timeframes = []
     if profile_timeframes:
@@ -665,7 +665,7 @@ def _ensure_bot_asset_symbol(base: dict, bot: Bot) -> None:
 def _asset_recommendation_layer(bot: Bot) -> dict:
     """Translate the bot Asset's database preset into scalper config shape."""
     asset = getattr(bot, "asset", None)
-    preset = deepcopy(getattr(asset, "recommended_config", None) or {})
+    preset = deepcopy(getattr(bot, "asset_recommended_config_applied", None) or {})
     # Migration/backfill intentionally leaves this marker empty on existing
     # bots. Only creation-time application or the explicit restore action opts
     # a bot into the database-backed preset layer.
@@ -732,11 +732,9 @@ def build_scalper_config(bot: Bot | None) -> ScalperConfig:
             )
         if getattr(bot, "max_trades_per_day", None) is not None:
             risk_section["max_trades_per_day"] = int(bot.max_trades_per_day or 0)
-        if base.setdefault("sessions", []):
-            base["sessions"] = [
-                {"start": "05:00", "end": "12:00", "label": "asia_eu"},
-                {"start": "12:00", "end": "21:00", "label": "us"},
-            ]
+        # Bot trading days, timezone and window are the only entry schedule.
+        # Profile sessions must not install another, hidden UTC restriction.
+        base["sessions"] = []
         _ensure_bot_asset_symbol(base, bot)
 
     symbols, alias_map = _build_symbol_configs(base.get("symbols", {}))

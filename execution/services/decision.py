@@ -12,7 +12,10 @@ from bots.models import Bot  # for per-bot configs on the Bot model
 from execution.services.prices import get_price
 from execution.services.runtime_config import RuntimeConfig, get_runtime_config
 from execution.services.scalper_config import ScalperConfig, build_scalper_config
-from execution.services.strategies.scalper import plan_scalper_trade
+from execution.services.strategies.scalper import (
+    plan_scalper_trade, scalper_entry_block_reason, scalper_management_metadata,
+)
+from execution.services.trade_constraints import distance_to_price
 
 
 def _record_scalper_flip(bot: Bot | None, symbol: str | None):
@@ -321,15 +324,25 @@ def _build_scalp_params(
         price = None
 
     # Respect instrument-specific minimum stop distance.
-    point = Decimal("0.0001")
     sl_distance = sl_offset
     if scalper_cfg:
         symbol_cfg = scalper_cfg.resolve_symbol(signal.symbol)
         if symbol_cfg:
-            point = Decimal("0.10") if symbol_cfg.key.startswith("XAU") else Decimal("0.0001")
+            from execution.services.brokers import get_broker_symbol_constraints
+
+            constraints = get_broker_symbol_constraints(signal.bot.broker_account, signal.symbol)
+            point = constraints.point
+            if point is None or not point.is_finite() or point <= 0 or constraints.digits is None:
+                raise ValueError("scalper:broker_point_unavailable")
             min_points = symbol_cfg.sl_points_min
             if min_points and min_points > 0:
-                min_distance = point * min_points
+                min_distance = distance_to_price(
+                    min_points, symbol_cfg.sl_points_unit, point,
+                    market_price=Decimal(str(price)) if price is not None else None,
+                    atr=_parse_decimal(signal.payload, "atr_price", "atr"),
+                    digits=constraints.digits,
+                )
+                min_distance = max(min_distance, (constraints.stops_level_points or Decimal("0")) * point)
                 if sl_distance < min_distance:
                     sl_distance = min_distance
 
@@ -471,11 +484,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     scalper_cfg = build_scalper_config(bot) if is_scalper_bot else None
 
     # 1) Strategy propose
-    if scalper_cfg:
-        proposed = plan_scalper_trade(signal, bot, scalper_cfg)
-        if proposed.action != "open":
-            _log_scalper_trace(signal, "strategy", proposed.action, proposed.reason)
-    elif signal.source == "engine_v1" or signal.source == "scalper_engine":
+    if signal.source in {"engine_v1", "scalper_engine"}:
         payload = signal.payload or {}
         params = {
             "symbol": signal.symbol,
@@ -488,15 +497,34 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             params["tp"] = payload["tp"]
         if payload.get("atr") is not None:
             params["atr"] = payload["atr"]
+        if scalper_cfg:
+            symbol_cfg = scalper_cfg.resolve_symbol(signal.symbol)
+            if symbol_cfg:
+                params["scalper"] = scalper_management_metadata(symbol_cfg, scalper_cfg)
+            if scalper_cfg.risk:
+                params["risk_pct"] = str(scalper_cfg.risk.effective_risk_pct(
+                    _parse_decimal(payload, "daily_drawdown_pct") or Decimal("0"),
+                    bool(payload.get("conservative_mode")),
+                ))
+        if payload.get("risk_pct") is not None:
+            params["risk_pct"] = payload["risk_pct"]
 
         proposed = StrategyDecision(
             action="open",
-            reason=payload.get("reason", "engine_v1"),
+            reason=payload.get("reason", signal.source),
             params=params,
             score=float(payload.get("score", 0.0)),  # read from engine
         )
-
-
+        if scalper_cfg:
+            blocked = scalper_entry_block_reason(signal, bot, scalper_cfg)
+            if blocked:
+                proposed.action = "ignore"
+                proposed.reason = blocked
+                _log_scalper_trace(signal, "entry_gate", "ignore", blocked)
+    elif scalper_cfg:
+        proposed = plan_scalper_trade(signal, bot, scalper_cfg)
+        if proposed.action != "open":
+            _log_scalper_trace(signal, "strategy", proposed.action, proposed.reason)
     else:
         # external / naive strategy
         proposed = naive_strategy(signal)
@@ -583,14 +611,18 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             elif conflict.action == "open" and conflict.reason == "opposite_scalp":
                 # Apply scalp overrides: tighter SL/TP + smaller size while keeping primary position alive.
                 params = proposed.params.copy() if proposed.params else {}
-                params.update(_build_scalp_params(signal, runtime_cfg=runtime_cfg, scalper_cfg=scalper_cfg))
-                proposed = StrategyDecision(
-                    action="open",
-                    reason="opposite_scalp",
-                    params=params,
-                    score=proposed.score,
-                )
-                _log_scalper_trace(signal, "conflict", "opposite_scalp", conflict.reason)
+                try:
+                    params.update(_build_scalp_params(signal, runtime_cfg=runtime_cfg, scalper_cfg=scalper_cfg))
+                except (ValueError, ArithmeticError):
+                    proposed = StrategyDecision(
+                        action="ignore", reason="scalper:scalp_constraints_unavailable",
+                        params=params, score=proposed.score,
+                    )
+                else:
+                    proposed = StrategyDecision(
+                        action="open", reason="opposite_scalp", params=params, score=proposed.score,
+                    )
+                _log_scalper_trace(signal, "conflict", proposed.action, proposed.reason)
             else:
                 proposed = StrategyDecision(
                     action=conflict.action,

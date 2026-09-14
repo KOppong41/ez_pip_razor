@@ -93,6 +93,7 @@ def apply_recommendations_to_bot(bot, *, save=True):
     bot.scalper_params = params
     bot.asset_preset_version_applied = bot.asset.recommended_config_version
     bot.asset_preset_applied_at = timezone.now()
+    bot.asset_recommended_config_applied = deepcopy(bot.asset.recommended_config or {})
     bot.asset_strategy_overrides_applied = recommended_strategy_overrides(bot.asset)
     if save:
         bot.full_clean()
@@ -102,6 +103,7 @@ def apply_recommendations_to_bot(bot, *, save=True):
                 "scalper_params",
                 "asset_preset_version_applied",
                 "asset_preset_applied_at",
+                "asset_recommended_config_applied",
                 "asset_strategy_overrides_applied",
             ]
         )
@@ -160,7 +162,8 @@ def asset_recommendation_state(bot) -> str:
                 for field, value in expected_fields.items()
             )
 
-    if direct_match and symbol_match and strategy_match:
+    preset_match = (bot.asset_recommended_config_applied or {}) == (asset.recommended_config or {})
+    if direct_match and symbol_match and strategy_match and preset_match:
         return "recommended"
     if applied_version < asset.recommended_config_version:
         return "update_available"

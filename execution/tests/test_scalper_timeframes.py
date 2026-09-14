@@ -34,6 +34,7 @@ class ScalperTimeframeSelectionTests(TestCase):
             status="active",
             auto_trade=True,
             engine_mode="scalper",
+            trading_schedule_enabled=False,
             broker_account=self.account,
             asset=self.asset,
             default_timeframe="5m",

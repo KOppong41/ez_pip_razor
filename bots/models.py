@@ -643,6 +643,11 @@ class Bot(models.Model):
         blank=True,
         help_text="When asset recommendations were last explicitly applied.",
     )
+    asset_recommended_config_applied = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Complete asset recommendation frozen when the preset was explicitly applied.",
+    )
     asset_strategy_overrides_applied = models.JSONField(
         default=dict,
         blank=True,

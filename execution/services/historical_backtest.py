@@ -1,9 +1,4 @@
-"""Bounded, broker-independent replay of candle strategies using bid OHLC data.
-
-One fixed-size position at a time; signals use completed candles, entries use
-the next available open. This intentionally does not replay the live risk,
-portfolio, news, automatic strategy selection, trailing, or partial-exit layers.
-"""
+"""CSV validation and standalone strategy replay; bot replay uses bot_replay.py."""
 import csv
 import hashlib
 import io
@@ -74,6 +69,9 @@ def date_boundary(value, *, end=False):
 
 
 def validate_config(data):
+    pipeline_mode = str(data.get("pipeline_mode", "strategy"))
+    if pipeline_mode not in {"strategy", "bot_pipeline"}:
+        raise ValueError("Choose strategy or bot_pipeline replay.")
     strategy = str(data.get("strategy", ""))
     if strategy not in SCALPER_STRATEGY_REGISTRY:
         raise ValueError("Select a supported candle strategy.")
@@ -81,6 +79,7 @@ def validate_config(data):
     if timeframe not in TIMEFRAMES:
         raise ValueError("Select a supported timeframe.")
     config = {
+        "pipeline_mode": pipeline_mode,
         "strategy": strategy,
         "timeframe": timeframe,
         "quantity": decimal_field(data, "quantity", positive=True),
@@ -214,7 +213,7 @@ def parse_csv(text, config, *, now=None):
         bars.append({"time": at, **values})
     if len(bars) < config["warmup"] + 2:
         raise ValueError(f"Provide at least {config['warmup'] + 2} candles, including warmup.")
-    if missing_volume and config["strategy"] in {"momentum_ignition", "breakout_retest"}:
+    if missing_volume and (config.get("pipeline_mode") == "bot_pipeline" or config["strategy"] in {"momentum_ignition", "breakout_retest"}):
         raise ValueError("This strategy needs tick_volume on every candle. Export volume with the CSV.")
     start, end = date_boundary(config["start_date"]), date_boundary(config["end_date"], end=True)
     indexes = [i for i, bar in enumerate(bars) if (not start or bar["time"] >= start) and (not end or bar["time"] < end)]

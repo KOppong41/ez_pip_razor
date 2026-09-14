@@ -219,10 +219,6 @@ def _build_scalper_params(
     config: ScalperConfig,
 ) -> Dict[str, Any]:
     symbol_cfg = state.symbol_cfg
-    trail_trigger_r = symbol_cfg.trail_trigger_r
-    exit_mode = getattr(symbol_cfg, "exit_mode", "fixed_tp")
-    if exit_mode in ("hybrid", "trail_only") and symbol_cfg.trail_start_r is not None:
-        trail_trigger_r = symbol_cfg.trail_start_r
     return {
         "symbol": signal.symbol,
         "timeframe": signal.timeframe,
@@ -231,7 +227,17 @@ def _build_scalper_params(
         "sl": str(sl),
         "tp": str(tp) if tp is not None else None,
         "risk_pct": str(risk_pct),
-        "scalper": {
+        "scalper": scalper_management_metadata(symbol_cfg, config, countertrend=state.countertrend),
+    }
+
+
+def scalper_management_metadata(symbol_cfg: SymbolConfig, config: ScalperConfig, *, countertrend=False) -> dict:
+    """Attach management policy without changing a detector's protection prices."""
+    trail_trigger_r = symbol_cfg.trail_trigger_r
+    exit_mode = getattr(symbol_cfg, "exit_mode", "fixed_tp")
+    if exit_mode in ("hybrid", "trail_only") and symbol_cfg.trail_start_r is not None:
+        trail_trigger_r = symbol_cfg.trail_start_r
+    return {
             "profile": config.profile_slug,
             "symbol": symbol_cfg.key,
             "exit_mode": exit_mode,
@@ -243,9 +249,8 @@ def _build_scalper_params(
             "trail_trigger_r": str(trail_trigger_r),
             "trail_mode": symbol_cfg.trail_mode,
             "time_in_trade_limit_min": config.time_in_trade_limit_min,
-            "countertrend": state.countertrend,
+            "countertrend": countertrend,
             "decided_at": timezone.now().isoformat(),
-        },
     }
 
 
@@ -283,8 +288,8 @@ def _score_components(
             bias_strength = Decimal("0")
 
     if bias and bias == direction:
-        boost = Decimal("1.0") + min(Decimal("0.5"), abs(bias_strength) * Decimal("2000"))
-        w = DEFAULT_TREND_WEIGHT * boost
+        strength = min(Decimal("1"), abs(bias_strength) * Decimal("4000"))
+        w = DEFAULT_TREND_WEIGHT * (Decimal("0.7") + Decimal("0.3") * strength)
     elif countertrend:
         w = DEFAULT_TREND_WEIGHT * Decimal("0.5")
     else:
@@ -303,9 +308,13 @@ def _score_components(
     if confidence is not None:
         try:
             conf_dec = Decimal(str(confidence))
-            structure_weight *= Decimal("0.5") + min(Decimal("1.5"), conf_dec + Decimal("0.2"))
+            if conf_dec.is_finite():
+                conf_dec = max(Decimal("0"), min(Decimal("1"), conf_dec))
+                structure_weight *= Decimal("0.5") + Decimal("0.5") * conf_dec
         except Exception:
             pass
+    else:
+        structure_weight *= Decimal("0.75")
     total += structure_weight
     components["structure"] = float(structure_weight)
 
@@ -333,8 +342,9 @@ def _score_components(
             atr=atr_price,
             digits=digits,
         )
-        if allowed_spread > 0 and actual_spread > allowed_spread:
-            market_weight *= Decimal("0.4")
+        if allowed_spread > 0:
+            spread_ratio = max(Decimal("0"), min(Decimal("1"), actual_spread / allowed_spread))
+            market_weight *= Decimal("1") - Decimal("0.6") * spread_ratio
     else:
         market_weight *= Decimal("0.85")
     atr_points = (
@@ -356,31 +366,31 @@ def _score_components(
 
     session_weight = DEFAULT_SESSION_WEIGHT
     session_label = (payload.get("session") or "").lower()
-    if config.sessions:
-        if session_label in {"london", "new_york"}:
-            session_weight *= Decimal("1.2")
-        elif session_label in {"asia"}:
-            session_weight *= Decimal("0.6")
-        else:
-            session_weight *= Decimal("0.8")
+    if session_label in {"london", "new_york", "us"}:
+        pass
+    elif session_label in {"asia"}:
+        session_weight *= Decimal("0.6")
     else:
-        session_weight *= Decimal("0.5")
+        session_weight *= Decimal("0.8")
     total += session_weight
     components["session"] = float(session_weight)
 
-    total = min(total, Decimal("1"))
-    return total, components
+    # Each component is a quality in [0, 1] multiplied by its weight.
+    # Normalize the weights, rather than clipping an overfull score.
+    weight_sum = DEFAULT_TREND_WEIGHT + DEFAULT_STRUCTURE_WEIGHT + DEFAULT_MARKET_WEIGHT + DEFAULT_SESSION_WEIGHT
+    return total / weight_sum, {key: float(Decimal(str(value)) / weight_sum) for key, value in components.items()}
 
 
-def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
+def scalper_entry_block_reason(signal, bot, config: ScalperConfig) -> str | None:
+    """Entry gates shared by detector signals and externally planned signals."""
     payload = signal.payload or {}
     symbol_cfg = config.resolve_symbol(signal.symbol)
     if not symbol_cfg:
-        return StrategyDecision(action="ignore", reason="scalper:symbol_disabled")
+        return "scalper:symbol_disabled"
 
     timeframe = normalize_execution_timeframe(signal.timeframe)
     if not timeframe:
-        return StrategyDecision(action="ignore", reason="scalper:timeframe_blocked")
+        return "scalper:timeframe_blocked"
     allowed_timeframes = {
         normalized
         for normalized in (
@@ -390,18 +400,28 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
         if normalized
     }
     if allowed_timeframes and timeframe not in allowed_timeframes:
-        return StrategyDecision(action="ignore", reason="scalper:timeframe_blocked")
+        return "scalper:timeframe_blocked"
 
-    from execution.services.market_hours import is_crypto_symbol
-    if config.sessions and not is_crypto_symbol(signal.symbol) and not config.is_session_open():
-        return StrategyDecision(action="ignore", reason="scalper:session_closed")
+    from execution.services.trading_type import is_within_trading_window
+    if bot and not is_within_trading_window(bot):
+        return "outside_trading_window"
 
     if config.rollover_blackout and config.is_rollover_window():
-        return StrategyDecision(action="ignore", reason="scalper:rollover")
+        return "scalper:rollover"
 
     from execution.services.economic_news import is_economic_news_blackout
     if payload.get("news_blocked") or is_economic_news_blackout(signal.symbol):
-        return StrategyDecision(action="ignore", reason="scalper:news_blackout")
+        return "scalper:news_blackout"
+
+    return None
+
+
+def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
+    blocked = scalper_entry_block_reason(signal, bot, config)
+    if blocked:
+        return StrategyDecision(action="ignore", reason=blocked)
+    payload = signal.payload or {}
+    symbol_cfg = config.resolve_symbol(signal.symbol)
 
     bias = _resolve_bias(payload)
     direction = (signal.direction or "").lower()

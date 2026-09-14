@@ -77,12 +77,14 @@ class HistoricalClient extends ApiClient {
     this.noTrades = false,
     this.failPreview = false,
     this.missingDefaults = false,
+    this.scalper = false,
     this.defaultsResponse,
   }) : super('http://localhost');
   final bool failRun;
   final bool noTrades;
   final bool failPreview;
   final bool missingDefaults;
+  final bool scalper;
   final Future<Map<String, dynamic>>? defaultsResponse;
   Map<String, dynamic>? previewed;
   Map<String, dynamic>? submitted;
@@ -95,6 +97,7 @@ class HistoricalClient extends ApiClient {
           {
             'id': 3,
             'name': 'Bitcoin demo',
+            'engine_mode': scalper ? 'scalper' : 'external',
             'symbol': 'BTCUSDm',
             'timeframe': '1m',
             'quantity': '0.01',
@@ -124,6 +127,13 @@ class HistoricalClient extends ApiClient {
                 'point_size': path.endsWith('/4/') ? '0.00001' : '0.01',
                 'currency': 'USD',
                 'spread_points': '50',
+                if (scalper) ...{
+                  'volume_min': '0.01',
+                  'volume_max': '5',
+                  'volume_step': '0.01',
+                  'digits': '2',
+                  'stops_level_points': '0',
+                },
               },
         'source': missingDefaults ? 'unavailable' : 'broker_snapshot',
         'message': missingDefaults
@@ -229,6 +239,29 @@ Future<void> submit(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('scalper replay uses bot pipeline and requires margin input', (
+    tester,
+  ) async {
+    final client = HistoricalClient(scalper: true);
+    await mount(tester, client);
+    expect(
+      find.byKey(const ValueKey('replay-mode-bot_pipeline')),
+      findsOneWidget,
+    );
+    expect(field('Fixed quantity (lots)'), findsNothing);
+    await submit(tester);
+    expect(client.submitted, isNull);
+    await tester.ensureVisible(field('Margin required per lot'));
+    await tester.enterText(field('Margin required per lot'), '100');
+    await tester.ensureVisible(find.text('Run historical backtest'));
+    await tester.tap(find.text('Run historical backtest'));
+    await tester.pumpAndSettle();
+    expect(client.submitted?['pipeline_mode'], 'bot_pipeline');
+    expect(client.submitted?['volume_step'], '0.01');
+    expect(client.submitted?['margin_per_lot'], '100');
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('decodes a BOM-less UTF-16 MT5 export without embedded NULs', (
     tester,
   ) async {

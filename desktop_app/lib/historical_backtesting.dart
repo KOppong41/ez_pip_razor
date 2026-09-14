@@ -98,6 +98,12 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
       'quantity': '0.01',
       'contract_size': '',
       'point_size': '',
+      'volume_min': '',
+      'volume_max': '',
+      'volume_step': '',
+      'digits': '',
+      'stops_level_points': '0',
+      'margin_per_lot': '',
       'initial_balance': '10000',
       'currency': 'USD',
       'spread_points': '0',
@@ -115,6 +121,8 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
   late Future<dynamic> history = widget.client.get('/api/personal/backtests/');
   String? botId;
   String strategy = 'trend_pullback';
+  String pipelineMode = 'strategy';
+  bool scalperBotSelected = false;
   String timeframe = '1m';
   String sameBarPolicy = 'stop_first';
   String? csvText;
@@ -163,6 +171,8 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
 
   void _selectBot(Map<String, dynamic> bot) {
     botId = '${bot['id']}';
+    scalperBotSelected = bot['engine_mode'] == 'scalper';
+    pipelineMode = scalperBotSelected ? 'bot_pipeline' : 'strategy';
     timeframe = '${bot['timeframe'] ?? '1m'}';
     fields['quantity']!.text = '${bot['quantity'] ?? '0.01'}';
     _invalidatePreview();
@@ -173,6 +183,12 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
     final request = ++defaultsRequest;
     final selectedBot = botId;
     final baseline = <String, String>{
+      'volume_min': '',
+      'volume_max': '',
+      'volume_step': '',
+      'digits': '',
+      'stops_level_points': '0',
+      'margin_per_lot': '',
       'contract_size': '',
       'point_size': '',
       'currency': '',
@@ -321,6 +337,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
       final value = await widget.client.post('/api/personal/backtests/', {
         for (final entry in fields.entries) entry.key: entry.value.text.trim(),
         'bot_id': int.parse(botId!),
+        'pipeline_mode': pipelineMode,
         'strategy': strategy,
         'timeframe': timeframe,
         'same_bar_policy': sameBarPolicy,
@@ -403,6 +420,10 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
               'contract_size',
               'point_size',
               'initial_balance',
+              'volume_min',
+              'volume_max',
+              'volume_step',
+              'margin_per_lot',
             ].contains(key) &&
             number <= 0) {
           return 'Must be greater than zero';
@@ -412,6 +433,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
               'slippage_points',
               'commission_per_lot',
               'min_score',
+              'stops_level_points',
             ].contains(key) &&
             number < 0) {
           return 'Cannot be negative';
@@ -419,6 +441,10 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
         if (key == 'warmup' &&
             (int.tryParse(text) == null || number < 30 || number > 1000)) {
           return 'Enter a whole number from 30 to 1,000';
+        }
+        if (key == 'digits' &&
+            (int.tryParse(text) == null || number < 0 || number > 10)) {
+          return 'Enter a whole number from 0 to 10';
         }
         if (key == 'csv_utc_offset_minutes' &&
             (int.tryParse(text) == null || number < -840 || number > 840)) {
@@ -528,9 +554,11 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 6),
-                const Text(
-                  'Replay one candle strategy with fixed-size trades. The bot supplies the symbol; these settings apply only to this simulation.',
-                  style: TextStyle(color: muted, fontSize: 12),
+                Text(
+                  pipelineMode == 'bot_pipeline'
+                      ? 'Replay this bot with its configured strategy selection, schedule, account limits, sizing and exit management. Up to 2,000 test candles per run. Earlier CSV candles supply completed 15m context. Broker fills use the assumptions below.'
+                      : 'Replay one candle strategy with fixed-size trades. Bot risk limits and exit management are available in Bot pipeline mode.',
+                  style: const TextStyle(color: muted, fontSize: 12),
                 ),
                 const SizedBox(height: 20),
                 _fieldsWrap([
@@ -557,24 +585,45 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                     ),
                   ),
                   DropdownButtonFormField<String>(
-                    initialValue: strategy,
-                    isExpanded: true,
-                    decoration: const InputDecoration(labelText: 'Strategy'),
+                    key: ValueKey('replay-mode-$pipelineMode'),
+                    initialValue: pipelineMode,
+                    decoration: const InputDecoration(labelText: 'Replay mode'),
                     items: [
-                      for (final name in strategies)
-                        DropdownMenuItem(
-                          value: name,
-                          child: Text(
-                            label(name),
-                            overflow: TextOverflow.ellipsis,
-                          ),
+                      if (scalperBotSelected)
+                        const DropdownMenuItem(
+                          value: 'bot_pipeline',
+                          child: Text('Bot pipeline'),
                         ),
+                      const DropdownMenuItem(
+                        value: 'strategy',
+                        child: Text('Single strategy'),
+                      ),
                     ],
                     onChanged: (value) => setState(() {
-                      strategy = value!;
+                      pipelineMode = value!;
                       _invalidatePreview();
                     }),
                   ),
+                  if (pipelineMode == 'strategy')
+                    DropdownButtonFormField<String>(
+                      initialValue: strategy,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: 'Strategy'),
+                      items: [
+                        for (final name in strategies)
+                          DropdownMenuItem(
+                            value: name,
+                            child: Text(
+                              label(name),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (value) => setState(() {
+                        strategy = value!;
+                        _invalidatePreview();
+                      }),
+                    ),
                   DropdownButtonFormField<String>(
                     key: ValueKey('backtest-tf-$timeframe'),
                     initialValue: timeframes.contains(timeframe)
@@ -655,12 +704,13 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                 _fieldsWrap([
                   _dateField('start_date', 'Start date (UTC)'),
                   _dateField('end_date', 'End date (UTC, inclusive)'),
-                  _field(
-                    'quantity',
-                    'Fixed quantity (lots)',
-                    hint:
-                        'Starts from the bot quantity. Each trade uses this many lots; 0.01 is one hundredth of a lot.',
-                  ),
+                  if (pipelineMode == 'strategy')
+                    _field(
+                      'quantity',
+                      'Fixed quantity (lots)',
+                      hint:
+                          'Starts from the bot quantity. Each trade uses this many lots; 0.01 is one hundredth of a lot.',
+                    ),
                   _field(
                     'initial_balance',
                     'Initial balance',
@@ -696,6 +746,22 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                 ),
                 const SizedBox(height: 14),
                 _fieldsWrap([
+                  if (pipelineMode == 'bot_pipeline') ...[
+                    _field('volume_min', 'Broker minimum lot'),
+                    _field('volume_max', 'Broker maximum lot'),
+                    _field('volume_step', 'Broker lot step'),
+                    _field('digits', 'Broker price digits'),
+                    _field(
+                      'stops_level_points',
+                      'Broker minimum stop (points)',
+                    ),
+                    _field(
+                      'margin_per_lot',
+                      'Margin required per lot',
+                      hint:
+                          'Required margin for 1 lot in the selected simulation currency. Held constant during this replay; copy your broker value.',
+                    ),
+                  ],
                   _field(
                     'contract_size',
                     'Contract size per lot',
@@ -753,11 +819,12 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                           'History window / warmup bars',
                           hint: '30–1,000 bars before each signal',
                         ),
-                        _field(
-                          'min_score',
-                          'Minimum raw signal score',
-                          hint: '0 keeps all strategy open signals',
-                        ),
+                        if (pipelineMode == 'strategy')
+                          _field(
+                            'min_score',
+                            'Minimum raw signal score',
+                            hint: '0 keeps all strategy open signals',
+                          ),
                         DropdownButtonFormField<String>(
                           initialValue: sameBarPolicy,
                           isExpanded: true,
@@ -869,7 +936,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                     color: run['status'] == 'completed' ? green : amber,
                   ),
                   title: Text(
-                    '${run['symbol']} · ${label('${mapOf(run['config'])['strategy']}')} · ${mapOf(run['config'])['timeframe']}',
+                    '${run['symbol']} · ${mapOf(run['config'])['pipeline_mode'] == 'bot_pipeline' ? 'Bot pipeline' : label('${mapOf(run['config'])['strategy']}')} · ${mapOf(run['config'])['timeframe']}',
                   ),
                   subtitle: Text(
                     '${_backtestUtc(run['created_at'])} UTC · ${run['source_name']} · ${label('${run['status']}')}',
@@ -1198,7 +1265,7 @@ class _HistoricalResultState extends State<_HistoricalResult> {
         ),
         const SizedBox(height: 8),
         Text(
-          '${label('${config['strategy']}')} · ${config['timeframe']} · ${run['source_name']} · $currency',
+          '${config['pipeline_mode'] == 'bot_pipeline' ? 'Bot pipeline' : label('${config['strategy']}')} · ${config['timeframe']} · ${run['source_name']} · $currency',
           style: const TextStyle(color: muted),
         ),
         if (run['status'] != 'completed')

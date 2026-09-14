@@ -61,6 +61,7 @@ class AssetPresetCatalogTests(TestCase):
             bot = Bot(
                 asset=asset,
                 asset_preset_version_applied=asset.recommended_config_version,
+                asset_recommended_config_applied=deepcopy(asset.recommended_config),
                 asset_strategy_overrides_applied=deepcopy(
                     asset.recommended_config["strategy_overrides"]
                 ),
@@ -318,6 +319,7 @@ class AssetPresetApiTests(TestCase):
             asset=gold,
             broker_account=self.account,
             asset_preset_version_applied=gold.recommended_config_version,
+            asset_recommended_config_applied=deepcopy(gold.recommended_config),
         )
         invalid_config = dict(gold.recommended_config)
         invalid_config["risk_per_trade_pct"] = "not-a-number"
@@ -381,6 +383,7 @@ class AssetPresetApiTests(TestCase):
             broker_account=self.account,
             engine_mode="scalper",
             asset_preset_version_applied=gold.recommended_config_version,
+            asset_recommended_config_applied=deepcopy(gold.recommended_config),
             scalper_params={
                 "symbols": {"XAUUSD": {"tp_r_multiple": 2.1}},
             },
@@ -419,6 +422,7 @@ class AssetPresetApiTests(TestCase):
             asset=gold,
             enabled_strategies=["range_reversion"],
             asset_preset_version_applied=gold.recommended_config_version,
+            asset_recommended_config_applied=deepcopy(gold.recommended_config),
         )
         self.assertEqual(
             resolve_allowed_strategy_pool(bot),
