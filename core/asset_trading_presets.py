@@ -7,7 +7,7 @@ copy stored on ``Asset.recommended_config`` so administrators can adjust it.
 from copy import deepcopy
 
 
-ASSET_PRESET_VERSION = 2
+ASSET_PRESET_VERSION = 3
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"]
 ALL_DAYS = WEEKDAYS + ["sat", "sun"]
 
@@ -324,7 +324,7 @@ _SPECS = {
     "CADJPYm": ("CAD/JPY", "forex", ["trend_pullback", "breakout_retest", "momentum_ignition"], .30, .66, (10, 20, "pips"), 1.70, "hybrid", (3.0, "pips"), (1.2, "pips"), 15, 4, "ln_overlap", ["CAD", "JPY"], False, ".10", ".10"),
     "CADCHFm": ("CAD/CHF", "forex", ["range_reversion", "trend_pullback", "price_action_pinbar"], .30, .66, (8, 16, "pips"), 1.50, "fixed_tp", (3.0, "pips"), (1.2, "pips"), 15, 4, "ln_overlap", ["CAD", "CHF"], False, ".10", ".10"),
     "EURCHFm": ("EUR/CHF", "forex", ["range_reversion", "price_action_pinbar", "trend_pullback"], .35, .64, (6, 12, "pips"), 1.40, "fixed_tp", (2.2, "pips"), (.8, "pips"), 15, 5, "london", ["EUR", "CHF"], False, ".10", ".10"),
-    "XAUUSDm": ("Gold", "commodities", ["price_action_pinbar", "breakout_retest", "momentum_ignition"], .30, .68, (.10, .30, "percent"), 1.70, "hybrid", (.015, "percent"), (.008, "percent"), 12, 5, "ny_metals", ["USD"], False, ".01", ".01"),
+    "XAUUSDm": ("Gold", "commodities", ["trend_pullback", "breakout_retest", "momentum_ignition", "price_action_pinbar", "doji_breakout"], .30, .68, (.10, .30, "percent"), 1.70, "hybrid", (.015, "percent"), (.008, "percent"), 12, 5, "ny_metals", ["USD"], False, ".01", ".01"),
     "XAGUSDm": ("Silver", "commodities", ["breakout_retest", "momentum_ignition", "trend_pullback"], .25, .70, (.25, .70, "percent"), 1.80, "hybrid", (.08, "percent"), (.04, "percent"), 15, 4, "ny_metals", ["USD"], False, ".01", ".01"),
     "USOILm": ("WTI Oil", "commodities", ["breakout_retest", "momentum_ignition", "trend_pullback"], .25, .68, (.30, .80, "percent"), 1.80, "hybrid", (.10, "percent"), (.05, "percent"), 15, 4, "ny_energy", ["USD"], True, ".10", ".10"),
     "UKOILm": ("Brent Oil", "commodities", ["breakout_retest", "momentum_ignition", "trend_pullback"], .25, .68, (.30, .80, "percent"), 1.80, "hybrid", (.10, "percent"), (.05, "percent"), 15, 4, "ny_energy", ["USD"], True, ".10", ".10"),
@@ -372,6 +372,13 @@ for _symbol, _spec in _SPECS.items():
     ASSET_TRADING_PRESETS[_symbol]["strategy_overrides"] = (
         _merged_strategy_overrides(_symbol, _category)
     )
+
+
+ASSET_TRADING_PRESETS["XAUUSDm"]["symbol_config"]["final_target_source"] = "strategy"
+ASSET_TRADING_PRESETS["XAUUSDm"]["trading_schedule"]["windows"] = [
+    {"label": "London", "timezone": "Europe/London", "allowed_days": WEEKDAYS[:], "start": "08:00", "end": "11:00"},
+    {"label": "New York metals", "timezone": "America/New_York", "allowed_days": WEEKDAYS[:], "start": "07:30", "end": "14:00"},
+]
 
 
 def recommended_config_for(symbol):

@@ -1,3 +1,4 @@
+import 'trading_windows_editor.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' show AppExitResponse;
@@ -2935,6 +2936,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
   bool allowLiveExecution = false;
   bool closePositionsOnEmergencyStop = false;
   bool tradingScheduleEnabled = true;
+  List<Map<String, dynamic>> tradingWindows = [];
   bool allowOppositeScalp = false;
   bool killSwitchEnabled = true;
   bool lossStreakAutopauseEnabled = false;
@@ -3017,6 +3019,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
     closePositionsOnEmergencyStop =
         bot?['close_positions_on_emergency_stop'] == true;
     tradingScheduleEnabled = bot?['trading_schedule_enabled'] != false;
+    tradingWindows = listOfMaps(bot?['trading_windows']);
     allowOppositeScalp = bot?['allow_opposite_scalp'] == true;
     killSwitchEnabled = bot?['kill_switch_enabled'] != false;
     lossStreakAutopauseEnabled = bot?['loss_streak_autopause_enabled'] == true;
@@ -3260,6 +3263,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       hardDrawdownLimitPct.text = '${config['hard_drawdown_limit_pct'] ?? '2'}';
       hardSizeMultiplier.text = '${config['hard_size_multiplier'] ?? '0.25'}';
       tradingScheduleEnabled = schedule['enabled'] != false;
+      tradingWindows = listOfMaps(schedule['windows']);
       tradingTimezone.text = '${schedule['timezone'] ?? 'UTC'}';
       selectedTradingDays
         ..clear()
@@ -3540,6 +3544,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       return;
     }
     if (tradingScheduleEnabled &&
+        tradingWindows.isEmpty &&
         (tradingTimezone.text.trim().isEmpty ||
             selectedTradingDays.isEmpty ||
             !_validTime(tradingWindowStart) ||
@@ -3688,6 +3693,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
       'allowed_trading_days': selectedTradingDays.toList()..sort(),
       'trading_window_start': tradingWindowStart.text.trim(),
       'trading_window_end': tradingWindowEnd.text.trim(),
+      'trading_windows': tradingWindows,
       'allow_opposite_scalp': allowOppositeScalp,
       'kill_switch_enabled': killSwitchEnabled,
       'kill_switch_max_unrealized_pct': killSwitchMaxUnrealizedPct.text.trim(),
@@ -4556,7 +4562,9 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                         decimal: true,
                       ),
                       decoration: const InputDecoration(
-                        labelText: 'Take-profit target',
+                        labelText: 'Fallback target for external signals',
+                        helperText:
+                            'Engine signals use the strategy target; TP1 below is asset policy.',
                         suffixText: 'R',
                       ),
                       onChanged: (_) => _markCustomized(),
@@ -4813,6 +4821,15 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   color: blue,
                 ),
                 if (tradingScheduleEnabled) ...[
+                  TradingWindowsEditor(
+                    windows: tradingWindows,
+                    onChanged: (value) => setState(() {
+                      tradingWindows = value;
+                      _setCustomizedState();
+                    }),
+                  ),
+                ],
+                if (tradingScheduleEnabled && tradingWindows.isEmpty) ...[
                   const SizedBox(height: 12),
                   TextField(
                     controller: tradingTimezone,
@@ -4854,12 +4871,30 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                   icon: Icons.swap_horiz_rounded,
                   title: 'Allow opposite-direction scalp',
                   description:
-                      'Permit a small counter-position while retaining this bot\'s main trade.',
+                      'One temporary overlay per protected primary, on hedging accounts only. Uses reduced monetary risk, ATR/R exits and a shorter time limit.',
                   value: allowOppositeScalp,
                   onChanged: (value) =>
                       setState(() => allowOppositeScalp = value),
                   color: amber,
                 ),
+                if (allowOppositeScalp)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Text(
+                      (int.tryParse(maxPositions.text) == 1 ||
+                              integerValue(
+                                    selectedAccountLimits['max_positions_per_symbol'],
+                                  ) ==
+                                  1 ||
+                              integerValue(
+                                    selectedAccountLimits['max_total_open_positions'],
+                                  ) ==
+                                  1)
+                          ? 'Opposite scalp is blocked by position limits. It requires at least 2 bot positions, 2 account positions and 2 positions per symbol.'
+                          : 'Opposite scalp requires hedging mode and room for 2 bot/account positions per symbol. Primary must be protected or at least +0.5R.',
+                      style: const TextStyle(color: amber, fontSize: 11),
+                    ),
+                  ),
                 const SizedBox(height: 10),
                 _botSafetyToggle(
                   icon: Icons.health_and_safety_outlined,
@@ -6358,6 +6393,7 @@ class _HistoryPageState extends State<HistoryPage> {
       }
       final root = mapOf(snapshot.data);
       final summary = mapOf(root['summary']);
+      final overlay = mapOf(root['opposite_scalp']);
       final trades = listOfMaps(root['trades']);
       final metrics = [
         ('TOTAL TRADES', '${integerValue(summary['total_trades']) ?? 0}', blue),
@@ -6416,6 +6452,17 @@ class _HistoryPageState extends State<HistoryPage> {
                 );
               },
             ),
+            if (overlay.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 16),
+                child: SelectableText(
+                  'Opposite scalps ? ${overlay['trades']} trades ? ${compactNumber(overlay['win_rate_pct'])}% wins ? PF ${compactNumber(overlay['profit_factor'])}\n'
+                  'Net P/L ${compactNumber(overlay['net_pnl'])} ? expectancy ${compactNumber(overlay['expectancy'])} ? recorded costs ${compactNumber(overlay['costs'])}\n'
+                  'Realized drawdown ${compactNumber(overlay['realized_drawdown'])} ? account drawdown change ${compactNumber(overlay['realized_drawdown_delta'])}\n'
+                  '${overlay['drawdown_basis']}\n${overlay['cost_basis']}',
+                  style: const TextStyle(color: muted, fontSize: 12),
+                ),
+              ),
             const SizedBox(height: 20),
             Row(
               children: [

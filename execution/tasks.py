@@ -507,6 +507,16 @@ def trail_positions_task(self):
             "broker_account",
             "originating_order__decision",
         ):
+            from execution.services.opposite_scalp import overlay_params
+            overlay = overlay_params(pos)
+            if overlay.get("is_opposite_scalp") and not BrokerPosition.objects.filter(
+                pk=overlay.get("primary_position_id"), bot_id=pos.bot_id,
+                broker_account=pos.broker_account, status="open", ownership="ez_trade",
+            ).exists():
+                order, _ = create_close_order_for_position(pos, pos.broker_account)
+                _queue_or_dispatch_order(order, emergency=True)
+                closed_ids.append(pos.id)
+                continue
             tick = connector.tick_for_account(pos.broker_account, pos.symbol)
             bid = Decimal(str(getattr(tick, "bid", 0) or 0))
             ask = Decimal(str(getattr(tick, "ask", 0) or 0))
@@ -980,6 +990,7 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
                 "bar_range": last_entry["high"] - last_entry["low"],
                 "last_close": last_entry.get("close"),
                 "htf_bias": htf_bias,
+                "regime": htf_bias_detail.get("regime"),
             },
         )
     else:
@@ -1057,6 +1068,9 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
                 "engine": engine_decision.strategy,
                 "sl": str(engine_decision.sl) if engine_decision.sl is not None else None,
                 "tp": str(engine_decision.tp) if engine_decision.tp is not None else None,
+                "entry": str(engine_decision.entry_price) if engine_decision.entry_price is not None else None,
+                "entry_trigger": str(engine_decision.entry_trigger) if engine_decision.entry_trigger is not None else None,
+                "target_rr": str(engine_decision.target_rr) if engine_decision.target_rr is not None else None,
                 "reason": engine_decision.reason,
                 "score": engine_decision.score,
                 "generated_at": timezone.now().isoformat(),
@@ -1979,58 +1993,23 @@ def trade_scalper_strategies_for_bot(
     strategy_events = []
     candidates = []
 
-    # Optional HTF bias (15m) to filter countertrend M1 entries
-    htf_bias = None
-    htf_bias_detail = None
+    # The configured smallest context frame supplies structural bias; the
+    # largest supplies the dominant regime. Gold uses M15 and H1 above M5.
+    from execution.services.higher_timeframe_context import analyze_context
+    symbol_config = scalper_cfg.resolve_symbol(symbol)
     try:
-        htf_candles = get_candles_for_account(
-            broker_account=broker_account,
-            symbol=symbol,
-            timeframe="15m",
-            n_bars=120,
+        htf_bias, htf_bias_detail, context_reason = analyze_context(
+            symbol_config.context_timeframes if symbol_config else (),
+            lambda frame: get_candles_for_account(
+                broker_account=broker_account, symbol=symbol, timeframe=frame, n_bars=120,
+            ),
+            _analyze_htf_bias,
         )
-        analysis = _analyze_htf_bias(htf_candles)
-        if analysis:
-            htf_bias = analysis.get("bias")
-            htf_bias_detail = analysis
     except Exception:
-        htf_bias = None
-        htf_bias_detail = None
-
-    # Fallback: reuse last known bias if it is recent
-    if htf_bias is None:
-        try:
-            last = (bot.scalper_params or {}).get("last_htf_bias", {})
-            if last:
-                ts = last.get("at")
-                val = last.get("value")
-                detail = last.get("info")
-                if ts and val:
-                    parsed = datetime.fromisoformat(ts)
-                    age_min = (
-                        (timezone.now() - timezone.make_aware(parsed, timezone=dt_timezone.utc))
-                        if timezone.is_naive(parsed)
-                        else (timezone.now() - parsed)
-                    ).total_seconds() / 60
-                    if age_min <= 60:
-                        htf_bias = val
-                        htf_bias_detail = detail
-        except Exception:
-            htf_bias = None
-            htf_bias_detail = None
-
-    # If we cannot establish HTF bias, skip this cycle to avoid trading blind.
-    if htf_bias is None:
-        _log_skip(
-            "htf_bias_unavailable",
-            {"timeframe": "15m", "symbol": symbol},
-        )
-        logger.warning(
-            "[ScalperTrade] bot=%s symbol=%s skipped: HTF bias unavailable",
-            bot.id,
-            symbol,
-        )
-        return {"status": "skipped", "reason": "htf_bias_unavailable"}
+        htf_bias, htf_bias_detail, context_reason = None, {}, "htf_bias_unavailable"
+    if context_reason:
+        _log_skip(context_reason, {"context": htf_bias_detail, "symbol": symbol})
+        return {"status": "skipped", "reason": context_reason}
 
     # Cache latest bias for reuse
     try:
@@ -2062,6 +2041,7 @@ def trade_scalper_strategies_for_bot(
                 "spread_price": spread_price,
                 "session": session_label,
                 "htf_bias": htf_bias,
+                "regime": htf_bias_detail.get("regime"),
             },
         )
         enabled_strats = list(auto_selected)
@@ -2167,6 +2147,9 @@ def trade_scalper_strategies_for_bot(
                 "strategy": strategy_name,
                 "sl": str(engine_decision.sl) if engine_decision.sl is not None else None,
                 "tp": str(engine_decision.tp) if engine_decision.tp is not None else None,
+                "entry": str(engine_decision.entry_price) if engine_decision.entry_price is not None else None,
+                "entry_trigger": str(engine_decision.entry_trigger) if engine_decision.entry_trigger is not None else None,
+                "target_rr": str(engine_decision.target_rr) if engine_decision.target_rr is not None else None,
                 "reason": engine_decision.reason,
                 "score": float(engine_decision.score or 0.0),
                 "generated_at": timezone.now().isoformat(),
@@ -2183,7 +2166,7 @@ def trade_scalper_strategies_for_bot(
                 "market_snapshot": market_snapshot,
                 "volatility": volatility_snapshot,
                 "strategy_metrics": engine_decision.metadata or {},
-                **({"bias_m15": htf_bias} if htf_bias else {}),
+                **({"bias_m15": htf_bias, "context_bias": htf_bias} if htf_bias else {}),
             }
             if htf_bias_detail:
                 strategy_payload["htf_bias_detail"] = htf_bias_detail

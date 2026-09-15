@@ -812,4 +812,38 @@ void main() {
     expect(find.text('XAUUSD'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+  testWidgets('opposite scalp warns when position limits prevent an overlay', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: DesktopShell(client: FakeApiClient(), onLogout: () {}),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Bots'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit bot'));
+    await tester.pumpAndSettle();
+    final limit = find.byWidgetPredicate(
+      (widget) =>
+          widget is TextField &&
+          widget.decoration?.labelText == 'Bot maximum open positions',
+    );
+    await tester.ensureVisible(limit);
+    await tester.enterText(limit, '1');
+    final title = find.text('Allow opposite-direction scalp');
+    await tester.ensureVisible(title);
+    final row = find.ancestor(of: title, matching: find.byType(Row)).first;
+    await tester.tap(find.descendant(of: row, matching: find.byType(Switch)));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Opposite scalp is blocked by position limits'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
 }

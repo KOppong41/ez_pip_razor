@@ -149,8 +149,8 @@ class ScalperPipelineContracts(TestCase):
     def test_opposite_scalps_use_broker_point_and_digits(self, price):
         for name, point, digits in (("USDJPY", "0.001", 3), ("US30", "0.1", 1), ("XAGUSD", "0.001", 3), ("BTCUSD", "0.01", 2)):
             with self.subTest(symbol=name):
-                signal = SimpleNamespace(bot=self.bot, symbol=name, direction="buy", timeframe="5m", payload={})
-                config = SimpleNamespace(resolve_symbol=lambda _: SimpleNamespace(sl_points_min=Decimal("100"), sl_points_unit="points"))
+                signal = SimpleNamespace(bot=self.bot, symbol=name, direction="buy", timeframe="5m", payload={"atr_price": str(Decimal(point) * 100)})
+                config = SimpleNamespace(time_in_trade_limit_min=30)
                 constraints = BrokerSymbolConstraints(point=Decimal(point), digits=digits, stops_level_points=Decimal("150"))
                 with patch("execution.services.brokers.get_broker_symbol_constraints", return_value=constraints):
                     params = _build_scalp_params(signal, scalper_cfg=config)

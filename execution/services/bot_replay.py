@@ -36,6 +36,7 @@ def configure_bot_replay(bot, config, data):
         config[name] = decimal_field(data, name, positive=True)
     config["stops_level_points"] = decimal_field(data, "stops_level_points", "0")
     config["digits"] = int_field(data, "digits", None, 0, 10)
+    config["account_margin_mode"] = int_field(data, "account_margin_mode", None if bot.allow_opposite_scalp else 0, 0, 2)
     if config["volume_min"] > config["volume_max"]:
         raise ValueError("Minimum volume cannot exceed maximum volume.")
     if config["timeframe"] not in {"1m", "5m", "15m"}:
@@ -57,7 +58,8 @@ def configure_bot_replay(bot, config, data):
         "news_enabled": bool(getattr(settings, "ECONOMIC_CALENDAR_ENABLED", False)),
     }
     config["bot_snapshot"] = json.loads(json.dumps(snapshot, cls=DjangoJSONEncoder))
-    config["model_version"] = 2
+    config["model_version"] = 3
+    config["news_simulation"] = "not_simulated"
     return config
 
 

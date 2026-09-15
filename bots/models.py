@@ -12,6 +12,7 @@ from django.core.exceptions import ValidationError
 
 from brokers.models import BrokerAccount
 from subscription.utils import get_bot_limit
+from core.trading_schedule import validate_trading_windows
 
 DEFAULT_TRADING_DAYS = ["mon", "tue", "wed", "thu", "fri"]
 
@@ -569,6 +570,10 @@ class Bot(models.Model):
     trading_window_end = models.TimeField(
         default=time(18, 0),
         help_text="Local time to stop opening trades each day.",
+    )
+    trading_windows = models.JSONField(
+        default=list, blank=True, validators=[validate_trading_windows],
+        help_text="Optional multiple windows with start, end, timezone and allowed_days; empty uses the single window.",
     )
 
     allow_opposite_scalp = models.BooleanField(

@@ -296,6 +296,28 @@ def enforce_pretrade_risk(
         reject("RISK_STOP_LOSS_REQUIRED", "Stop loss is required")
     stop = _decimal(locked_order.sl)
     take_profit = _decimal(locked_order.tp) if locked_order.tp is not None else None
+    decision_params = (locked_order.decision.params or {}) if locked_order.decision_id else {}
+    if decision_params.get("is_opposite_scalp") or decision_params.get("scalp"):
+        from execution.services.opposite_scalp import validate_primary
+        primary = BrokerPosition.objects.filter(pk=decision_params.get("primary_position_id"),
+            symbol=locked_order.symbol, bot=bot, broker_account=account).select_related("originating_order__decision").first()
+        reason = validate_primary(bot, locked_order.side, primary, account_info, tick,
+            broker_positions if broker_positions is not None else connector.positions_for_account(account),
+            exclude_order=locked_order.pk)
+        if reason:
+            reject("OPPOSITE_SCALP_REJECTED", reason)
+    from execution.services.entry_contract import gold_stop_reason, target_at_entry
+    if decision_params.get("target_rr") is not None:
+        try:
+            take_profit = target_at_entry(locked_order.side, entry, stop, decision_params["target_rr"],
+                                          decision_params.get("entry_trigger"))
+        except (ValueError, ArithmeticError) as exc:
+            reject("ENTRY_CONTRACT_INVALID", str(exc))
+    if bot.engine_mode == "scalper" and not decision_params.get("is_opposite_scalp"):
+        reason = gold_stop_reason(build_scalper_config(bot).resolve_symbol(locked_order.symbol), entry, stop,
+                                  point=point, digits=digits, atr=_decimal(decision_params.get("atr_price")))
+        if reason:
+            reject("STRUCTURAL_STOP_OUTSIDE_ENVELOPE", reason)
     if locked_order.side == "buy" and not (stop < entry and (take_profit is None or take_profit > entry)):
         reject("INVALID_PROTECTION", "BUY protection is on the wrong side of the market")
     if locked_order.side == "sell" and not (stop > entry and (take_profit is None or take_profit < entry)):
@@ -323,6 +345,13 @@ def enforce_pretrade_risk(
                 decision_risk_pct=str(adaptive_risk),
             )
         effective_risk_pct = min(bot_risk_pct, adaptive_risk_pct)
+        adaptive_risk_applied = effective_risk_pct < bot_risk_pct
+
+    if decision_params.get("is_opposite_scalp") or decision_params.get("scalp"):
+        multiplier = _decimal(get_runtime_config().decision_scalp_qty_multiplier)
+        if not multiplier.is_finite() or not (0 < multiplier <= 1):
+            reject("OPPOSITE_SCALP_RISK_INVALID", "Opposite scalp risk multiplier must be in (0, 1]")
+        effective_risk_pct = min(effective_risk_pct, bot_risk_pct * multiplier)
         adaptive_risk_applied = effective_risk_pct < bot_risk_pct
 
     if bot.position_sizing_mode == "risk":

@@ -29,7 +29,8 @@ retains the simpler fixed-size replay of one of the six candle strategies.
 Import historical **bid** OHLC candles, then enter contract size, point size,
 initial balance, profit currency, spread, slippage and round-trip commission.
 Bot pipeline additionally requires broker minimum/maximum volume, volume step,
-price digits, minimum stop distance and margin required per lot. Quantity and
+price digits, minimum stop distance, margin required per lot and account margin
+mode (0 netting, 1 exchange, 2 hedging). Opposite scalps require mode 2. Quantity and
 score thresholds come from the bot. Single strategy uses the form's fixed
 quantity and raw-score threshold. Instrument defaults first reuse your latest completed run
 for the same bot and symbol; otherwise, a read-only lookup of the matching
@@ -76,8 +77,9 @@ also revalidates if needed. Replay work is capped at 15 million candle-window
 evaluations; with the default 100-bar warmup, all 150,000 imported candles can
 be replayed in Single strategy mode. Bot pipeline is capped at 2,000 test
 candles and 240 seconds per run. Use a narrower date range with earlier CSV
-history retained: the live HTF gate needs at least 30 completed, contiguous
-15-minute context candles. The saved equity curve is sampled to at most 5,000 display points
+history retained: the live HTF gate needs at least 30 completed candles in
+each configured context frame. Gold uses M15 structural bias and H1 regime,
+so include at least 30 hours of contiguous history before its test period. The saved equity curve is sampled to at most 5,000 display points
 to keep results responsive, while summary drawdown still evaluates every candle.
 
 Each run saves its source data hash, CSV, strategy defaults, bot snapshot when
@@ -103,12 +105,60 @@ Bot pipeline starts the selected bot active on an empty simulated account.
 Operational stops, prior loss streaks and cached market context are reset;
 numeric risk limits remain in force. Other bots and manual positions are not
 included in this single-instrument dataset. Each risk day starts at its first
-observed quote. If the live news calendar is enabled, the absence of archived
-refresh coverage blocks entries; missing news data is never treated as a clear
-calendar. These limits and assumptions are saved with every result.
+observed quote. **News not simulated:** replay explicitly disables the economic
+calendar because archived events and freshness coverage are unavailable. Live
+news filtering is unchanged. These limits and assumptions are saved with every result.
 
 Apply `python manage.py migrate` when updating an existing source backend.
 Restart Flutter after adding the native file-selector plugin; hot reload alone
 does not load a new native plugin. The packaged app applies database migrations
 on startup. Native CSV dialogs use Flutter's maintained
 [file_selector plugin](https://pub.dev/packages/file_selector).
+
+## Gold and opposite-scalp contracts
+
+Pin Bar requires the next completed candle to close beyond its trigger without
+invalidating the structural stop. Momentum uses the pullback close as its entry
+reference. At submission, these strategies calculate their target R from the
+current quote and the original structural stop. Market slippage and tick rounding
+can still change realized R:R. Gold rejects structural stops outside its configured
+0.10?0.30% envelope; it does not move them to fit.
+
+Gold's recommended pool is Trend Pullback, Breakout + Retest, Momentum Ignition,
+Pin Bar and Doji Breakout. All configured context frames participate in live and
+replay analysis. Missing or conflicting context blocks entries. Gold's default
+M15 structure and H1 dominant trend must agree with the setup direction.
+
+Hybrid exits take the asset-configured fraction at TP1, then manage the remaining
+position with breakeven/trailing and the strategy's final target. The 1.70R field
+is a fallback for externally planned signals, not an override of an engine target.
+The editor labels this distinction. Management R uses the actual filled entry.
+
+The schedule editor supports up to eight windows, each with its own timezone and
+weekdays. The Gold recommendation includes London and New York metals windows.
+A window crossing midnight belongs to its starting weekday. An empty window list
+preserves the original single-window schedule. Disabling the schedule disables
+both forms. Reapply a preset explicitly to adopt its changed defaults; existing
+bots keep their frozen preset and configured schedule.
+
+Opposite scalp requires a confirmed MT5 hedging account, a primary position with
+its stop at breakeven or better (or at least +0.5 initial R unrealized), and room
+under bot/account/per-symbol position limits. It takes precedence over flipping
+when enabled. A primary may have only one filled scalp during its lifetime;
+pending or ambiguous requests reserve that allowance. An overlay closes when
+its primary closes or when its hard duration limit expires.
+
+`decision_scalp_qty_multiplier` now scales the monetary risk ceiling: 0.30% ?
+0.30 = 0.09%. Fixed sizing is reduced once by the same ratio. Final validation
+rechecks fresh broker state under the account lock. The default scalp stop is
+0.75 ATR (or 0.5 primary R if ATR is unavailable), its target is 1.2R and its hard
+limit is 10 minutes, capped at half the main management duration. Broker minimum
+stop distance still applies. Advanced per-bot overrides live in
+`scalper_params.opposite_scalp`: `sl_atr_multiplier`, `tp_r`, `max_duration_minutes`.
+Generic absolute-price scalp offsets are no longer used.
+
+Trade history and saved replay results report opposite-scalp trades, win rate,
+profit factor, expectancy, net P/L, costs and realized drawdown attribution
+separately. Partial fills count as one trade. Live costs include recorded
+commission, fees and swap; spread/slippage are embedded in broker P/L. Drawdown
+attribution excludes floating P/L and does not establish strategy alpha.

@@ -64,7 +64,7 @@ def backtest_defaults(request, bot_id):
     if bot is None:
         return Response({"detail": "Bot not found."}, status=404)
     keys = ("contract_size", "point_size", "currency", "spread_points",
-            "slippage_points", "commission_per_lot", "volume_min", "volume_max", "volume_step", "digits", "stops_level_points", "margin_per_lot")
+            "slippage_points", "commission_per_lot", "volume_min", "volume_max", "volume_step", "digits", "stops_level_points", "margin_per_lot", "account_margin_mode")
     previous = HistoricalBacktest.objects.filter(
         owner=request.user, bot=bot, symbol=bot.asset.symbol, status="completed",
     ).only("config", "created_at").first()
