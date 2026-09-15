@@ -975,7 +975,8 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
             )
             htf_candles = None
 
-    htf_bias = _compute_bias_from_htf(htf_candles) if htf_candles else None
+    htf_bias_detail = (_analyze_htf_bias(htf_candles) if htf_candles else None) or {}
+    htf_bias = htf_bias_detail.get("bias")
 
     # 2) Build engine context + run engine (auto-trade mode uses asset/profile presets)
     if getattr(bot, "auto_trade", False):
@@ -990,7 +991,7 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
                 "bar_range": last_entry["high"] - last_entry["low"],
                 "last_close": last_entry.get("close"),
                 "htf_bias": htf_bias,
-                "regime": htf_bias_detail.get("regime"),
+                "regime": htf_bias_detail,
             },
         )
     else:

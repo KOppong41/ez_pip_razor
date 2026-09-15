@@ -40,7 +40,8 @@ def select_ai_strategies(
     - Filters to the provided `available` strategies so it works for any engine.
     """
     context = context or {}
-    available_set = {s for s in available}
+    available_order = list(dict.fromkeys(available))
+    available_set = set(available_order)
     canon_symbol = canonical_symbol(symbol)
 
     vol_ratio = _volatility_ratio(context)
@@ -71,12 +72,39 @@ def select_ai_strategies(
     else:
         candidates = low_vol_pool
 
-    # Symbol-specific preferences layered on top of volatility heuristics.
+    # Gold is selected from the observed regime. A static symbol preference
+    # here would always consume the three available slots before momentum or
+    # breakout strategies could participate.
     symbol_bias: list[str] = []
-    if canon_symbol == "BTCUSD":
+    if canon_symbol == "XAUUSD":
+        regime = context.get("regime") if isinstance(context.get("regime"), Mapping) else {}
+        trend_strength = abs(_to_decimal(regime.get("ema_slope_pct") or 0))
+        atr_expansion = _to_decimal(regime.get("atr_ratio") or 0)
+        structure = str(regime.get("structure") or "").lower()
+        strong_trend = (
+            bias in {"buy", "sell"}
+            and (
+                trend_strength >= Decimal("0.00015")
+                or structure in {"higher_high", "lower_low"}
+            )
+        )
+        high_volatility = vol_ratio >= Decimal("0.004") or atr_expansion >= Decimal("1.25")
+        if high_volatility or strong_trend:
+            candidates = ["momentum_ignition", "breakout_retest", "trend_pullback"]
+        elif vol_ratio >= Decimal("0.002"):
+            candidates = ["trend_pullback", "breakout_retest", "price_action_pinbar"]
+        else:
+            candidates = ["price_action_pinbar", "doji_breakout", "trend_pullback"]
+        # Retain the other Gold setups below the preferred three so a limited
+        # configured pool or the wide-spread filter has an ordered fallback.
+        candidates += [
+            name for name in (
+                "trend_pullback", "breakout_retest", "momentum_ignition",
+                "price_action_pinbar", "doji_breakout",
+            ) if name not in candidates
+        ]
+    elif canon_symbol == "BTCUSD":
         symbol_bias = ["momentum_ignition", "breakout_retest", "trend_pullback", "price_action_pinbar"]
-    elif canon_symbol == "XAUUSD":
-        symbol_bias = ["price_action_pinbar", "trend_pullback", "doji_breakout", "breakout_retest"]
     elif canon_symbol in {"EURUSD", "GBPUSD"}:
         symbol_bias = ["trend_pullback", "doji_breakout", "price_action_pinbar", "range_reversion"]
 
@@ -98,6 +126,6 @@ def select_ai_strategies(
 
     # Fallback: if nothing matched (e.g., scalper with limited registry), pick any available up to max_strategies.
     if not selected:
-        selected = list(available_set)
+        selected = available_order
 
     return selected[:max_strategies]

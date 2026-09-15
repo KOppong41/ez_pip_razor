@@ -271,6 +271,8 @@ def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBrea
         reason="doji_breakout_sr_confluence",
         strategy="doji_breakout",
         score=float(score),
+        entry_price=entry,
+        target_rr=cfg.rr,
         metadata={
             "confidence": float(score),
             "score_components": score_components,

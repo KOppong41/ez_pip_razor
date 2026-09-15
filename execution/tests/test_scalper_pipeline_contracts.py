@@ -40,6 +40,7 @@ class ScalperPipelineContracts(TestCase):
             bot=self.bot, source="scalper_engine", symbol=self.asset.symbol,
             timeframe="5m", direction="buy", dedupe_key=f"contract-{Signal.objects.count()}",
             payload={"sl": "1.098765", "tp": "1.105432", "close": "1.1000", "score": 0.73,
+                     "entry": "1.1000", "target_rr": "2", "entry_trigger": "1.0999",
                      "point": "0.00001", "digits": 5, "reason": "detector_setup"},
         )
         values.update(overrides)
@@ -55,6 +56,8 @@ class ScalperPipelineContracts(TestCase):
         self.assertEqual(decision.reason, "detector_setup")
         self.assertEqual(decision.params["sl"], original["sl"])
         self.assertEqual(decision.params["tp"], original["tp"])
+        for key in ("entry", "target_rr", "entry_trigger"):
+            self.assertEqual(decision.params[key], original[key])
         self.assertIn("scalper", decision.params)
         signal.refresh_from_db()
         self.assertEqual(signal.payload["score"], original["score"])

@@ -157,6 +157,8 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             reason="breakout_retest_up",
             strategy="breakout_retest",
             score=float(confidence),
+            entry_price=last["close"],
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "range_width": float(range_width),
@@ -185,6 +187,8 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             reason="breakout_retest_down",
             strategy="breakout_retest",
             score=float(confidence),
+            entry_price=last["close"],
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "range_width": float(range_width),

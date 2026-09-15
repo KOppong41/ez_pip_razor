@@ -351,6 +351,16 @@
                     {% endfor %}
                 </div>
                 {% endif %}
+                {% if diag.rejection_counts %}
+                <div style="margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--gray-300);">
+                    <div style="color: var(--gray-400);">
+                        {% trans "Entry rejection reasons" %} ({{ diag.window_hours }}h)
+                    </div>
+                    {% for row in diag.rejection_counts %}
+                        <div>{{ row.reason }}: <strong>{{ row.count }}</strong></div>
+                    {% endfor %}
+                </div>
+                {% endif %}
                 {% if diag.strategy_counts %}
                 <div style="margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--gray-300);">
                     <div style="color: var(--gray-400);">

@@ -180,6 +180,8 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
             reason="trend_pullback_bull",
             strategy="trend_pullback",
             score=float(confidence),
+            entry_price=last_close,
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "slope_pct": float(slope_pct),
@@ -200,6 +202,8 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
             reason="trend_pullback_bear",
             strategy="trend_pullback",
             score=float(confidence),
+            entry_price=last_close,
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "slope_pct": float(abs(slope_pct)),

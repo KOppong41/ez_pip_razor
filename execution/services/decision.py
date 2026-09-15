@@ -171,7 +171,30 @@ def detect_position_conflict(
             reason="existing_position_same_direction",
         )
 
-    # An enabled overlay takes precedence over a destructive flip.
+    min_flip_score = flip_threshold
+    flip_cooldown = 0
+    last_flip_at = None
+    if scalper_cfg and scalper_cfg.flip_settings:
+        min_flip_score = max(min_flip_score, float(scalper_cfg.flip_settings.min_score))
+        flip_cooldown = scalper_cfg.flip_settings.cooldown_minutes
+    if scalper_ctx:
+        last_flip_at = scalper_ctx.last_flip_at or last_flip_at
+        if scalper_ctx.flip_cooldown_minutes:
+            flip_cooldown = max(flip_cooldown, scalper_ctx.flip_cooldown_minutes)
+    cooldown_ok = True
+    if last_flip_at and flip_cooldown:
+        cooldown_ok = (timezone.now() - last_flip_at).total_seconds() >= flip_cooldown * 60
+    flip_eligible = score >= min_flip_score and cooldown_ok
+
+    # High-conviction reversals close and replace the primary before the
+    # lower-conviction overlay path is considered.
+    if allow_scalp and flip_eligible:
+        return StrategyDecision(
+            action="flip",
+            reason="flip_triggered",
+            score=score,
+        )
+
     if allow_scalp:
         if not live_account:
             return StrategyDecision(action="ignore", reason="opposite_scalp_requires_hedging_account")
@@ -195,21 +218,7 @@ def detect_position_conflict(
     if allow_hedge:
         return None  # allow side-by-side if explicitly enabled
 
-    # Flip on high conviction
-    min_flip_score = flip_threshold
-    flip_cooldown = 0
-    last_flip_at = None
-    if scalper_cfg and scalper_cfg.flip_settings:
-        min_flip_score = max(min_flip_score, float(scalper_cfg.flip_settings.min_score))
-        flip_cooldown = scalper_cfg.flip_settings.cooldown_minutes
-    if scalper_ctx:
-        last_flip_at = scalper_ctx.last_flip_at or last_flip_at
-        if scalper_ctx.flip_cooldown_minutes:
-            flip_cooldown = max(flip_cooldown, scalper_ctx.flip_cooldown_minutes)
-    cooldown_ok = True
-    if last_flip_at and flip_cooldown:
-        cooldown_ok = (timezone.now() - last_flip_at).total_seconds() >= flip_cooldown * 60
-    if score >= min_flip_score and cooldown_ok:
+    if flip_eligible:
         return StrategyDecision(
             action="flip",
             reason="flip_triggered",
@@ -674,7 +683,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
         _log_scalper_trace(signal, "final", decision.action, decision.reason, {"score": decision.score})
 
     # Optional flip handling: create a paired close decision for the existing position.
-    if flip_info:
+    if flip_info and decision.action == "open":
         from execution.services.positions import prepare_flip_decisions
         close_confirmed = prepare_flip_decisions(decision, flip_info)
         if close_confirmed:

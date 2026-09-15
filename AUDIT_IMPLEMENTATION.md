@@ -1,7 +1,8 @@
 # Consolidated audit implementation
 
-This implements the general, opposite-scalp and Gold audit list. Source changes
-are in the working tree. Database migrations are not applied to the live account.
+This records the general, opposite-scalp and Gold audit implementation, merged
+in `3aa3fba`, and its subsequent working-tree fixes. Database migrations are not
+applied to the live account by this continuation.
 
 The preceding follow-up fixes are also retained: the bot schedule is authoritative,
 engine signals bypass strategy re-planning, scores use normalized weights, full
@@ -10,7 +11,7 @@ and bot replay runs the shared decision, risk and position-management pipeline.
 
 | Audit item | Implementation |
 | --- | --- |
-| Flutter / Safety CI | Latest published Safety CI was green at `05668d54`. Updated desktop suite passes all 34 tests, including compact layouts, multiple windows and scalp-limit warnings. |
+| Flutter / Safety CI | The original audit recorded green Safety CI at `05668d54` and 34 passing desktop tests, including compact layouts, multiple windows and scalp-limit warnings. |
 | Scalp monetary risk | `decision_scalp_qty_multiplier` reduces the risk percentage; final submission caps it again. 0.30% × 0.30 = 0.09%. Fixed sizing receives the ratio once. |
 | Hedging account | Decision and final submission require MT5 retail hedging mode, using `margin_mode`, not demo/live `trade_mode`. Explicit broker prohibition also blocks entry. |
 | Pin Bar entry | The immediately following completed candle must close beyond the trigger without invalidating the structural stop. The trigger and R contract travel with the signal. |
@@ -39,8 +40,38 @@ passed **34 tests** and `flutter analyze` reported no issues. Django system
 checks and `makemigrations --check --dry-run` passed, with no missing migrations.
 A final rerun of all **71 tests** covering Gold, overlays, live risk, pipeline
 replay and scalper contracts passed with both late fixes included.
-The latest published Safety CI is green at `05668d54`; these additional working
-tree changes have been validated locally and have not been pushed.
+Those results describe the original audit validation. The continuation below
+has separate local validation and has not been pushed.
+
+## Gold and flip follow-up
+
+- Gold auto-selection ranks Momentum Ignition, Breakout + Retest and Trend
+  Pullback for high volatility, ATR expansion or a strong higher-timeframe trend.
+  Moderate volatility favors Trend Pullback, Breakout + Retest and Pin Bar.
+  Quiet conditions retain Pin Bar, Doji Breakout and Trend Pullback even when
+  the required directional context is available. The configured strategy pool
+  still limits selection, and wide spreads retain the precise-setup preference.
+- Trend Pullback, Breakout + Retest and Doji Breakout now emit their entry price
+  and configured target R multiple. These fields pass through the signal and
+  decision to final execution, where targets use the current submission quote
+  and retain the structural stop. Broker price rounding still applies.
+- A qualifying high-score reversal takes precedence over an opposite scalp.
+  Lower scores and scalper cooldowns still use the validated scalp path.
+  A later daily-entry or trade-interval rejection cannot close the primary.
+- The admin diagnostics summarize entry-rejection reasons over the existing
+  24-hour window. The shared selector's Harami caller now supplies its analyzed
+  higher-timeframe regime without referencing an undefined variable.
+
+Continuation validation on 2026-09-15: the complete Django suite passed **314
+tests** in 269 seconds. Django system checks, `makemigrations --check --dry-run`
+and `git diff --check` passed. The full suite includes pipeline replay and the
+new selector, flip and submission-target regressions. Captured output is in
+`.runtime/continuation-full-django-tests.log`.
+
+Regression tests first reproduced the quiet-regime, wide-spread and rejected-
+replacement problems before their fixes. All execution checks use synthetic
+broker data and isolated in-memory databases. These follow-up changes remain
+uncommitted; no live/demo orders were placed.
 
 Backend validation uses isolated in-memory databases. The Gold contract fixture
 uses synthetic bid candles with completed M15/H1 context and checks entry, stop,

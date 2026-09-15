@@ -183,6 +183,29 @@ class LiveRiskTest(TestCase):
 
     # Position sizing and broker specifications.
 
+    def test_strategy_target_reprices_at_submission_with_structural_stop_preserved(self):
+        self._risk_day(Decimal("10000"))
+        for side, stop in (("buy", Decimal("99")), ("sell", Decimal("101"))):
+            for rr in (Decimal("1.8"), Decimal("2")):
+                with self.subTest(side=side, rr=rr):
+                    bot = self._bot(suffix=f"target-{side}-{rr}")
+                    signal = Signal.objects.create(
+                        bot=bot, source="scalper_engine", symbol=self.asset.symbol,
+                        direction=side, timeframe="5m", dedupe_key=f"target-{side}-{rr}",
+                    )
+                    decision = Decision.objects.create(
+                        bot=bot, signal=signal, action="open", score=1,
+                        params={"entry": "100.01", "target_rr": str(rr)},
+                    )
+                    order = self._order(bot, side=side, sl=stop, tp=Decimal("102") if side == "buy" else Decimal("98"), decision=decision)
+                    result = self._enforce(order)
+                    quote = self.tick.ask if side == "buy" else self.tick.bid
+                    sign = 1 if side == "buy" else -1
+                    self.assertEqual(result.entry_price, quote)
+                    self.assertEqual(order.sl, stop)
+                    expected_target = (quote + sign * abs(quote - stop) * rr).quantize(Decimal("0.01"))
+                    self.assertEqual(order.tp, expected_target)
+
     def test_fixed_lot_uses_requested_default_quantity(self):
         bot = self._bot(
             position_sizing_mode="fixed",
