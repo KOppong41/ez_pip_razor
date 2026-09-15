@@ -104,6 +104,44 @@ class MT5ConnectorTest(TestCase):
         api.history_deals_get.return_value = ()
         api.last_error.return_value = (0, "ok")
 
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    def test_flip_preflight_runs_order_check_without_sending_or_resizing(self, risk, api):
+        self._configure_api(api)
+        primary = BrokerPosition.objects.create(
+            bot=self.bot, broker_account=self.account, symbol=self.order.symbol,
+            broker_position_ticket=333, ownership="ez_trade", side="sell",
+            volume=Decimal(".1"), open_price=Decimal("1.1"), status="open",
+        )
+        api.positions_get.return_value = (SimpleNamespace(ticket=333, symbol=self.order.symbol, type=1, volume=.1),)
+        original_qty = Decimal(str(self.order.qty))
+        def size_order(order, *args, **kwargs):
+            order.qty = Decimal(".02")
+            order.save(update_fields=["qty"])
+            return self._risk_result()
+        risk.side_effect = size_order
+        connector = MT5Connector()
+        with (
+            patch.object(connector, "_login_from_order"),
+            patch.object(connector, "_ensure_symbol"),
+            patch.object(connector, "_sync_broker_exposure_snapshot"),
+            patch("execution.connectors.mt5._check_ready"),
+        ):
+            connector.preflight_flip(self.order, [primary])
+            api.order_check.assert_called_once()
+            api.order_send.assert_not_called()
+            self.order.refresh_from_db()
+            self.assertEqual((self.order.status, self.order.qty), ("new", original_qty))
+            self.assertIsNone(self.order.risk_reserved_at)
+            self.assertFalse(self.order.attempts.exists())
+            self.assertEqual(risk.call_args.kwargs["replacing_position_ids"], (primary.pk,))
+            api.order_check.return_value = SimpleNamespace(retcode=10019, comment="No money")
+            with self.assertRaisesRegex(ConnectorError, "order_check rejected"):
+                connector.preflight_flip(self.order, [primary])
+        api.order_send.assert_not_called()
+        self.order.refresh_from_db()
+        self.assertEqual((self.order.status, self.order.qty), ("new", original_qty))
+
     def test_broker_stop_distance_is_checked_per_leg_from_entry(self):
         sl, tp = _adjust_stops_to_broker_minimum(
             side="buy",

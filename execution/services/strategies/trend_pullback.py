@@ -7,6 +7,7 @@ from typing import List
 from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
 from execution.services.indicators import fractals
+from execution.services.strategies.scoring import above_minimum, proximity, score_setup
 
 
 @dataclass
@@ -161,11 +162,14 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
                 },
             )
 
-    confidence = min(
-        Decimal("1"),
-        max(Decimal("0"), (abs(slope_pct) / cfg.min_trend_slope_pct) * Decimal("0.5"))
-        + max(Decimal("0"), (atr_pct - cfg.min_atr_pct) / (cfg.min_atr_pct + Decimal("0.000001"))) * Decimal("0.2")
-        + max(Decimal("0"), (cfg.pullback_atr_multiple - (dist_price / atr_price)) * Decimal("0.3")),
+    confidence, score_components = score_setup(
+        {
+            "trend": above_minimum(abs(slope_pct), cfg.min_trend_slope_pct),
+            "atr": above_minimum(atr_pct, cfg.min_atr_pct),
+            "pullback": proximity(dist_price / atr_price, cfg.pullback_atr_multiple),
+            "rejection": above_minimum(rejection, cfg.wick_rejection_ratio),
+        },
+        {"trend": "0.30", "atr": "0.15", "pullback": "0.30", "rejection": "0.25"},
     )
 
     if bull_trend:
@@ -184,6 +188,8 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
             target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
+                "score_components": score_components,
+                "score_contract": "setup_quality_v1",
                 "slope_pct": float(slope_pct),
                 "atr_pct": float(atr_pct),
                 "pullback_atr": float(dist_price / atr_price),
@@ -206,6 +212,8 @@ def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = 
             target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
+                "score_components": score_components,
+                "score_contract": "setup_quality_v1",
                 "slope_pct": float(abs(slope_pct)),
                 "atr_pct": float(atr_pct),
                 "pullback_atr": float(dist_price / atr_price),

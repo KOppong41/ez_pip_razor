@@ -104,6 +104,7 @@ def enforce_pretrade_risk(
     account_info,
     *,
     broker_positions=None,
+    replacing_position_ids=(),
 ) -> PreTradeRiskResult:
     """Apply all final bot/account checks immediately before MT5 submission."""
     locked_order = (
@@ -225,6 +226,13 @@ def enforce_pretrade_risk(
         ownership="ez_trade",
         status="open",
     )
+    if replacing_position_ids:
+        # Internal preflight projection only. Never infer exemptions from
+        # signal/decision JSON, and ordinary final submission passes no IDs.
+        group = owned_positions.filter(pk__in=replacing_position_ids, bot=bot, symbol=locked_order.symbol)
+        if group.count() != len(set(replacing_position_ids)):
+            reject("FLIP_GROUP_CHANGED", "Replacement group no longer matches owned exposure")
+        owned_positions = owned_positions.exclude(pk__in=replacing_position_ids)
     reservation_cutoff = now - timedelta(minutes=5)
     reservations = Order.objects.filter(
         broker_account=account,
@@ -322,6 +330,8 @@ def enforce_pretrade_risk(
         reject("INVALID_PROTECTION", "BUY protection is on the wrong side of the market")
     if locked_order.side == "sell" and not (stop > entry and (take_profit is None or take_profit < entry)):
         reject("INVALID_PROTECTION", "SELL protection is on the wrong side of the market")
+    if bot.engine_mode == "scalper" and abs(entry - stop) < (ask - bid) * 2:
+        reject("SCALPER_STOP_BELOW_SPREAD", "Structural stop is less than twice the current spread")
     stops_level = _decimal(getattr(symbol_info, "trade_stops_level", None) or getattr(symbol_info, "stops_level", 0))
     if stops_level * point > 0 and abs(entry - stop) < stops_level * point:
         reject("BROKER_STOP_DISTANCE", "Stop loss violates the broker stop-distance rule")

@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
+from execution.services.strategies.scoring import above_minimum, proximity, score_setup
 
 
 @dataclass
@@ -32,12 +33,7 @@ def _quality_above_minimum(
     *,
     strong_multiple: Decimal = Decimal("3"),
 ) -> Decimal:
-    """Return 0.5 at the validity threshold and 1 only when clearly stronger."""
-    if minimum <= 0 or value < minimum:
-        return Decimal("0")
-    span = minimum * (strong_multiple - Decimal("1"))
-    progress = min(Decimal("1"), (value - minimum) / span) if span > 0 else Decimal("1")
-    return Decimal("0.5") + progress * Decimal("0.5")
+    return above_minimum(value, minimum, strong_multiple=strong_multiple)
 
 
 def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None = None) -> EngineDecision:
@@ -117,10 +113,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
     )
 
     def setup_quality(level_distance: Decimal, tolerance: Decimal):
-        retest_quality = max(
-            Decimal("0"),
-            Decimal("1") - level_distance / tolerance,
-        ) if tolerance > 0 else Decimal("1")
+        retest_quality = proximity(level_distance, tolerance)
         components = {
             "range": range_quality,
             "breakout_body": body_quality,
@@ -128,15 +121,10 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             "extension": extension_quality,
             "retest": retest_quality,
         }
-        score = min(
-            Decimal("1"),
-            range_quality * Decimal("0.20")
-            + body_quality * Decimal("0.25")
-            + volume_quality * Decimal("0.15")
-            + extension_quality * Decimal("0.20")
-            + retest_quality * Decimal("0.20"),
+        return score_setup(
+            components,
+            {"range": "0.20", "breakout_body": "0.25", "volume": "0.15", "extension": "0.20", "retest": "0.20"},
         )
-        return score, {key: float(value) for key, value in components.items()}
 
     if broke_up:
         # Retest current bar into old range high
@@ -166,6 +154,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
                 "breakout_volume": int(prev["tick_volume"]),
                 "breakout_extension_pct": float(breakout_extension),
                 "score_components": score_components,
+                "score_contract": "setup_quality_v1",
             },
         )
 
@@ -196,6 +185,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
                 "breakout_volume": int(prev["tick_volume"]),
                 "breakout_extension_pct": float(breakout_extension),
                 "score_components": score_components,
+                "score_contract": "setup_quality_v1",
             },
         )
 

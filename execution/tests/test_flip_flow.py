@@ -43,11 +43,12 @@ class FlipFlowTests(TestCase):
     def _signal(self, direction: str, score: float, key: str):
         return Signal.objects.create(
             bot=self.bot,
-            source="test",
+            source="engine_v1",
             symbol="EURUSDm",
             timeframe="5m",
             direction=direction,
-            payload={},
+            payload={"score": score, "sl": "1.09" if direction == "buy" else "1.11",
+                     "tp": "1.12" if direction == "buy" else "1.08"},
             dedupe_key=key,
         )
 
@@ -64,7 +65,7 @@ class FlipFlowTests(TestCase):
             status="open",
         )
 
-    @patch("execution.services.positions.dispatch_place_order")
+    @patch("execution.services.brokers.dispatch_place_order")
     def test_flip_creates_close_decision_and_order(self, dispatch_place_order):
         Position.objects.create(
             broker_account=self.account,
@@ -83,9 +84,19 @@ class FlipFlowTests(TestCase):
 
         dispatch_place_order.side_effect = confirm_close
         sig = self._signal("buy", score=1.0, key="flip-1")
-        # inject score via payload->StrategyDecision naive uses 0.5 default; override by naive? For test set BotConfig? Instead monkey: set direction -> naive score default 0.5 enough due to threshold 0.2
         decision = make_decision_from_signal(sig)
         self.assertEqual(decision.action, "open")
+        self.assertEqual(decision.params["flip_state"], "pending")
+        dispatch_place_order.assert_not_called()
+        self.assertFalse(Decision.objects.filter(action="close").exists())
+
+        # The selected replacement is created before dispatch can close anything.
+        from execution.connectors.paper import PaperConnector
+        from execution.services.fanout import fanout_orders
+        replacement, _ = fanout_orders(decision, None)[0]
+        PaperConnector().place_order(replacement)
+        decision.refresh_from_db()
+        self.assertEqual(decision.params["flip_state"], "completed")
 
         close_decisions = Decision.objects.filter(action="close", reason="flip_close")
         self.assertEqual(close_decisions.count(), 1)
@@ -93,7 +104,7 @@ class FlipFlowTests(TestCase):
         self.assertEqual(close_decision.params.get("position_id"), Position.objects.first().id)
 
         close_orders = Order.objects.filter(symbol="EURUSDm", side="buy")
-        self.assertEqual(close_orders.count(), 1)
+        self.assertEqual(close_orders.filter(intent="exit").count(), 1)
 
     @override_settings(DECISION_MAX_FLIPS_PER_DAY=1)
     def test_flip_blocked_by_daily_cap(self):
@@ -116,12 +127,17 @@ class FlipFlowTests(TestCase):
 
         sig = self._signal("buy", score=1.0, key="flip-2")
         decision = make_decision_from_signal(sig)
+        from execution.connectors.paper import PaperConnector
+        from execution.services.fanout import fanout_orders
+        PaperConnector().place_order(fanout_orders(decision, None)[0][0])
+        decision.refresh_from_db()
         self.assertEqual(decision.action, "ignore")
-        self.assertEqual(decision.reason, "flip_close_unconfirmed")
+        self.assertEqual(decision.reason, "flip_preflight_rejected")
+        self.assertEqual(decision.params["flip_error"], "flip_daily_cap")
         # No new flip decisions/orders because cap hit
         self.assertEqual(Decision.objects.filter(action="close", reason="flip_close").count(), 1)
 
-    @patch("execution.services.positions.prepare_flip_decisions")
+    @patch("execution.services.flip.execute_flip")
     def test_rejected_replacement_does_not_close_primary(self, prepare_flip):
         from django.utils import timezone
 

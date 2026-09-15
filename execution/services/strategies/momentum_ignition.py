@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
+from execution.services.strategies.scoring import score_setup
 
 
 @dataclass
@@ -91,13 +92,10 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             "pullback": pullback_quality,
             "volume": volume_quality,
         }
-        score = min(
-            Decimal("1"),
-            impulse_quality * Decimal("0.45")
-            + pullback_quality * Decimal("0.35")
-            + volume_quality * Decimal("0.20"),
+        return score_setup(
+            {key: (value - Decimal("0.5")) * 2 for key, value in components.items()},
+            {"impulse": "0.45", "pullback": "0.35", "volume": "0.20"},
         )
-        return score, {key: float(value) for key, value in components.items()}
     if impulse_change >= cfg.min_impulse_pct:
         # Bullish impulse, seek shallow pullback (last close not below 40% retrace of impulse)
         retrace = (impulse_high - last["close"])
@@ -132,6 +130,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),
                 "score_components": score_components,
+                "score_contract": "setup_quality_v1",
             },
         )
 
@@ -169,6 +168,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),
                 "score_components": score_components,
+                "score_contract": "setup_quality_v1",
             },
         )
 

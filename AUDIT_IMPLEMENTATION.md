@@ -40,8 +40,8 @@ passed **34 tests** and `flutter analyze` reported no issues. Django system
 checks and `makemigrations --check --dry-run` passed, with no missing migrations.
 A final rerun of all **71 tests** covering Gold, overlays, live risk, pipeline
 replay and scalper contracts passed with both late fixes included.
-Those results describe the original audit validation. The continuation below
-has separate local validation and has not been pushed.
+Those results describe the original audit validation. The follow-up passes
+below have separate local validation.
 
 ## Gold and flip follow-up
 
@@ -70,8 +70,59 @@ new selector, flip and submission-target regressions. Captured output is in
 
 Regression tests first reproduced the quiet-regime, wide-spread and rejected-
 replacement problems before their fixes. All execution checks use synthetic
-broker data and isolated in-memory databases. These follow-up changes remain
-uncommitted; no live/demo orders were placed.
+broker data and isolated in-memory databases. These follow-up changes were
+committed as `62db999` and published in PR #2; no live/demo orders were placed.
+
+## Score contract and deferred reversal workflow
+
+The next review pass standardizes all five Gold detectors on
+`setup_quality_v1`. Each valid setup starts at 0.50. Quality components measure
+bounded progress beyond each setup's requirements; their weighted average
+adds at most another 0.50. Trend Pullback assigns 30% of its quality weight to
+trend strength, so even an arbitrarily strong slope cannot produce a perfect
+score by itself. Pin Bar now uses range, wick/body, level, trend and confirmation
+quality instead of candle range alone. Momentum, Breakout and Doji use the same
+aggregation contract and publish their component scores in run diagnostics.
+
+These scores express observed setup quality, not calibrated win probabilities.
+Historical or forward-demo outcomes are still required for empirical calibration.
+Synthetic integration fixtures exercise simultaneous valid Gold setups and the
+same candidate ranking function used by the live allocator.
+
+Flip execution now occurs only when the selected replacement order is
+dispatched. Signal evaluation records its intended position IDs and performs no
+closes. The replacement must pass fanout, local guards, and an MT5 dry run of
+the normal entry path, including final risk and `order_check`, before any close.
+The dry run projects capacity without the exact owned replacement group, keeps
+current free margin as a conservative constraint, and rolls back its database
+changes. It sends no order and cannot resize fixed sizing twice.
+
+The serialized executor closes a linked opposite-scalp child first, then its
+primary, confirms the group is flat, and reruns market-sensitive validation
+without any exposure exemptions before sending the full-size replacement.
+Manual, unrelated or changed groups are rejected. The workflow stores close
+order IDs and phase history, reconciles ambiguous closes on retry, and counts
+a primary/child group as one reversal for the daily flip cap. A definitive
+failure after flattening records `flip_reverse_aborted_after_close`; ambiguous
+reverse submissions remain pending for reconciliation. Paper simulation and
+isolated replay use the deferred workflow as well.
+
+Validation for this pass on 2026-09-15: all **328 Django tests passed** in
+167 seconds, including the strategy, connector, preflight and replay tests.
+System checks, `makemigrations --check --dry-run`, and `git diff --check` passed.
+Captured output: `.runtime/score-flip-final-tests.log`. Gold risk, stop envelope,
+timeframes, five-strategy pool, hybrid exits and trading windows are unchanged.
+Relative-volume tuning, configured-spread selection and historical news replay
+are deferred to the later refinement pass described in the review.
+
+Operational status: a requested Safety CI retry still failed before either job
+started because GitHub reports an account billing lock. That external issue
+must be resolved before protected CI can pass and PR #2 can be merged. Once
+merged, verify the personal bot's frozen preset explicitly before starting the
+separate forward-demo baseline with opposite scalp disabled. Review score
+distributions, selection/rejection frequency and realized per-strategy outcomes
+before a separate scalp A/B trial. This implementation places no demo/live orders
+and does not change the personal bot's settings.
 
 Backend validation uses isolated in-memory databases. The Gold contract fixture
 uses synthetic bid candles with completed M15/H1 context and checks entry, stop,

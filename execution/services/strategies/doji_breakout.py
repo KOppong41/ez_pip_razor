@@ -6,6 +6,7 @@ from typing import List, Optional, Literal
 
 from execution.services.marketdata import Candle
 from execution.services.engine_types import EngineDecision
+from execution.services.strategies.scoring import score_setup
 
 PinType = Literal["bullish", "bearish"]
 
@@ -174,16 +175,10 @@ def _quality_score(
         "trend": float(trend_quality),
         "breakout_candle": float(candle_quality),
     }
-    score = min(
-        Decimal("1"),
-        doji_quality * Decimal("0.20")
-        + wick_quality * Decimal("0.15")
-        + level_quality * Decimal("0.20")
-        + displacement_quality * Decimal("0.25")
-        + trend_quality * Decimal("0.10")
-        + candle_quality * Decimal("0.10"),
+    return score_setup(
+        components,
+        {"doji": "0.20", "wick": "0.15", "level": "0.20", "displacement": "0.25", "trend": "0.10", "breakout_candle": "0.10"},
     )
-    return score, components
 
 
 def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBreakoutConfig] = None) -> EngineDecision:
@@ -276,6 +271,7 @@ def run_doji_breakout(symbol: str, candles: List[Candle], cfg: Optional[DojiBrea
         metadata={
             "confidence": float(score),
             "score_components": score_components,
+            "score_contract": "setup_quality_v1",
             "atr_pct": float(atr_pct),
             "level_tolerance_atr": float(cfg.wick_level_tolerance_atr),
             "breakout_buffer_atr": float(cfg.breakout_buffer_atr),

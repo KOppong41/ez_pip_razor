@@ -193,6 +193,7 @@ def detect_position_conflict(
             action="flip",
             reason="flip_triggered",
             score=score,
+            params={"flip_position_ids": [position.pk for position in positions]},
         )
 
     if allow_scalp:
@@ -223,6 +224,7 @@ def detect_position_conflict(
             action="flip",
             reason="flip_triggered",
             score=score,
+            params={"flip_position_ids": [position.pk for position in positions]},
         )
 
     return StrategyDecision(
@@ -539,6 +541,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
 
     # 2) Risk check (positions / allowed_symbols)
     scalper_ctx = None
+    conflict_hint = None
     if proposed.action == "open":
         if bot:
             if scalper_cfg and scalper_cfg.risk:
@@ -563,6 +566,21 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             else count_open_positions(symbol=signal.symbol)
         )
         open_total = count_total_open_positions_for_bot(bot) if bot else count_total_open_positions()
+        flip_threshold = max(
+            float(runtime_cfg.decision_flip_score),
+            float(scalper_cfg.flip_settings.min_score) if scalper_cfg and scalper_cfg.flip_settings else 0,
+        )
+        if bot and proposed.score >= flip_threshold:
+            conflict_hint = detect_position_conflict(
+                bot, signal.symbol, signal.direction, proposed.score,
+                runtime_cfg=runtime_cfg, scalper_cfg=scalper_cfg, scalper_ctx=scalper_ctx,
+            )
+            if conflict_hint and conflict_hint.action == "flip":
+                # Evaluate replacement capacity; dispatch validates the exact
+                # group and final execution requires its confirmed closure.
+                replacing = len(conflict_hint.params.get("flip_position_ids", []))
+                open_symbol = max(0, open_symbol - replacing)
+                open_total = max(0, open_total - replacing)
         ok, risk_reason = check_risk(signal, open_symbol, open_total, cfg, scalper_ctx=scalper_ctx)
 
         if not ok:
@@ -597,7 +615,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     # 2c) Position conflict guardrail (no stacking/hedging unless enabled; optional flip)
     flip_info = None
     if proposed.action == "open" and bot:
-        conflict = detect_position_conflict(
+        conflict = conflict_hint or detect_position_conflict(
             bot=bot,
             symbol=signal.symbol,
             new_direction=signal.direction,
@@ -614,6 +632,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
                     "symbol": signal.symbol,
                     "direction": signal.direction,
                     "score": proposed.score,
+                    "flip_position_ids": conflict.params.get("flip_position_ids", []),
                 }
                 _log_scalper_trace(signal, "conflict", "flip", conflict.reason)
             elif conflict.action == "open" and conflict.reason == "opposite_scalp":
@@ -682,22 +701,11 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     if is_scalper_bot:
         _log_scalper_trace(signal, "final", decision.action, decision.reason, {"score": decision.score})
 
-    # Optional flip handling: create a paired close decision for the existing position.
+    # Signal evaluation is read-only with respect to broker exposure. Only the
+    # selected order's serialized dispatch may preflight and execute a flip.
     if flip_info and decision.action == "open":
-        from execution.services.positions import prepare_flip_decisions
-        close_confirmed = prepare_flip_decisions(decision, flip_info)
-        if close_confirmed:
-            params = dict(decision.params or {})
-            params["flip_state"] = "close_confirmed"
-            decision.params = params
-            decision.save(update_fields=["params"])
-            _record_scalper_flip(bot, flip_info.get("symbol"))
-        else:
-            params = dict(decision.params or {})
-            params["flip_state"] = "close_unconfirmed"
-            decision.action = "ignore"
-            decision.reason = "flip_close_unconfirmed"
-            decision.params = params
-            decision.save(update_fields=["action", "reason", "params"])
+        decision.params = {**decision.params, "flip_requested": True, "flip_state": "pending",
+                           "flip_position_ids": flip_info["flip_position_ids"]}
+        decision.save(update_fields=["params"])
 
     return decision

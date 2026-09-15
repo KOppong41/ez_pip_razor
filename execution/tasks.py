@@ -1308,6 +1308,16 @@ def validate_broker_configs_task():
     return {"issues": issues}
 
 
+def _rank_scalper_candidates(candidates):
+    best_by_bot = {}
+    for candidate in candidates:
+        bot_id = int(candidate["bot_id"])
+        existing = best_by_bot.get(bot_id)
+        if existing is None or float(candidate["score"]) > float(existing["score"]):
+            best_by_bot[bot_id] = candidate
+    return sorted(best_by_bot.values(), key=lambda candidate: (-float(candidate["score"]), int(candidate["bot_id"])))
+
+
 def _dispatch_scalper_candidate(decision: Decision, strategy_name: str) -> dict:
     """Create and queue one ranked scalper candidate with local broker guards."""
     orders_placed = []
@@ -1538,20 +1548,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
                 candidates.append(candidate)
         dispatched += 1
 
-    best_by_bot = {}
-    for candidate in candidates:
-        bot_id = int(candidate["bot_id"])
-        existing = best_by_bot.get(bot_id)
-        if existing is None or float(candidate["score"]) > float(existing["score"]):
-            best_by_bot[bot_id] = candidate
-
-    ranked = sorted(
-        best_by_bot.values(),
-        key=lambda candidate: (
-            -float(candidate["score"]),
-            int(candidate["bot_id"]),
-        ),
-    )
+    ranked = _rank_scalper_candidates(candidates)
     slots_by_account = {}
     slot_winners_by_account = defaultdict(list)
     awarded = []
@@ -1562,7 +1559,9 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             account = BrokerAccount.objects.get(pk=account_id)
             slots_by_account[account_id] = _account_entry_slots(account)
         available = slots_by_account[account_id]
-        if available == 0:
+        decision = Decision.objects.select_related("signal", "bot__broker_account").get(pk=int(candidate["decision_id"]))
+        replacing_group = bool(decision.params.get("flip_requested"))
+        if available == 0 and not replacing_group:
             slot_losses.append(candidate)
             winner_ids = slot_winners_by_account[account_id]
             lost_to_another_bot = bool(winner_ids)
@@ -1583,10 +1582,6 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             )
             continue
 
-        decision = Decision.objects.select_related(
-            "signal",
-            "bot__broker_account",
-        ).get(pk=int(candidate["decision_id"]))
         dispatch_result = _dispatch_scalper_candidate(
             decision,
             str(candidate["strategy"]),
@@ -1594,7 +1589,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
         if dispatch_result["orders"]:
             awarded.append(candidate)
             slot_winners_by_account[account_id].append(int(candidate["bot_id"]))
-            if available is not None:
+            if available is not None and not replacing_group:
                 slots_by_account[account_id] = max(0, available - 1)
             _update_scalper_run_allocation(
                 candidate.get("run_log_id"),
