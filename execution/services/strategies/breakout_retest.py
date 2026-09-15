@@ -7,6 +7,7 @@ from typing import List, Tuple
 from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
 from execution.services.strategies.scoring import above_minimum, proximity, score_setup
+from execution.services.strategies.volume import relative_tick_volume
 
 
 @dataclass
@@ -17,6 +18,9 @@ class BreakoutRetestConfig:
     min_breakout_body_pct: Decimal = Decimal("0.0003")
     breakout_extension_pct: Decimal = Decimal("0.0003")
     min_breakout_volume: int = 80
+    # A positive relative threshold replaces the absolute gate and score.
+    min_relative_volume: Decimal = Decimal("0")
+    volume_lookback: int = 20
     rr: Decimal = Decimal("2")
 
 
@@ -75,16 +79,29 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             metadata={"reason": "small_body", "body_pct": float(prev_body_pct)},
         )
 
-    if (broke_up or broke_down) and prev["tick_volume"] < cfg.min_breakout_volume:
+    if not broke_up and not broke_down:
+        return EngineDecision(action="skip", reason="breakout_retest_no_break", strategy="breakout_retest")
+
+    volume_metadata = {}
+    volume_value = Decimal("0")
+    volume_minimum = Decimal(str(cfg.min_breakout_volume))
+    if cfg.min_relative_volume > 0:
+        try:
+            volume_value, volume_metadata = relative_tick_volume(candles, cfg.volume_lookback)
+        except ValueError as exc:
+            return EngineDecision(action="skip", reason="breakout_retest_volume_unavailable",
+                                  strategy="breakout_retest", metadata={"reason": str(exc)})
+        volume_minimum = cfg.min_relative_volume
+        volume_metadata["min_relative_volume"] = float(volume_minimum)
+    else:
+        volume_value = Decimal(str(prev.get("tick_volume", 0)))
+    if volume_value < volume_minimum:
         return EngineDecision(
             action="skip",
             reason="breakout_retest_low_volume",
             strategy="breakout_retest",
-            metadata={"reason": "low_volume", "volume": int(prev["tick_volume"])},
+            metadata={"reason": "low_volume", "volume": int(prev["tick_volume"]), **volume_metadata},
         )
-
-    if not broke_up and not broke_down:
-        return EngineDecision(action="skip", reason="breakout_retest_no_break", strategy="breakout_retest")
 
     range_width_pct = range_width / range_low if range_low else Decimal("0")
     range_quality = _quality_above_minimum(
@@ -96,8 +113,8 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
         cfg.min_breakout_body_pct,
     )
     volume_quality = _quality_above_minimum(
-        Decimal(str(prev["tick_volume"])),
-        Decimal(str(cfg.min_breakout_volume)),
+        volume_value,
+        volume_minimum,
         strong_multiple=Decimal("2"),
     )
     breakout_extension = (
@@ -152,6 +169,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),
+                **volume_metadata,
                 "breakout_extension_pct": float(breakout_extension),
                 "score_components": score_components,
                 "score_contract": "setup_quality_v1",
@@ -183,6 +201,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),
+                **volume_metadata,
                 "breakout_extension_pct": float(breakout_extension),
                 "score_components": score_components,
                 "score_contract": "setup_quality_v1",

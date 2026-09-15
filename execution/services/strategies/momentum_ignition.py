@@ -7,6 +7,7 @@ from typing import List, Tuple
 from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
 from execution.services.strategies.scoring import score_setup
+from execution.services.strategies.volume import relative_tick_volume
 
 
 @dataclass
@@ -17,6 +18,9 @@ class MomentumIgnitionConfig:
     # Allow shallower pullbacks plus a buffer so continuations trigger more often.
     pullback_ratio: Decimal = Decimal("0.75")     # pullback must be <= 75% of impulse
     min_tick_volume: int = 80
+    # A positive relative threshold replaces the absolute gate and score.
+    min_relative_volume: Decimal = Decimal("0")
+    volume_lookback: int = 20
     # Entry eligibility is controlled by the bot's visible trading schedule.
     session_hours: Tuple[Tuple[int, int], ...] = ()
     rr: Decimal = Decimal("2.2")
@@ -54,12 +58,25 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             )
 
     prev = candles[-2]
-    if prev["tick_volume"] < cfg.min_tick_volume:
+    volume_metadata = {}
+    volume_value = Decimal("0")
+    volume_minimum = Decimal(str(cfg.min_tick_volume))
+    if cfg.min_relative_volume > 0:
+        try:
+            volume_value, volume_metadata = relative_tick_volume(candles, cfg.volume_lookback)
+        except ValueError as exc:
+            return EngineDecision(action="skip", reason="momentum_ignition_volume_unavailable",
+                                  strategy="momentum_ignition", metadata={"reason": str(exc)})
+        volume_minimum = cfg.min_relative_volume
+        volume_metadata["min_relative_volume"] = float(volume_minimum)
+    else:
+        volume_value = Decimal(str(prev.get("tick_volume", 0)))
+    if volume_value < volume_minimum:
         return EngineDecision(
             action="skip",
             reason="momentum_ignition_low_volume",
             strategy="momentum_ignition",
-            metadata={"reason": "low_volume", "volume": int(prev["tick_volume"])},
+            metadata={"reason": "low_volume", "volume": int(prev["tick_volume"]), **volume_metadata},
         )
 
     impulse_range = impulse_high - impulse_low
@@ -82,8 +99,8 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             Decimal("1"),
             max(
                 Decimal("0"),
-                (Decimal(str(prev["tick_volume"])) - Decimal(str(cfg.min_tick_volume)))
-                / max(Decimal(str(cfg.min_tick_volume)), Decimal("1")),
+                (volume_value - volume_minimum)
+                / max(volume_minimum, Decimal("0.00000001")),
             ),
         )
         volume_quality = Decimal("0.5") + volume_progress * Decimal("0.5")
@@ -129,6 +146,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 "impulse_pct": float(impulse_change),
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),
+                **volume_metadata,
                 "score_components": score_components,
                 "score_contract": "setup_quality_v1",
             },
@@ -167,6 +185,7 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
                 "impulse_pct": float(abs(impulse_change)),
                 "pullback_pct": float(retrace / impulse_range) if impulse_range else 0.0,
                 "impulse_volume": int(prev["tick_volume"]),
+                **volume_metadata,
                 "score_components": score_components,
                 "score_contract": "setup_quality_v1",
             },

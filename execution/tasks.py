@@ -39,7 +39,7 @@ from execution.services.daily_risk import (
     daily_equity_change_pcts,
     update_account_risk_day,
 )
-from execution.services.ai_strategy_selector import select_ai_strategies
+from execution.services.ai_strategy_selector import effective_spread_allowance, select_ai_strategies
 from execution.services.engine import run_engine_on_candles
 from execution.services.fanout import fanout_orders
 from execution.services.marketdata import get_candles_for_account
@@ -1993,6 +1993,16 @@ def trade_scalper_strategies_for_bot(
     # largest supplies the dominant regime. Gold uses M15 and H1 above M5.
     from execution.services.higher_timeframe_context import analyze_context
     symbol_config = scalper_cfg.resolve_symbol(symbol)
+    allowed_spread_price = effective_spread_allowance(
+        bot, symbol_config, point=broker_point,
+        market_price=(Decimal(str(tick_snapshot["bid"])) + Decimal(str(tick_snapshot["ask"]))) / 2,
+        digits=getattr(broker_constraints, "digits", None), atr=entry_atr_points,
+    )
+    strategy_context["allowed_spread_price"] = str(allowed_spread_price) if allowed_spread_price is not None else None
+    strategy_context["spread_allowance_ratio"] = (
+        float(spread_price / allowed_spread_price)
+        if spread_price is not None and allowed_spread_price else None
+    )
     try:
         htf_bias, htf_bias_detail, context_reason = analyze_context(
             symbol_config.context_timeframes if symbol_config else (),
@@ -2035,6 +2045,7 @@ def trade_scalper_strategies_for_bot(
                 "bar_range": bar_range,
                 "last_close": last_entry["close"],
                 "spread_price": spread_price,
+                "allowed_spread_price": allowed_spread_price,
                 "session": session_label,
                 "htf_bias": htf_bias,
                 "regime": htf_bias_detail.get("regime"),

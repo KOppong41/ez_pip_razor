@@ -35,7 +35,9 @@ class GoldScoreCalibrationTests(SimpleTestCase):
             min_atr_pct=atr / closes[-1], pullback_atr_multiple=Decimal("1.5"),
             wick_rejection_ratio=Decimal("4"),
         ))
-        momentum = run_momentum_ignition(candles, MomentumIgnitionConfig(min_impulse_pct=Decimal(".0002")))
+        momentum = run_momentum_ignition(candles, MomentumIgnitionConfig(
+            min_impulse_pct=Decimal(".0002"), min_relative_volume=Decimal("1"),
+        ))
         self.assertEqual((trend.action, momentum.action), ("open", "open"), (trend, momentum))
         self.assertLess(trend.score, .8)
         self.assertGreater(momentum.score, trend.score)

@@ -4,13 +4,35 @@ from decimal import Decimal
 from typing import Iterable, Mapping, Any, List
 
 from execution.utils.symbols import canonical_symbol
+from execution.services.trade_constraints import distance_to_price
 
 
 def _to_decimal(val: Any) -> Decimal:
     try:
-        return Decimal(str(val))
+        value = Decimal(str(val))
+        return value if value.is_finite() else Decimal("0")
     except Exception:
         return Decimal("0")
+
+
+def effective_spread_allowance(bot, symbol_config, *, point, market_price, digits=None, atr=None):
+    """Return the stricter enabled bot/profile spread cap in price units."""
+    point = _to_decimal(point)
+    limits = []
+    bot_limit = _to_decimal(getattr(bot, "max_spread_points", 0))
+    if point > 0 and bot_limit > 0:
+        limits.append(bot_limit * point)
+    profile_limit = _to_decimal(getattr(symbol_config, "max_spread_points", 0))
+    unit = getattr(symbol_config, "max_spread_unit", "points")
+    if profile_limit > 0 and (unit not in {"points", "pips"} or point > 0):
+        try:
+            price_limit = distance_to_price(profile_limit, unit, point, market_price=market_price,
+                                            digits=digits, atr=atr)
+            if price_limit.is_finite() and price_limit > 0:
+                limits.append(price_limit)
+        except (ValueError, ArithmeticError):
+            pass
+    return min(limits) if limits else None
 
 
 def _volatility_ratio(context: Mapping[str, Any]) -> Decimal:
@@ -45,7 +67,9 @@ def select_ai_strategies(
     canon_symbol = canonical_symbol(symbol)
 
     vol_ratio = _volatility_ratio(context)
-    spread = _to_decimal(context.get("spread_price") or context.get("spread_points") or 0)
+    spread = _to_decimal(context.get("spread_price") or 0) if canon_symbol == "XAUUSD" else _to_decimal(
+        context.get("spread_price") or context.get("spread_points") or 0
+    )
     bias = (context.get("htf_bias") or "").lower()
 
     # Session hint: bias toward breakouts during London/NY, more selective in Asia/quiet.
@@ -53,9 +77,14 @@ def select_ai_strategies(
     session_trending = session in {"london", "new_york", "us"}
     session_quiet = session in {"asia", "overnight"}
 
-    # Wide spreads relative to price? Stay selective.
+    # Near the effective execution allowance, prefer precise setups. This is
+    # selection only; execution still enforces the actual cap independently.
     wide_spread = False
-    if spread > 0 and _to_decimal(context.get("last_close") or 0) > 0:
+    allowed_spread = _to_decimal(context.get("allowed_spread_price"))
+    if canon_symbol == "XAUUSD" and allowed_spread > 0:
+        wide_spread = spread / allowed_spread >= Decimal("0.8")
+    elif canon_symbol != "XAUUSD" and spread > 0 and _to_decimal(context.get("last_close") or 0) > 0:
+        # Preserve legacy selection for callers without an effective allowance.
         spread_ratio = (spread / _to_decimal(context.get("last_close"))).quantize(Decimal("0.0000001"))
         wide_spread = spread_ratio > Decimal("0.001")  # ~10 bps spread cap
 

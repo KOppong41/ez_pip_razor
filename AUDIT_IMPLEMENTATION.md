@@ -112,8 +112,8 @@ Validation for this pass on 2026-09-15: all **328 Django tests passed** in
 System checks, `makemigrations --check --dry-run`, and `git diff --check` passed.
 Captured output: `.runtime/score-flip-final-tests.log`. Gold risk, stop envelope,
 timeframes, five-strategy pool, hybrid exits and trading windows are unchanged.
-Relative-volume tuning, configured-spread selection and historical news replay
-are deferred to the later refinement pass described in the review.
+The subsequent refinement pass below implements relative volume and configured
+spread selection. Historical news replay remains deferred.
 
 Operational status: a requested Safety CI retry still failed before either job
 started because GitHub reports an account billing lock. That external issue
@@ -123,6 +123,50 @@ separate forward-demo baseline with opposite scalp disabled. Review score
 distributions, selection/rejection frequency and realized per-strategy outcomes
 before a separate scalp A/B trial. This implementation places no demo/live orders
 and does not change the personal bot's settings.
+
+### Gold volume and spread refinements
+
+Gold Momentum Ignition and Breakout Retest now require signal tick volume to be
+at least the median of the preceding 20 candles (`min_relative_volume=1`). The
+signal candle and its pullback/retest candle are excluded from that baseline.
+The volume component of setup quality uses the same ratio, so multiplying all
+tick counts by a feed-specific constant preserves eligibility and score.
+Missing, negative or nonfinite volume, insufficient history and zero-median
+baselines produce explicit skips. Successful and low-volume decisions retain
+the ratio, median, lookback and threshold for review.
+
+Gold's shared configuration builder enables this default for existing frozen
+presets as well as new ones; legacy absolute volume fields are inactive in
+relative mode. Explicit relative-volume overrides remain available. Other
+assets retain their existing absolute-volume defaults. Both the backtest API's
+saved detector configuration and full bot replay use the same builder.
+Migration `0053_gold_relative_volume` records these defaults in Gold's asset
+recommendation, preserving explicit relative-volume overrides and all frozen
+bot settings. The catalog version becomes 4; other asset recommendations keep
+their previous values. The migration has only been run in isolated test databases.
+
+Gold's selector now treats spread as wide at 80% of the effective allowance:
+the minimum positive bot limit and active symbol-profile limit, converted to
+price using broker point/digits and the current quote. The run context records
+the allowance and ratio. Gold no longer guesses an allowance from 0.10% of
+price when configuration is unavailable. Existing execution spread checks
+remain authoritative; strategy preference does not permit execution above a
+limit. Other assets retain their existing selector behavior.
+
+This pass leaves risk, structural stops, strategy weights, timeframes, strategy
+pool, exits, trading windows and personal bot settings unchanged. No demo or
+live orders were placed. The 1x volume and 80% spread settings are transparent
+defaults, not empirical profitability calibration. Historical USD news remains
+`not_simulated`; forward-demo outcomes and a separate opposite-scalp comparison
+remain follow-up work.
+
+Validation on 2026-09-15: all **338 Django tests passed** in 173 seconds.
+System checks, `makemigrations --check --dry-run`, and whitespace checks passed.
+Coverage includes feed-scale invariance, rolling-median outlier handling,
+unusable volume data, saved Gold replay settings, the actual scalper selector
+context, spread-unit conversion and stricter bot/profile limits. The first full
+run exposed a catalog/migration mismatch; migration 0053 fixed it before this
+successful rerun. Output: `.runtime/gold-volume-spread-final-tests.log`.
 
 Backend validation uses isolated in-memory databases. The Gold contract fixture
 uses synthetic bid candles with completed M15/H1 context and checks entry, stop,
