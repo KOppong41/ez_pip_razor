@@ -62,6 +62,7 @@ class ScalperHtfSafetyTest(TestCase):
         scalper_config.return_value = SimpleNamespace(
             default_strategy_profile="profile",
             strategy_profiles={"profile": profile},
+            resolve_symbol=lambda symbol: SimpleNamespace(execution_timeframes=("1m",), context_timeframes=("15m",)),
         )
         connector = connector_class.return_value
         connector.symbol_info_for_account.return_value = SimpleNamespace(
@@ -121,6 +122,7 @@ class ScalperHtfSafetyTest(TestCase):
         scalper_config.return_value = SimpleNamespace(
             default_strategy_profile="profile",
             strategy_profiles={"profile": profile},
+            resolve_symbol=lambda symbol: SimpleNamespace(execution_timeframes=("1m",), context_timeframes=("15m",)),
         )
 
         result = trade_scalper_strategies_for_bot.run(

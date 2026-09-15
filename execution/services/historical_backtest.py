@@ -280,6 +280,12 @@ def run_simulation(bars, config, dataset, symbol, *, runner=None):
                 sign = Decimal("1") if decision.direction == "buy" else Decimal("-1")
                 fill = bar["open"] + (spread if decision.direction == "buy" else ZERO) + sign * slippage
                 sl, tp = decision.sl, decision.tp
+                if sl is not None and decision.target_rr is not None:
+                    from execution.services.entry_contract import target_at_entry
+                    try:
+                        tp = target_at_entry(decision.direction, fill, sl, decision.target_rr, decision.entry_trigger)
+                    except (ValueError, ArithmeticError):
+                        tp = None
                 if sl is None or tp is None or not (sl.is_finite() and tp.is_finite()) or not (sign * (fill - sl) > 0 and sign * (tp - fill) > 0):
                     reasons["invalid_stops_at_next_open"] += 1
                 else:

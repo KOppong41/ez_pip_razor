@@ -73,3 +73,7 @@ map.py
 celerybeat-schedule*
 control/*.exchange
 mt5_env/
+
+# C# generated output
+CTraderGateway/bin/
+CTraderGateway/obj/

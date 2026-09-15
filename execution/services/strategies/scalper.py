@@ -413,6 +413,22 @@ def scalper_entry_block_reason(signal, bot, config: ScalperConfig) -> str | None
     if payload.get("news_blocked") or is_economic_news_blackout(signal.symbol):
         return "scalper:news_blackout"
 
+    if payload.get("context_bias") in {"buy", "sell"} and payload["context_bias"] != signal.direction:
+        return "scalper:context_direction_conflict"
+
+    if symbol_cfg.key.upper() in {"XAUUSD", "GOLD"} and payload.get("sl") is not None:
+        from execution.services.entry_contract import gold_stop_reason
+        entry = _parse_decimal(payload, "entry", "close", "price")
+        if entry is not None:
+            try:
+                reason = gold_stop_reason(symbol_cfg, entry, Decimal(str(payload["sl"])),
+                    point=_parse_decimal(payload, "point"), digits=payload.get("digits"),
+                    atr=_parse_decimal(payload, "atr_price", "atr"))
+            except (ValueError, ArithmeticError):
+                return "scalper:invalid_sl"
+            if reason:
+                return reason
+
     return None
 
 
@@ -455,7 +471,9 @@ def plan_scalper_trade(signal, bot, config: ScalperConfig) -> StrategyDecision:
         )
         if hint_in_unit > symbol_cfg.sl_points_max:
             return StrategyDecision(action="ignore", reason="scalper:sl_above_max")
-        sl_points = max(sl_points, hint_in_unit)
+        if hint_in_unit < symbol_cfg.sl_points_min:
+            return StrategyDecision(action="ignore", reason="scalper:sl_below_min")
+        sl_points = hint_in_unit
     sl_points = max(symbol_cfg.sl_points_min, min(symbol_cfg.sl_points_max, sl_points))
     sl_delta = distance_to_price(
         sl_points,

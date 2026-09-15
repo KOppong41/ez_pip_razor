@@ -127,6 +127,18 @@ def is_within_trading_window(bot, now: Optional[datetime] = None) -> bool:
     if not getattr(bot, "trading_schedule_enabled", True):
         return True
 
+    windows = getattr(bot, "trading_windows", None)
+    if windows:
+        from core.trading_schedule import validate_trading_windows, window_contains
+        from django.core.exceptions import ValidationError
+        try:
+            validate_trading_windows(windows)
+            if timezone.is_naive(now):
+                now = timezone.make_aware(now, ZoneInfo(getattr(bot, "trading_timezone", "UTC")))
+            return any(window_contains(window, now) for window in windows)
+        except (ValidationError, ValueError, ZoneInfoNotFoundError):
+            return False
+
     timezone_name = getattr(bot, "trading_timezone", None) or settings.TIME_ZONE
     try:
         bot_timezone = ZoneInfo(timezone_name)

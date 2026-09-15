@@ -58,6 +58,7 @@ def recommended_bot_defaults(asset):
                 "allowed_trading_days": list(schedule.get("allowed_days") or []),
                 "trading_window_start": time.fromisoformat(schedule.get("start", "00:00")),
                 "trading_window_end": time.fromisoformat(schedule.get("end", "23:59")),
+                "trading_windows": deepcopy(schedule.get("windows") or []),
             }
         )
     return values

@@ -25,14 +25,14 @@ def model_values(model, values):
 
 def completed_context(bars, timeframe, now, source_minutes):
     """Aggregate only complete, contiguous HTF buckets; never invent candles."""
-    from execution.services.historical_backtest import TIMEFRAMES
-    minutes = TIMEFRAMES[timeframe]
+    from execution.services.higher_timeframe_context import FRAME_MINUTES
+    minutes = FRAME_MINUTES[timeframe]
     if minutes < source_minutes or minutes % source_minutes:
         return []
     groups = {}
     for bar in bars:
         stamp = bar["time"]
-        bucket = stamp.replace(minute=(stamp.minute // minutes) * minutes, second=0, microsecond=0)
+        bucket = datetime.fromtimestamp((int(stamp.timestamp()) // (minutes * 60)) * minutes * 60, tz=stamp.tzinfo)
         if bucket + timedelta(minutes=minutes) <= now:
             groups.setdefault(bucket, []).append(bar)
     result = []
@@ -75,7 +75,7 @@ class ReplayBroker:
 
     def positions_for_account(self, *args):
         from execution.models import BrokerPosition
-        return tuple(SimpleNamespace(ticket=p.broker_position_ticket, time=p.opened_at.timestamp(), volume=p.volume)
+        return tuple(SimpleNamespace(ticket=p.broker_position_ticket, time=p.opened_at.timestamp(), volume=p.volume, sl=p.sl)
                      for p in BrokerPosition.objects.filter(status="open"))
 
     def history_deals_for_account(self, *args):
@@ -89,7 +89,7 @@ class ReplayBroker:
                     self.bid if p.side == "buy" else self.bid + self.spread) for p in positions), ZERO)
         margin = sum((p.volume * self.config["margin_per_lot"] for p in positions), ZERO)
         equity = self.balance + pnl
-        return SimpleNamespace(trade_mode=0, balance=self.balance, equity=equity, margin=margin,
+        return SimpleNamespace(trade_mode=0, margin_mode=self.config["account_margin_mode"], balance=self.balance, equity=equity, margin=margin,
                                margin_free=equity - margin, margin_level=equity / margin * 100 if margin else ZERO,
                                currency=self.config["currency"])
 
@@ -102,8 +102,8 @@ class ReplayBroker:
     def candles(self, broker_account, symbol, timeframe, n_bars):
         if timeframe == self.config["timeframe"]:
             return self.bars[max(0, self.index - n_bars):self.index]
-        # At most 120 completed 15m bars are used by the live HTF gate.
-        history = self.bars[max(0, self.index - (n_bars + 1) * 15 // self.step_minutes):self.index]
+        from execution.services.higher_timeframe_context import FRAME_MINUTES
+        history = self.bars[max(0, self.index - (n_bars + 1) * FRAME_MINUTES[timeframe] // self.step_minutes):self.index]
         return completed_context(history, timeframe, self.now, self.step_minutes)[-n_bars:]
 
     def constraints(self, *args):
@@ -149,6 +149,8 @@ class ReplayBroker:
             "entry_time": self.now, "entry_price": fill, "sl": order.sl, "tp": order.tp,
             "score": order.decision.score, "strategy": order.decision.signal.payload.get("strategy"),
             "entry_reason": order.decision.reason, "original_quantity": result.volume,
+            "is_opposite_scalp": bool(order.decision.params.get("is_opposite_scalp")),
+            "primary_position_id": order.decision.params.get("primary_position_id"),
         }
         self.record(order, result.volume, fill, position.broker_position_ticket)
         return position
@@ -244,7 +246,7 @@ def replay(payload):
     setting_values.update(model_values(ExecutionSetting, snap["runtime"]))
     ExecutionSetting.objects.update_or_create(key="default", defaults=setting_values)
     settings.TESTING = False
-    settings.ECONOMIC_CALENDAR_ENABLED = snap["news_enabled"]
+    settings.ECONOMIC_CALENDAR_ENABLED = False
     sim = ReplayBroker(bars, config, snap)
     first, last = dataset["first_index"], dataset["last_index"]
     peak, max_dd, max_dd_pct = sim.balance, ZERO, ZERO
@@ -257,6 +259,7 @@ def replay(payload):
         providers = {
             "django.utils.timezone.now": lambda: sim.now,
             "execution.tasks.MT5Connector": lambda: sim,
+            "execution.connectors.mt5.MT5Connector": lambda: sim,
             "execution.tasks.get_candles_for_account": sim.candles,
             "execution.tasks.get_broker_symbol_constraints": sim.constraints,
             "execution.services.brokers.get_broker_symbol_constraints": sim.constraints,
@@ -331,16 +334,19 @@ def replay(payload):
         "first_at": bars[first]["time"], "last_at": sim.now, "protection_moves": sim.moves,
         **{key: sum((trade[key] for trade in sim.trades), ZERO) for key in ("spread_cost", "slippage_cost", "commission")},
     }
-    return json_safe({"summary": summary, "trades": sim.trades, "equity": equity,
+    from execution.services.overlay_analytics import overlay_report
+    overlay = overlay_report([{**trade, "costs": trade["spread_cost"] + trade["slippage_cost"] + trade["commission"]}
+                              for trade in sim.trades])
+    return json_safe({"summary": summary, "trades": sim.trades, "equity": equity, "opposite_scalp": overlay,
         "skip_reasons": [{"reason": reason, "count": count} for reason, count in sim.rejections.most_common()],
         "assumptions": [
             "Frozen bot, scalper profile, runtime settings and account limits; shared live strategy selection, allocation, decision, fanout, risk and exit services.",
             "The selected bot starts active on an empty simulated account; operational stops, prior loss streaks and cached market context are reset. Other bots and manual positions are not part of this dataset.",
-            "Completed bid candles only; entries at the next available open; completed contiguous 15m candles supply live HTF analysis.",
+            "Completed bid candles only; entries at the next available open; configured context timeframes are aggregated from completed contiguous candles.",
             "Constant spread, adverse slippage and margin per lot; contract size calculates profit in the selected simulation currency. No historical conversion, swap or broker liquidation model.",
             "Broker SL/TP follow the chosen same-bar policy. Trailing and partial-exit management observes each candle close; updated stops become active on subsequent candles. Tick-by-tick fills cannot be reconstructed from OHLC.",
             "Account risk days start at the first observed quote of each broker day. Price gaps remain in the dataset.",
-            "If the live economic calendar is enabled, missing archived freshness coverage blocks entries; this replay never assumes missing news means no news.",
+            "News not simulated: economic-calendar filtering is explicitly disabled for replay because archived events and freshness coverage are unavailable. Live news filtering is unchanged.",
         ]})
 
 

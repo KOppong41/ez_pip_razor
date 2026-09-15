@@ -87,6 +87,7 @@ class BotSerializer(serializers.ModelSerializer):
             "allowed_trading_days",
             "trading_window_start",
             "trading_window_end",
+            "trading_windows",
             "allow_opposite_scalp",
             "kill_switch_enabled",
             "kill_switch_max_unrealized_pct",
@@ -168,6 +169,13 @@ class BotSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if "trading_windows" in attrs:
+            from core.trading_schedule import validate_trading_windows
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            try:
+                validate_trading_windows(attrs["trading_windows"])
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({"trading_windows": exc.messages})
 
         def effective_value(field_name):
             """Use the value DRF will actually persist, including model defaults."""

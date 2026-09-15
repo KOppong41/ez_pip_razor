@@ -145,6 +145,13 @@ def detect_position_conflict(
     else:
         total_qty = sum((p.qty for p in positions), Decimal("0"))
     existing_dir = _position_direction(total_qty)
+    if live_account and bot.allow_opposite_scalp:
+        from execution.services.opposite_scalp import is_overlay
+        primary_sides = {position.side for position in positions if not is_overlay(position)}
+        if len(primary_sides) == 1:
+            existing_dir = next(iter(primary_sides))
+        else:
+            return StrategyDecision(action="ignore", reason="opposite_scalp_primary_ambiguous", score=score)
     if existing_dir is None:
         return None
 
@@ -163,6 +170,26 @@ def detect_position_conflict(
             action="ignore",
             reason="existing_position_same_direction",
         )
+
+    # An enabled overlay takes precedence over a destructive flip.
+    if allow_scalp:
+        if not live_account:
+            return StrategyDecision(action="ignore", reason="opposite_scalp_requires_hedging_account")
+        from execution.connectors.mt5 import MT5Connector
+        from execution.services.opposite_scalp import primary_for_overlay, validate_primary
+        primary = primary_for_overlay(bot, symbol, new_direction)
+        try:
+            connector = MT5Connector()
+            reason = validate_primary(bot, new_direction, primary,
+                connector.account_info_for_account(bot.broker_account),
+                connector.tick_for_account(bot.broker_account, symbol),
+                connector.positions_for_account(bot.broker_account))
+        except Exception:
+            reason = "opposite_scalp_broker_state_unavailable"
+        if reason:
+            return StrategyDecision(action="ignore", reason=reason, score=score)
+        return StrategyDecision(action="open", reason="opposite_scalp", score=score,
+            params={"is_opposite_scalp": True, "primary_position_id": primary.pk})
 
     # Opposite direction exists
     if allow_hedge:
@@ -186,15 +213,6 @@ def detect_position_conflict(
         return StrategyDecision(
             action="flip",
             reason="flip_triggered",
-            score=score,
-        )
-
-    # Otherwise, allow a small scalp in the opposite direction to keep the primary position intact.
-    if allow_scalp:
-        return StrategyDecision(
-            action="open",
-            reason="opposite_scalp",
-            params={"scalp": True},
             score=score,
         )
 
@@ -302,72 +320,48 @@ def _resolve_scalper_profile_min_score(bot: Bot | None, scalper_cfg: ScalperConf
     return float(threshold)
 
 
-def _build_scalp_params(
-    signal: Signal,
-    runtime_cfg: RuntimeConfig | None = None,
-    scalper_cfg: ScalperConfig | None = None,
-) -> dict:
-    """
-    Prepare tight SL/TP + size multiplier for an opposite-direction scalp.
-    Uses small configurable offsets around the current price.
-    """
+def _build_scalp_params(signal, runtime_cfg=None, scalper_cfg=None, *, primary=None, base_risk_pct=None):
+    from execution.services.brokers import get_broker_symbol_constraints
+    from execution.services.opposite_scalp import initial_risk
     cfg = runtime_cfg or get_runtime_config()
-    # Defaults: a quick in/out scalp
-    sl_offset = Decimal(str(cfg.decision_scalp_sl_offset))
-    tp_offset = Decimal(str(cfg.decision_scalp_tp_offset))
-    qty_multiplier = Decimal(str(cfg.decision_scalp_qty_multiplier))
-
-    price = None
-    try:
-        price = get_price(signal.bot.broker_account if signal.bot else None, signal.symbol)
-    except Exception:
-        price = None
-
-    # Respect instrument-specific minimum stop distance.
-    sl_distance = sl_offset
-    if scalper_cfg:
-        symbol_cfg = scalper_cfg.resolve_symbol(signal.symbol)
-        if symbol_cfg:
-            from execution.services.brokers import get_broker_symbol_constraints
-
-            constraints = get_broker_symbol_constraints(signal.bot.broker_account, signal.symbol)
-            point = constraints.point
-            if point is None or not point.is_finite() or point <= 0 or constraints.digits is None:
-                raise ValueError("scalper:broker_point_unavailable")
-            min_points = symbol_cfg.sl_points_min
-            if min_points and min_points > 0:
-                min_distance = distance_to_price(
-                    min_points, symbol_cfg.sl_points_unit, point,
-                    market_price=Decimal(str(price)) if price is not None else None,
-                    atr=_parse_decimal(signal.payload, "atr_price", "atr"),
-                    digits=constraints.digits,
-                )
-                min_distance = max(min_distance, (constraints.stops_level_points or Decimal("0")) * point)
-                if sl_distance < min_distance:
-                    sl_distance = min_distance
-
-    tp_distance = tp_offset
-    if tp_distance < sl_distance:
-        tp_distance = sl_distance
-
-    params = {
-        "symbol": signal.symbol,
-        "timeframe": signal.timeframe,
-        "direction": signal.direction,
-        "scalp": True,
-        "qty_multiplier": str(qty_multiplier),
+    constraints = get_broker_symbol_constraints(signal.bot.broker_account, signal.symbol)
+    point = constraints.point
+    if point is None or not point.is_finite() or point <= 0 or constraints.digits is None:
+        raise ValueError("scalper:broker_point_unavailable")
+    settings = (signal.bot.scalper_params or {}).get("opposite_scalp") or {}
+    atr = _parse_decimal(signal.payload, "atr_price", "atr")
+    atr_multiple = Decimal(str(settings.get("sl_atr_multiplier", "0.75")))
+    rr = Decimal(str(settings.get("tp_r", "1.2")))
+    multiplier = Decimal(str(cfg.decision_scalp_qty_multiplier))
+    if not all(value.is_finite() and value > 0 for value in (atr_multiple, rr, multiplier)) or multiplier > 1:
+        raise ValueError("opposite_scalp_invalid_settings")
+    distance = atr * atr_multiple if atr is not None and atr.is_finite() and atr > 0 else (
+        initial_risk(primary) * Decimal("0.5") if primary is not None else Decimal("0"))
+    if distance <= 0:
+        raise ValueError("opposite_scalp_atr_or_primary_risk_required")
+    distance = max(distance, (constraints.stops_level_points or Decimal("0")) * point)
+    price = Decimal(str(get_price(signal.bot.broker_account, signal.symbol)))
+    if not price.is_finite() or price <= 0:
+        raise ValueError("opposite_scalp_price_unavailable")
+    sign = 1 if signal.direction == "buy" else -1
+    normal_duration = scalper_cfg.time_in_trade_limit_min if scalper_cfg else 30
+    max_duration = min(int(settings.get("max_duration_minutes", 10)), max(1, normal_duration // 2) if normal_duration else 10)
+    if max_duration <= 0:
+        raise ValueError("opposite_scalp_invalid_duration")
+    base_risk = Decimal(str(signal.bot.risk_per_trade_pct if base_risk_pct is None else base_risk_pct))
+    if not base_risk.is_finite() or base_risk <= 0:
+        raise ValueError("opposite_scalp_invalid_base_risk")
+    risk = min(base_risk, signal.bot.risk_per_trade_pct) * multiplier
+    return {
+        "symbol": signal.symbol, "timeframe": signal.timeframe, "direction": signal.direction,
+        "scalp": True, "is_opposite_scalp": True,
+        "primary_position_id": primary.pk if primary else None,
+        "entry": str(price), "sl": str(price - sign * distance), "tp": str(price + sign * distance * rr),
+        "target_rr": str(rr), "risk_pct": str(risk), "opposite_scalp_risk_multiplier": str(multiplier),
+        "scalper": {"exit_mode": "fixed_tp", "time_in_trade_limit_min": max_duration,
+                    "hard_time_limit": True, "be_trigger_r": "0.6", "be_buffer_r": "0.05",
+                    "trail_trigger_r": "0.8", "trail_mode": "swing"},
     }
-
-    if price is not None:
-        px = Decimal(str(price))
-        if signal.direction == "buy":
-            params["sl"] = str(px - sl_distance)
-            params["tp"] = str(px + tp_distance)
-        else:
-            params["sl"] = str(px + sl_distance)
-            params["tp"] = str(px - tp_distance)
-
-    return params
 
 
 def _parse_decimal(payload: dict | None, *keys: str) -> Decimal | None:
@@ -427,7 +421,9 @@ def _build_scalper_risk_context(bot: Bot, signal: Signal, scalper_cfg: ScalperCo
     floating_risk_pct = _parse_decimal(payload, "floating_symbol_risk_pct", "symbol_risk_pct")
 
     floating_pnl_points = _parse_decimal(payload, "floating_pnl_points")
-    scale_in_allowed = bool(payload.get("scale_in_allowed", False))
+    from execution.services.opposite_scalp import primary_for_overlay
+    scale_in_allowed = bool(payload.get("scale_in_allowed", False)) or bool(
+        bot.allow_opposite_scalp and primary_for_overlay(bot, signal.symbol, signal.direction) is not None)
     if not scale_in_allowed and floating_pnl_points is not None and floating_pnl_points > 0:
         scale_in_allowed = True
     countertrend = bool(payload.get("countertrend") or payload.get("is_countertrend"))
@@ -497,6 +493,9 @@ def make_decision_from_signal(signal: Signal) -> Decision:
             params["tp"] = payload["tp"]
         if payload.get("atr") is not None:
             params["atr"] = payload["atr"]
+        for key in ("entry", "entry_trigger", "target_rr", "atr_price"):
+            if payload.get(key) is not None:
+                params[key] = payload[key]
         if scalper_cfg:
             symbol_cfg = scalper_cfg.resolve_symbol(signal.symbol)
             if symbol_cfg:
@@ -612,8 +611,11 @@ def make_decision_from_signal(signal: Signal) -> Decision:
                 # Apply scalp overrides: tighter SL/TP + smaller size while keeping primary position alive.
                 params = proposed.params.copy() if proposed.params else {}
                 try:
-                    params.update(_build_scalp_params(signal, runtime_cfg=runtime_cfg, scalper_cfg=scalper_cfg))
-                except (ValueError, ArithmeticError):
+                    primary = BrokerPosition.objects.get(pk=conflict.params["primary_position_id"])
+                    params.update(_build_scalp_params(signal, runtime_cfg=runtime_cfg, scalper_cfg=scalper_cfg,
+                        primary=primary, base_risk_pct=params.get("risk_pct")))
+                    params.pop("qty_multiplier", None)
+                except (ValueError, ArithmeticError, BrokerPosition.DoesNotExist):
                     proposed = StrategyDecision(
                         action="ignore", reason="scalper:scalp_constraints_unavailable",
                         params=params, score=proposed.score,

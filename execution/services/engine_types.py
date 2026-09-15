@@ -21,3 +21,6 @@ class EngineDecision:
     trend: Trend = "flat"
     score: float = 0.0
     metadata: Optional[dict] = None
+    entry_price: Optional[Decimal] = None
+    entry_trigger: Optional[Decimal] = None
+    target_rr: Optional[Decimal] = None

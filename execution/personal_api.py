@@ -62,6 +62,8 @@ def _account_for(request):
 
 
 def _position_dict(position: BrokerPosition) -> dict:
+    from execution.services.opposite_scalp import overlay_params
+    overlay = overlay_params(position)
     return {
         "id": position.id,
         "broker_position_ticket": position.broker_position_ticket,
@@ -79,6 +81,8 @@ def _position_dict(position: BrokerPosition) -> dict:
         "strategy": position.strategy_name,
         "manageable": position.is_manageable,
         "status": position.status,
+        "is_opposite_scalp": bool(overlay.get("is_opposite_scalp")),
+        "primary_position_id": overlay.get("primary_position_id"),
     }
 
 
@@ -433,6 +437,7 @@ def personal_risk(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def personal_history(request):
+    from execution.services.overlay_analytics import account_overlay_report
     try:
         account = _account_for(request)
     except (BrokerAccount.DoesNotExist, ValueError) as exc:
@@ -460,6 +465,7 @@ def personal_history(request):
                 "profit_factor": gross_profit / abs(gross_loss) if gross_loss else None,
             },
             "trades": values,
+            "opposite_scalp": account_overlay_report(account),
         }
     )
 

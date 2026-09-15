@@ -158,12 +158,13 @@ def _build_orders(pin: PinType, c: Candle, cfg: PinBarConfig) -> tuple[Decimal, 
 
 def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[PinBarConfig] = None) -> EngineDecision:
     cfg = cfg or PinBarConfig()
-    if len(candles) < max(cfg.ema_period + 5, cfg.lookback_for_levels + 5):
+    required = max(cfg.ema_period + 5, cfg.lookback_for_levels + 5) + 1
+    if len(candles) < required:
         return EngineDecision(
             action="skip",
             reason="not_enough_candles",
             strategy="price_action_pinbar",
-            metadata={"reason": "insufficient_candles", "needed": max(cfg.ema_period + 5, cfg.lookback_for_levels + 5), "got": len(candles)},
+            metadata={"reason": "insufficient_candles", "needed": required, "got": len(candles)},
         )
 
     if not _session_ok(candles, cfg):
@@ -174,6 +175,11 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
             metadata={"reason": "session", "time": str(candles[-1].get("time"))},
         )
 
+    # The pin is the penultimate completed candle. Only its immediately
+    # following completed candle may confirm the trigger; never trade the pin
+    # itself or keep retrying an expired setup on later candles.
+    confirmation = candles[-1]
+    candles = candles[:-1]
     atr_price = _atr(candles, cfg.atr_period)
     last_close = candles[-1]["close"]
     atr_pct = atr_price / abs(last_close) if last_close else Decimal("0")
@@ -220,7 +226,17 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
             metadata={"reason": "no_sr", "levels": [str(l) for l in levels]},
         )
 
-    entry, sl, tp = _build_orders(pin_type, last, cfg)
+    trigger, sl, _ = _build_orders(pin_type, last, cfg)
+    bullish = pin_type == "bullish"
+    confirmed = confirmation["close"] >= trigger if bullish else confirmation["close"] <= trigger
+    invalidated = confirmation["low"] <= sl if bullish else confirmation["high"] >= sl
+    if not confirmed or invalidated:
+        return EngineDecision(
+            action="skip", reason="pinbar_confirmation_failed", strategy="price_action_pinbar",
+            entry_trigger=trigger, metadata={"trigger": str(trigger), "invalidated": invalidated},
+        )
+    entry = confirmation["close"]
+    tp = entry + (1 if bullish else -1) * abs(entry - sl) * cfg.rr
     wick = abs(last["high"] - last["low"])
     confidence = min(
         Decimal("1"),
@@ -235,6 +251,9 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
         reason="price_action_pinbar",
         strategy="price_action_pinbar",
         score=float(confidence),
+        entry_price=entry,
+        entry_trigger=trigger,
+        target_rr=cfg.rr,
         metadata={
             "confidence": float(confidence),
             "wick_range": float(wick),

@@ -104,6 +104,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
       'digits': '',
       'stops_level_points': '0',
       'margin_per_lot': '',
+      'account_margin_mode': '0',
       'initial_balance': '10000',
       'currency': 'USD',
       'spread_points': '0',
@@ -189,6 +190,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
       'digits': '',
       'stops_level_points': '0',
       'margin_per_lot': '',
+      'account_margin_mode': '0',
       'contract_size': '',
       'point_size': '',
       'currency': '',
@@ -556,7 +558,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                 const SizedBox(height: 6),
                 Text(
                   pipelineMode == 'bot_pipeline'
-                      ? 'Replay this bot with its configured strategy selection, schedule, account limits, sizing and exit management. Up to 2,000 test candles per run. Earlier CSV candles supply completed 15m context. Broker fills use the assumptions below.'
+                      ? 'Replay this bot with its configured strategy selection, schedule, account limits, sizing and exit management. Up to 2,000 test candles per run. Earlier CSV candles supply all configured context frames, including H1. Broker fills use the assumptions below.'
                       : 'Replay one candle strategy with fixed-size trades. Bot risk limits and exit management are available in Bot pipeline mode.',
                   style: const TextStyle(color: muted, fontSize: 12),
                 ),
@@ -753,6 +755,12 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                     _field('volume_step', 'Broker lot step'),
                     _field('digits', 'Broker price digits'),
                     _field(
+                      'account_margin_mode',
+                      'Account mode (0 netting, 2 hedging)',
+                      hint:
+                          'Match the broker account. Opposite scalps require hedging mode (2).',
+                    ),
+                    _field(
                       'stops_level_points',
                       'Broker minimum stop (points)',
                     ),
@@ -849,6 +857,11 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                     ),
                   ],
                 ),
+                if (pipelineMode == 'bot_pipeline')
+                  const Text(
+                    'News not simulated: historical economic-calendar filtering is disabled in replay. Configured context timeframes require sufficient completed CSV history.',
+                    style: TextStyle(color: amber, fontSize: 12),
+                  ),
                 const SizedBox(height: 8),
                 Align(
                   alignment: Alignment.centerLeft,
@@ -1201,6 +1214,7 @@ class _HistoricalResultState extends State<_HistoricalResult> {
     final run = widget.run;
     final result = mapOf(run['result']);
     final summary = mapOf(result['summary']);
+    final overlay = mapOf(result['opposite_scalp']);
     final config = mapOf(run['config']);
     final dataset = mapOf(run['dataset']);
     final currency = '${config['currency'] ?? ''}';
@@ -1485,6 +1499,14 @@ class _HistoricalResultState extends State<_HistoricalResult> {
                         style: const TextStyle(color: muted, fontSize: 12),
                       ),
                     ),
+                  ),
+                if (overlay.isNotEmpty)
+                  SelectableText(
+                    'Opposite scalps · ${overlay['trades']} trades · ${compactNumber(overlay['win_rate_pct'])}% wins · PF ${compactNumber(overlay['profit_factor'])}\n'
+                    'Net P/L ${compactNumber(overlay['net_pnl'])} · expectancy ${compactNumber(overlay['expectancy'])} · costs ${compactNumber(overlay['costs'])}\n'
+                    'Realized drawdown ${compactNumber(overlay['realized_drawdown'])} · drawdown change ${compactNumber(overlay['realized_drawdown_delta'])}\n'
+                    '${overlay['drawdown_basis']}',
+                    style: const TextStyle(color: muted, fontSize: 12),
                   ),
                 Align(
                   alignment: Alignment.centerLeft,

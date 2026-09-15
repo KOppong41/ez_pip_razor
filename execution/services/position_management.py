@@ -46,7 +46,7 @@ def plan_scalper_position(
         return None
 
     market = _decimal(market_price)
-    entry = _decimal(params.get("entry")) or _decimal(getattr(position, "open_price", None))
+    entry = _decimal(getattr(position, "open_price", None)) or _decimal(params.get("entry"))
     initial_sl = _decimal(params.get("sl")) or _decimal(getattr(order, "sl", None))
     if market is None or entry is None or initial_sl is None:
         return ScalperPositionPlan(reason="invalid_scalper_metadata")
@@ -70,6 +70,8 @@ def plan_scalper_position(
     )
     current_time = now or timezone.now()
     if limit_min > 0 and opened_at and current_time - opened_at >= timedelta(minutes=limit_min):
+        if params.get("is_opposite_scalp") or scalper.get("hard_time_limit"):
+            return ScalperPositionPlan(close=True, reason="opposite_scalp_time_limit")
         if abs(reward / risk) <= Decimal("0.3"):
             return ScalperPositionPlan(close=True, reason="scalper_stale_near_breakeven")
 

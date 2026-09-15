@@ -52,7 +52,7 @@ class BotPipelineReplayTests(TestCase):
             trade_interval_minutes=0, decision_min_score=Decimal("0.1"), risk_per_trade_pct=Decimal("0.25"),
             position_sizing_mode="risk", max_bot_lot_size=Decimal("5"),
             scalper_params={"rollover_blackout": [], "symbols": {"EURUSD": {
-                "execution_timeframes": ["5m"], "exit_mode": "hybrid", "tp1_r": 0.3,
+                "execution_timeframes": ["5m"], "context_timeframes": ["15m"], "exit_mode": "hybrid", "tp1_r": 0.3,
                 "tp1_close_pct": 50, "trail_start_r": 0.2, "be_trigger_r": 0.2,
                 "be_buffer_r": 0, "max_spread_points": 100, "max_spread_unit": "points",
             }}},
@@ -93,6 +93,7 @@ class BotPipelineReplayTests(TestCase):
         self.asset.recommended_config["symbol_config"]["max_spread_points"] = 999
         self.assertEqual(snapshot["profile"], original)
 
+    @override_settings(ECONOMIC_CALENDAR_ENABLED=True)
     def test_worker_replays_live_sizing_and_partial_exits_without_touching_live_records(self):
         bars, dataset = self.scenario()
         counts = [model.objects.count() for model in (Order, Signal, Decision, BrokerPosition)]
@@ -101,9 +102,45 @@ class BotPipelineReplayTests(TestCase):
         self.assertIn("partial_tp1", {trade["reason"] for trade in result["trades"]})
         self.assertGreater(Decimal(result["trades"][0]["original_quantity"]), Decimal("0.01"))
         self.assertGreater(result["summary"]["protection_moves"], 0)
+        self.assertTrue(any("News not simulated" in assumption for assumption in result["assumptions"]))
         self.assertEqual([model.objects.count() for model in (Order, Signal, Decision, BrokerPosition)], counts)
         self.bot.refresh_from_db()
         self.assertEqual(self.bot.status, "stopped")
+
+    def test_gold_reference_replay_uses_completed_h1_and_managed_runner(self):
+        from bots.services import apply_recommendations_to_bot
+        self.bot.asset = Asset.objects.get(symbol="XAUUSDm")
+        apply_recommendations_to_bot(self.bot, save=False)
+        self.assertEqual(set(self.bot.enabled_strategies), {
+            "trend_pullback", "breakout_retest", "momentum_ignition", "price_action_pinbar", "doji_breakout",
+        })
+        self.bot.enabled_strategies = ["price_action_pinbar"]
+        self.bot.trading_schedule_enabled = False
+        self.bot.save()
+        self.data.update(contract_size="100", point_size="0.01", digits=2, spread_points="10")
+        scale = Decimal("2300")
+        pattern = _scaled_pinbar_candles(scale)
+        for bar in pattern[:-3]:
+            bar["high"], bar["low"] = bar["close"] + scale * Decimal("0.0004"), bar["close"] - scale * Decimal("0.0004")
+        prefix = []
+        for i in range(360):
+            price = scale * (Decimal("1") - Decimal(360 - i) * Decimal("0.00005"))
+            prefix.append({"open": price, "close": price, "high": price + 1, "low": price - 1})
+        bars = prefix + pattern
+        entry = pattern[-1]["close"]
+        for gain in ("4", "7", "8"):
+            opening, close = bars[-1]["close"], entry + Decimal(gain)
+            bars.append({"open": opening, "low": opening, "high": close, "close": close})
+        start = datetime(2025, 1, 6, tzinfo=timezone.utc)
+        for i, bar in enumerate(bars):
+            bar.update(time=start + timedelta(minutes=i * 5), tick_volume=150)
+        result = run_bot_replay(bars, self.config(), {"first_index": len(prefix) + len(pattern), "last_index": len(bars) - 1}, "XAUUSDm")
+        self.assertGreater(result["summary"]["trades"], 0, result)
+        self.assertIn("partial_tp1", {trade["reason"] for trade in result["trades"]})
+        trade = result["trades"][0]
+        entry, stop, target = (Decimal(trade[key]) for key in ("entry_price", "sl", "tp"))
+        self.assertLessEqual(abs(entry - stop) / entry * 100, Decimal("0.3"))
+        self.assertAlmostEqual(float((target - entry) / (entry - stop)), 2.0, places=2)
 
     def test_api_requires_broker_volume_and_margin_inputs(self):
         self.client.force_login(self.user)

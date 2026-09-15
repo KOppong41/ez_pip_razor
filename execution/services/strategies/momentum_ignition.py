@@ -111,8 +111,11 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             )
         confidence, score_components = setup_quality(retrace, max_retrace)
         sl = last["low"]
-        risk = end - sl
-        tp = end + risk * cfg.rr if risk > 0 else None
+        entry = last["close"]
+        risk = entry - sl
+        if risk <= 0:
+            return EngineDecision(action="skip", reason="momentum_invalid_risk", strategy="momentum_ignition")
+        tp = entry + risk * cfg.rr
         return EngineDecision(
             action="open",
             direction="buy",
@@ -121,6 +124,8 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             reason="momentum_ignition_bull",
             strategy="momentum_ignition",
             score=float(confidence),
+            entry_price=entry,
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "impulse_pct": float(impulse_change),
@@ -143,8 +148,11 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             )
         confidence, score_components = setup_quality(retrace, max_retrace)
         sl = last["high"]
-        risk = sl - end
-        tp = end - risk * cfg.rr if risk > 0 else None
+        entry = last["close"]
+        risk = sl - entry
+        if risk <= 0:
+            return EngineDecision(action="skip", reason="momentum_invalid_risk", strategy="momentum_ignition")
+        tp = entry - risk * cfg.rr
         return EngineDecision(
             action="open",
             direction="sell",
@@ -153,6 +161,8 @@ def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | N
             reason="momentum_ignition_bear",
             strategy="momentum_ignition",
             score=float(confidence),
+            entry_price=entry,
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "impulse_pct": float(abs(impulse_change)),

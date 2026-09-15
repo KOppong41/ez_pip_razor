@@ -71,10 +71,7 @@ class DecisionGuardrailTests(TestCase):
             status="open",
         )
         decision = make_decision_from_signal(self._signal("buy", "sig-2", score=0.6))
-        self.assertEqual(decision.action, "open")  # allow a small opposite scalp while keeping short alive
-        self.assertEqual(decision.reason, "opposite_scalp")
-        self.assertTrue(decision.params.get("scalp"))
-        self.assertIsNotNone(decision.params.get("sl"))
-        self.assertIsNotNone(decision.params.get("tp"))
+        self.assertEqual(decision.action, "ignore")
+        self.assertEqual(decision.reason, "opposite_scalp_requires_hedging_account")
         close_decisions = Decision.objects.filter(action="close", reason="flip_close")
         self.assertEqual(close_decisions.count(), 0)

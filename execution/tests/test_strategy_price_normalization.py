@@ -11,7 +11,7 @@ from execution.services.strategies.price_action_pinbar import PinBarConfig, run_
 from execution.services.strategies.trend_pullback import _atr
 
 
-def _scaled_pinbar_candles(scale: Decimal):
+def _scaled_pinbar_candles(scale: Decimal, *, confirmed=True):
     rows = []
     for index in range(85):
         close = scale * (Decimal("1") + Decimal(index) * Decimal("0.0001"))
@@ -38,6 +38,9 @@ def _scaled_pinbar_candles(scale: Decimal):
         "low": shared_low,
         "close": close,
     }
+    if confirmed:
+        rows.append({"open": close, "low": close, "high": close + scale * Decimal("0.0005"),
+                     "close": close + scale * Decimal("0.0004")})
     return rows
 
 

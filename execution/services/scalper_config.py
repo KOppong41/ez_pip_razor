@@ -98,6 +98,7 @@ class SymbolConfig:
     trail_start_r: Decimal | None = None
     tp1_r: Decimal | None = None
     tp1_close_pct: int | None = None
+    final_target_source: str = "strategy"
 
     def matches_symbol(self, symbol: str) -> bool:
         target = symbol.upper()
