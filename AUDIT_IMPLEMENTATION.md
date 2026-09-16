@@ -192,3 +192,45 @@ The mode check follows MT5's separate account properties documented in the
 [MetaTrader account API](https://www.mql5.com/en/docs/python_metatrader5/mt5accountinfo_py).
 Protection uses GitHub's
 [branch-protection API](https://docs.github.com/en/rest/branches/branch-protection).
+
+## Trade History filters and saved performance baselines
+
+Trade History now offers account selection, All/Gold/BTC/ETH/Forex tabs, bot,
+symbol, strategy, UTC close-date and entry-preset filters. Summary and strategy
+breakdown totals cover the entire matching recorded history; pagination only
+limits the displayed rows. Opposite-scalp totals use the same selection.
+An empty sample has undefined win rate and profit factor. Gold views include
+all five strategies even before their first closed outcome.
+
+Saved baselines preserve a name, UTC start time and account/owner-scoped filter
+set. Baseline results require a recorded entry time at or after the marker,
+excluding preexisting positions that close later. Additional filters can narrow
+a baseline but cannot broaden its saved scope. Saving a marker does not delete
+history, reset account state, change bot settings or start trading. The marker
+name is user supplied; it is not verification of the running code revision.
+
+New automated entry orders snapshot strategy, applied preset version and scalp
+status. Exit attribution follows the originating entry/position, never the
+bot's current preset. Older versions without a snapshot remain unknown; known
+historical entry strategies remain available. Multiple entries sharing a
+position receive mixed attribution. Realized exits are grouped by position
+ticket; known open positions and positions with missing recorded exit results
+are excluded. Legacy outcomes without a position record explicitly show
+unverified completion. P/L uses the existing realized ledger; missing broker
+charges are not estimated by this view.
+
+Migration `execution.0061_performance_history_baselines` adds entry attribution
+and baseline storage without backfilling current versions onto historical
+orders. It has only been exercised in isolated test databases. This work does
+not pause BTC/ETH/EURUSD, enable Gold, disable scalp on a running bot, create a
+personal baseline, or start demo/live orders. Those account operations remain
+separate from this code change. No Gold strategy or risk parameters changed.
+
+Validation completed across 2026-09-15/16: the full **348-test Django suite**
+passed, then the **11 final history regressions** passed after the final missing
+result and attribution adjustments. All **38 Flutter tests** passed, including
+compact layouts and filter/baseline state; Flutter analysis reported no issues.
+Django system checks, migration checks and whitespace checks passed. Logs:
+`.runtime/performance-history-backend-tests.log`,
+`.runtime/performance-history-final-regressions.log`, and
+`.runtime/performance-history-flutter-tests.log`.

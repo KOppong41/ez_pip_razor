@@ -195,7 +195,12 @@ class FakeApiClient extends ApiClient {
         'usage': {'bots': 1, 'bot_limit': 3},
       };
     }
-    if (path == '/api/personal/history/') {
+    if (path == '/api/personal/accounts/') {
+      return [
+        {'id': 2, 'name': 'Primary MT5'},
+      ];
+    }
+    if (Uri.parse(path).path == '/api/personal/history/') {
       return {
         'summary': {
           'total_trades': 1,
@@ -792,6 +797,16 @@ void main() {
     await tester.tap(find.text('Trade history'));
     await tester.pumpAndSettle();
     expect(find.text('PERFORMANCE LEDGER'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('XAUUSDm'),
+      300,
+      scrollable: find
+          .descendant(
+            of: find.byType(HistoryPage),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     expect(find.text('XAUUSDm'), findsOneWidget);
     expect(tester.takeException(), isNull);
 

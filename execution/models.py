@@ -202,6 +202,7 @@ class Order(models.Model):
     mt5_retcode = models.BigIntegerField(null=True, blank=True)
     mt5_retcode_description = models.CharField(max_length=255, blank=True, default="")
     broker_response = models.JSONField(default=dict, blank=True)
+    performance_context = models.JSONField(default=dict, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
     execution_queued_at = models.DateTimeField(null=True, blank=True)
@@ -223,6 +224,15 @@ class Order(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def save(self, *args, **kwargs):
+        if self._state.adding and self.intent == "entry" and self.status == "new" and self.decision_id:
+            decision = self.decision
+            payload = decision.signal.payload or {} if decision.signal_id else {}
+            self.performance_context = {
+                "strategy": payload.get("strategy") or (decision.params or {}).get("strategy") or "unknown",
+                "preset_version": self.bot.asset_preset_version_applied,
+                "is_opposite_scalp": bool((decision.params or {}).get("is_opposite_scalp")),
+                "source": "entry_snapshot",
+            }
         if not self.owner:
             if self.bot and self.bot.owner_id:
                 self.owner = self.bot.owner
@@ -702,6 +712,19 @@ class TradeLog(models.Model):
 
     def __str__(self):
         return f"TradeLog order={self.order_id} {self.symbol} {self.side} {self.qty} {self.status}"
+
+
+class PerformanceBaseline(models.Model):
+    """An immutable account/owner-scoped performance epoch; never resets history."""
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    broker_account = models.ForeignKey(BrokerAccount, on_delete=models.CASCADE)
+    name = models.CharField(max_length=120)
+    started_at = models.DateTimeField()
+    filters = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-started_at", "-id"]
 
 
 class HistoricalBacktest(models.Model):
