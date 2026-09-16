@@ -27,6 +27,7 @@ class ScalperDashboardDiagnosticsTests(TestCase):
             bot=self.bot,
             summary={
                 "outcome": "no_signals",
+                "rejection_reason": "htf_bias_unavailable",
                 "strategies": [
                     {
                         "strategy": "price_action_pinbar",
@@ -40,6 +41,7 @@ class ScalperDashboardDiagnosticsTests(TestCase):
             bot=self.bot,
             summary={
                 "outcome": "no_signals",
+                "rejection_reason": "htf_context_conflict",
                 "strategies": [
                     {
                         "strategy": "price_action_pinbar",
@@ -72,5 +74,12 @@ class ScalperDashboardDiagnosticsTests(TestCase):
                     "reason": "no_pinbar",
                     "count": 2,
                 }
+            ],
+        )
+        self.assertEqual(
+            diagnostics[0]["rejection_counts"],
+            [
+                {"reason": "htf_bias_unavailable", "count": 1},
+                {"reason": "htf_context_conflict", "count": 1},
             ],
         )

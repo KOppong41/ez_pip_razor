@@ -263,6 +263,12 @@ def dispatch_place_order(order: Order) -> None:
     connector, connector_key = _resolve_connector(order)
     if not connector:
         raise ValueError(f"No connector for broker adapter '{connector_key}'")
+
+    from execution.services.flip import is_flip_order
+    if is_flip_order(order):
+        # The serialized flip workflow applies these guards before closing and
+        # again before reversal, recording the phase of any rejection.
+        return connector.place_order(order)
     
     # Validate conditions before sending
     valid, reason = validate_order_conditions(order)

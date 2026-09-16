@@ -6,6 +6,7 @@ from typing import List, Optional, Literal, Tuple
 
 from execution.services.marketdata import Candle
 from execution.services.engine_types import EngineDecision
+from execution.services.strategies.scoring import bounded, proximity, score_setup
 
 PinType = Literal["bullish", "bearish"]
 
@@ -238,9 +239,19 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
     entry = confirmation["close"]
     tp = entry + (1 if bullish else -1) * abs(entry - sl) * cfg.rr
     wick = abs(last["high"] - last["low"])
-    confidence = min(
-        Decimal("1"),
-        max(Decimal("0.4"), wick / (atr_price * Decimal("2"))),
+    body = abs(last["close"] - last["open"])
+    long_wick = min(last["open"], last["close"]) - last["low"] if bullish else last["high"] - max(last["open"], last["close"])
+    wick_price = last["low"] if bullish else last["high"]
+    confidence, score_components = score_setup(
+        {
+            "range": bounded((wick - min_range) / max(atr_price * 2 - min_range, atr_price)),
+            "wick": bounded((long_wick / wick - Decimal("2") / 3) * 3),
+            "body": proximity(body, wick / 3),
+            "level": proximity(min(abs(wick_price - level) for level in levels), level_tolerance),
+            "trend": bounded(abs(ema[-1] - ema[-2]) / (atr_price * Decimal("0.1"))),
+            "confirmation": bounded(abs(entry - trigger) / (atr_price * Decimal("0.3"))),
+        },
+        {"range": "0.15", "wick": "0.20", "body": "0.15", "level": "0.20", "trend": "0.15", "confirmation": "0.15"},
     )
 
     return EngineDecision(
@@ -256,6 +267,8 @@ def run_price_action_pinbar(symbol: str, candles: List[Candle], cfg: Optional[Pi
         target_rr=cfg.rr,
         metadata={
             "confidence": float(confidence),
+            "score_components": score_components,
+            "score_contract": "setup_quality_v1",
             "wick_range": float(wick),
             "atr_pct": float(atr_pct),
             "level_count": len(levels),

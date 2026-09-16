@@ -6,6 +6,8 @@ from typing import List, Tuple
 
 from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
+from execution.services.strategies.scoring import above_minimum, proximity, score_setup
+from execution.services.strategies.volume import relative_tick_volume
 
 
 @dataclass
@@ -16,6 +18,9 @@ class BreakoutRetestConfig:
     min_breakout_body_pct: Decimal = Decimal("0.0003")
     breakout_extension_pct: Decimal = Decimal("0.0003")
     min_breakout_volume: int = 80
+    # A positive relative threshold replaces the absolute gate and score.
+    min_relative_volume: Decimal = Decimal("0")
+    volume_lookback: int = 20
     rr: Decimal = Decimal("2")
 
 
@@ -32,12 +37,7 @@ def _quality_above_minimum(
     *,
     strong_multiple: Decimal = Decimal("3"),
 ) -> Decimal:
-    """Return 0.5 at the validity threshold and 1 only when clearly stronger."""
-    if minimum <= 0 or value < minimum:
-        return Decimal("0")
-    span = minimum * (strong_multiple - Decimal("1"))
-    progress = min(Decimal("1"), (value - minimum) / span) if span > 0 else Decimal("1")
-    return Decimal("0.5") + progress * Decimal("0.5")
+    return above_minimum(value, minimum, strong_multiple=strong_multiple)
 
 
 def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None = None) -> EngineDecision:
@@ -79,16 +79,29 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             metadata={"reason": "small_body", "body_pct": float(prev_body_pct)},
         )
 
-    if (broke_up or broke_down) and prev["tick_volume"] < cfg.min_breakout_volume:
+    if not broke_up and not broke_down:
+        return EngineDecision(action="skip", reason="breakout_retest_no_break", strategy="breakout_retest")
+
+    volume_metadata = {}
+    volume_value = Decimal("0")
+    volume_minimum = Decimal(str(cfg.min_breakout_volume))
+    if cfg.min_relative_volume > 0:
+        try:
+            volume_value, volume_metadata = relative_tick_volume(candles, cfg.volume_lookback)
+        except ValueError as exc:
+            return EngineDecision(action="skip", reason="breakout_retest_volume_unavailable",
+                                  strategy="breakout_retest", metadata={"reason": str(exc)})
+        volume_minimum = cfg.min_relative_volume
+        volume_metadata["min_relative_volume"] = float(volume_minimum)
+    else:
+        volume_value = Decimal(str(prev.get("tick_volume", 0)))
+    if volume_value < volume_minimum:
         return EngineDecision(
             action="skip",
             reason="breakout_retest_low_volume",
             strategy="breakout_retest",
-            metadata={"reason": "low_volume", "volume": int(prev["tick_volume"])},
+            metadata={"reason": "low_volume", "volume": int(prev["tick_volume"]), **volume_metadata},
         )
-
-    if not broke_up and not broke_down:
-        return EngineDecision(action="skip", reason="breakout_retest_no_break", strategy="breakout_retest")
 
     range_width_pct = range_width / range_low if range_low else Decimal("0")
     range_quality = _quality_above_minimum(
@@ -100,8 +113,8 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
         cfg.min_breakout_body_pct,
     )
     volume_quality = _quality_above_minimum(
-        Decimal(str(prev["tick_volume"])),
-        Decimal(str(cfg.min_breakout_volume)),
+        volume_value,
+        volume_minimum,
         strong_multiple=Decimal("2"),
     )
     breakout_extension = (
@@ -117,10 +130,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
     )
 
     def setup_quality(level_distance: Decimal, tolerance: Decimal):
-        retest_quality = max(
-            Decimal("0"),
-            Decimal("1") - level_distance / tolerance,
-        ) if tolerance > 0 else Decimal("1")
+        retest_quality = proximity(level_distance, tolerance)
         components = {
             "range": range_quality,
             "breakout_body": body_quality,
@@ -128,15 +138,10 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             "extension": extension_quality,
             "retest": retest_quality,
         }
-        score = min(
-            Decimal("1"),
-            range_quality * Decimal("0.20")
-            + body_quality * Decimal("0.25")
-            + volume_quality * Decimal("0.15")
-            + extension_quality * Decimal("0.20")
-            + retest_quality * Decimal("0.20"),
+        return score_setup(
+            components,
+            {"range": "0.20", "breakout_body": "0.25", "volume": "0.15", "extension": "0.20", "retest": "0.20"},
         )
-        return score, {key: float(value) for key, value in components.items()}
 
     if broke_up:
         # Retest current bar into old range high
@@ -157,13 +162,17 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             reason="breakout_retest_up",
             strategy="breakout_retest",
             score=float(confidence),
+            entry_price=last["close"],
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),
+                **volume_metadata,
                 "breakout_extension_pct": float(breakout_extension),
                 "score_components": score_components,
+                "score_contract": "setup_quality_v1",
             },
         )
 
@@ -185,13 +194,17 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             reason="breakout_retest_down",
             strategy="breakout_retest",
             score=float(confidence),
+            entry_price=last["close"],
+            target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
                 "range_width": float(range_width),
                 "breakout_body_pct": float(prev_body_pct),
                 "breakout_volume": int(prev["tick_volume"]),
+                **volume_metadata,
                 "breakout_extension_pct": float(breakout_extension),
                 "score_components": score_components,
+                "score_contract": "setup_quality_v1",
             },
         )
 

@@ -116,8 +116,13 @@ class AssetPresetScoreTests(SimpleTestCase):
             {"open": Decimal("100.8"), "high": Decimal("101.4"), "low": Decimal("100.7"), "close": Decimal("101.2"), "tick_volume": 100},
             {"open": Decimal("101.1"), "high": Decimal("101.3"), "low": Decimal("101.0"), "close": Decimal("101.1"), "tick_volume": 100},
         ]
-        self.assert_normalized_open(
-            run_breakout_retest(candles, BreakoutRetestConfig(lookback=3))
+        decision = run_breakout_retest(candles, BreakoutRetestConfig(lookback=3))
+        self.assert_normalized_open(decision)
+        self.assertEqual(decision.entry_price, candles[-1]["close"])
+        self.assertEqual(decision.target_rr, Decimal("2"))
+        self.assertEqual(
+            (decision.tp - decision.entry_price) / (decision.entry_price - decision.sl),
+            decision.target_rr,
         )
 
         stronger = deepcopy(candles)

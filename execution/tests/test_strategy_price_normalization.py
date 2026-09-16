@@ -107,6 +107,12 @@ class StrategyPriceNormalizationTests(SimpleTestCase):
         self.assertEqual({decision.action for decision in decisions}, {"open"})
         self.assertEqual({decision.direction for decision in decisions}, {"buy"})
         self.assertEqual(len({decision.reason for decision in decisions}), 1)
+        self.assertTrue(all(decision.entry_price is not None for decision in decisions))
+        self.assertTrue(all(decision.target_rr == Decimal("1.8") for decision in decisions))
+        self.assertTrue(all(
+            (decision.tp - decision.entry_price) / (decision.entry_price - decision.sl) == decision.target_rr
+            for decision in decisions
+        ))
         self.assertTrue(all(0.0 <= decision.score <= 1.0 for decision in decisions))
 
     def test_doji_score_changes_with_breakout_quality(self):

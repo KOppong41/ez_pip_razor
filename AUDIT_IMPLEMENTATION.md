@@ -1,7 +1,8 @@
 # Consolidated audit implementation
 
-This implements the general, opposite-scalp and Gold audit list. Source changes
-are in the working tree. Database migrations are not applied to the live account.
+This records the general, opposite-scalp and Gold audit implementation, merged
+in `3aa3fba`, and its subsequent working-tree fixes. Database migrations are not
+applied to the live account by this continuation.
 
 The preceding follow-up fixes are also retained: the bot schedule is authoritative,
 engine signals bypass strategy re-planning, scores use normalized weights, full
@@ -10,7 +11,7 @@ and bot replay runs the shared decision, risk and position-management pipeline.
 
 | Audit item | Implementation |
 | --- | --- |
-| Flutter / Safety CI | Latest published Safety CI was green at `05668d54`. Updated desktop suite passes all 34 tests, including compact layouts, multiple windows and scalp-limit warnings. |
+| Flutter / Safety CI | The original audit recorded green Safety CI at `05668d54` and 34 passing desktop tests, including compact layouts, multiple windows and scalp-limit warnings. |
 | Scalp monetary risk | `decision_scalp_qty_multiplier` reduces the risk percentage; final submission caps it again. 0.30% × 0.30 = 0.09%. Fixed sizing receives the ratio once. |
 | Hedging account | Decision and final submission require MT5 retail hedging mode, using `margin_mode`, not demo/live `trade_mode`. Explicit broker prohibition also blocks entry. |
 | Pin Bar entry | The immediately following completed candle must close beyond the trigger without invalidating the structural stop. The trigger and R contract travel with the signal. |
@@ -39,8 +40,133 @@ passed **34 tests** and `flutter analyze` reported no issues. Django system
 checks and `makemigrations --check --dry-run` passed, with no missing migrations.
 A final rerun of all **71 tests** covering Gold, overlays, live risk, pipeline
 replay and scalper contracts passed with both late fixes included.
-The latest published Safety CI is green at `05668d54`; these additional working
-tree changes have been validated locally and have not been pushed.
+Those results describe the original audit validation. The follow-up passes
+below have separate local validation.
+
+## Gold and flip follow-up
+
+- Gold auto-selection ranks Momentum Ignition, Breakout + Retest and Trend
+  Pullback for high volatility, ATR expansion or a strong higher-timeframe trend.
+  Moderate volatility favors Trend Pullback, Breakout + Retest and Pin Bar.
+  Quiet conditions retain Pin Bar, Doji Breakout and Trend Pullback even when
+  the required directional context is available. The configured strategy pool
+  still limits selection, and wide spreads retain the precise-setup preference.
+- Trend Pullback, Breakout + Retest and Doji Breakout now emit their entry price
+  and configured target R multiple. These fields pass through the signal and
+  decision to final execution, where targets use the current submission quote
+  and retain the structural stop. Broker price rounding still applies.
+- A qualifying high-score reversal takes precedence over an opposite scalp.
+  Lower scores and scalper cooldowns still use the validated scalp path.
+  A later daily-entry or trade-interval rejection cannot close the primary.
+- The admin diagnostics summarize entry-rejection reasons over the existing
+  24-hour window. The shared selector's Harami caller now supplies its analyzed
+  higher-timeframe regime without referencing an undefined variable.
+
+Continuation validation on 2026-09-15: the complete Django suite passed **314
+tests** in 269 seconds. Django system checks, `makemigrations --check --dry-run`
+and `git diff --check` passed. The full suite includes pipeline replay and the
+new selector, flip and submission-target regressions. Captured output is in
+`.runtime/continuation-full-django-tests.log`.
+
+Regression tests first reproduced the quiet-regime, wide-spread and rejected-
+replacement problems before their fixes. All execution checks use synthetic
+broker data and isolated in-memory databases. These follow-up changes were
+committed as `62db999` and published in PR #2; no live/demo orders were placed.
+
+## Score contract and deferred reversal workflow
+
+The next review pass standardizes all five Gold detectors on
+`setup_quality_v1`. Each valid setup starts at 0.50. Quality components measure
+bounded progress beyond each setup's requirements; their weighted average
+adds at most another 0.50. Trend Pullback assigns 30% of its quality weight to
+trend strength, so even an arbitrarily strong slope cannot produce a perfect
+score by itself. Pin Bar now uses range, wick/body, level, trend and confirmation
+quality instead of candle range alone. Momentum, Breakout and Doji use the same
+aggregation contract and publish their component scores in run diagnostics.
+
+These scores express observed setup quality, not calibrated win probabilities.
+Historical or forward-demo outcomes are still required for empirical calibration.
+Synthetic integration fixtures exercise simultaneous valid Gold setups and the
+same candidate ranking function used by the live allocator.
+
+Flip execution now occurs only when the selected replacement order is
+dispatched. Signal evaluation records its intended position IDs and performs no
+closes. The replacement must pass fanout, local guards, and an MT5 dry run of
+the normal entry path, including final risk and `order_check`, before any close.
+The dry run projects capacity without the exact owned replacement group, keeps
+current free margin as a conservative constraint, and rolls back its database
+changes. It sends no order and cannot resize fixed sizing twice.
+
+The serialized executor closes a linked opposite-scalp child first, then its
+primary, confirms the group is flat, and reruns market-sensitive validation
+without any exposure exemptions before sending the full-size replacement.
+Manual, unrelated or changed groups are rejected. The workflow stores close
+order IDs and phase history, reconciles ambiguous closes on retry, and counts
+a primary/child group as one reversal for the daily flip cap. A definitive
+failure after flattening records `flip_reverse_aborted_after_close`; ambiguous
+reverse submissions remain pending for reconciliation. Paper simulation and
+isolated replay use the deferred workflow as well.
+
+Validation for this pass on 2026-09-15: all **328 Django tests passed** in
+167 seconds, including the strategy, connector, preflight and replay tests.
+System checks, `makemigrations --check --dry-run`, and `git diff --check` passed.
+Captured output: `.runtime/score-flip-final-tests.log`. Gold risk, stop envelope,
+timeframes, five-strategy pool, hybrid exits and trading windows are unchanged.
+The subsequent refinement pass below implements relative volume and configured
+spread selection. Historical news replay remains deferred.
+
+Operational status: a requested Safety CI retry still failed before either job
+started because GitHub reports an account billing lock. That external issue
+must be resolved before protected CI can pass and PR #2 can be merged. Once
+merged, verify the personal bot's frozen preset explicitly before starting the
+separate forward-demo baseline with opposite scalp disabled. Review score
+distributions, selection/rejection frequency and realized per-strategy outcomes
+before a separate scalp A/B trial. This implementation places no demo/live orders
+and does not change the personal bot's settings.
+
+### Gold volume and spread refinements
+
+Gold Momentum Ignition and Breakout Retest now require signal tick volume to be
+at least the median of the preceding 20 candles (`min_relative_volume=1`). The
+signal candle and its pullback/retest candle are excluded from that baseline.
+The volume component of setup quality uses the same ratio, so multiplying all
+tick counts by a feed-specific constant preserves eligibility and score.
+Missing, negative or nonfinite volume, insufficient history and zero-median
+baselines produce explicit skips. Successful and low-volume decisions retain
+the ratio, median, lookback and threshold for review.
+
+Gold's shared configuration builder enables this default for existing frozen
+presets as well as new ones; legacy absolute volume fields are inactive in
+relative mode. Explicit relative-volume overrides remain available. Other
+assets retain their existing absolute-volume defaults. Both the backtest API's
+saved detector configuration and full bot replay use the same builder.
+Migration `0053_gold_relative_volume` records these defaults in Gold's asset
+recommendation, preserving explicit relative-volume overrides and all frozen
+bot settings. The catalog version becomes 4; other asset recommendations keep
+their previous values. The migration has only been run in isolated test databases.
+
+Gold's selector now treats spread as wide at 80% of the effective allowance:
+the minimum positive bot limit and active symbol-profile limit, converted to
+price using broker point/digits and the current quote. The run context records
+the allowance and ratio. Gold no longer guesses an allowance from 0.10% of
+price when configuration is unavailable. Existing execution spread checks
+remain authoritative; strategy preference does not permit execution above a
+limit. Other assets retain their existing selector behavior.
+
+This pass leaves risk, structural stops, strategy weights, timeframes, strategy
+pool, exits, trading windows and personal bot settings unchanged. No demo or
+live orders were placed. The 1x volume and 80% spread settings are transparent
+defaults, not empirical profitability calibration. Historical USD news remains
+`not_simulated`; forward-demo outcomes and a separate opposite-scalp comparison
+remain follow-up work.
+
+Validation on 2026-09-15: all **338 Django tests passed** in 173 seconds.
+System checks, `makemigrations --check --dry-run`, and whitespace checks passed.
+Coverage includes feed-scale invariance, rolling-median outlier handling,
+unusable volume data, saved Gold replay settings, the actual scalper selector
+context, spread-unit conversion and stricter bot/profile limits. The first full
+run exposed a catalog/migration mismatch; migration 0053 fixed it before this
+successful rerun. Output: `.runtime/gold-volume-spread-final-tests.log`.
 
 Backend validation uses isolated in-memory databases. The Gold contract fixture
 uses synthetic bid candles with completed M15/H1 context and checks entry, stop,
@@ -66,3 +192,45 @@ The mode check follows MT5's separate account properties documented in the
 [MetaTrader account API](https://www.mql5.com/en/docs/python_metatrader5/mt5accountinfo_py).
 Protection uses GitHub's
 [branch-protection API](https://docs.github.com/en/rest/branches/branch-protection).
+
+## Trade History filters and saved performance baselines
+
+Trade History now offers account selection, All/Gold/BTC/ETH/Forex tabs, bot,
+symbol, strategy, UTC close-date and entry-preset filters. Summary and strategy
+breakdown totals cover the entire matching recorded history; pagination only
+limits the displayed rows. Opposite-scalp totals use the same selection.
+An empty sample has undefined win rate and profit factor. Gold views include
+all five strategies even before their first closed outcome.
+
+Saved baselines preserve a name, UTC start time and account/owner-scoped filter
+set. Baseline results require a recorded entry time at or after the marker,
+excluding preexisting positions that close later. Additional filters can narrow
+a baseline but cannot broaden its saved scope. Saving a marker does not delete
+history, reset account state, change bot settings or start trading. The marker
+name is user supplied; it is not verification of the running code revision.
+
+New automated entry orders snapshot strategy, applied preset version and scalp
+status. Exit attribution follows the originating entry/position, never the
+bot's current preset. Older versions without a snapshot remain unknown; known
+historical entry strategies remain available. Multiple entries sharing a
+position receive mixed attribution. Realized exits are grouped by position
+ticket; known open positions and positions with missing recorded exit results
+are excluded. Legacy outcomes without a position record explicitly show
+unverified completion. P/L uses the existing realized ledger; missing broker
+charges are not estimated by this view.
+
+Migration `execution.0061_performance_history_baselines` adds entry attribution
+and baseline storage without backfilling current versions onto historical
+orders. It has only been exercised in isolated test databases. This work does
+not pause BTC/ETH/EURUSD, enable Gold, disable scalp on a running bot, create a
+personal baseline, or start demo/live orders. Those account operations remain
+separate from this code change. No Gold strategy or risk parameters changed.
+
+Validation completed across 2026-09-15/16: the full **348-test Django suite**
+passed, then the **11 final history regressions** passed after the final missing
+result and attribution adjustments. All **38 Flutter tests** passed, including
+compact layouts and filter/baseline state; Flutter analysis reported no issues.
+Django system checks, migration checks and whitespace checks passed. Logs:
+`.runtime/performance-history-backend-tests.log`,
+`.runtime/performance-history-final-regressions.log`, and
+`.runtime/performance-history-flutter-tests.log`.

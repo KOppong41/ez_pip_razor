@@ -188,6 +188,39 @@ class OverlayRiskContracts(TestCase):
         conflict = detect_position_conflict(bot, self.asset.symbol, "buy", 1.0)
         self.assertEqual(conflict.reason, "opposite_scalp_primary_ambiguous")
 
+    def test_high_conviction_flip_precedes_opposite_scalp_validation(self):
+        from execution.services.decision import detect_position_conflict
+        bot, _, _, _ = self.scenario()
+        with patch("execution.connectors.mt5.MT5Connector", side_effect=AssertionError("overlay path must not run")):
+            conflict = detect_position_conflict(bot, self.asset.symbol, "sell", 1.0)
+        self.assertEqual(conflict.action, "flip")
+        self.assertEqual(conflict.reason, "flip_triggered")
+
+    @override_settings(DECISION_FLIP_SCORE=0.8)
+    def test_score_threshold_and_cooldown_retain_validated_overlay_path(self):
+        from execution.services.decision import detect_position_conflict
+        bot, primary, order, raw = self.scenario()
+        order.delete()  # The primary has not used its scalp allowance yet.
+        config = SimpleNamespace(flip_settings=SimpleNamespace(min_score=Decimal("0.9"), cooldown_minutes=10))
+        context = SimpleNamespace(
+            scale_in_allowed=False, allow_scale_in_default=False,
+            last_flip_at=datetime.now(timezone.utc), flip_cooldown_minutes=20,
+        )
+        with patch("execution.connectors.mt5.MT5Connector") as connector:
+            connector.return_value.account_info_for_account.return_value = self.account_info
+            connector.return_value.tick_for_account.return_value = self.tick
+            connector.return_value.positions_for_account.return_value = [raw]
+            for score, risk_context in ((0.85, None), (1.0, context)):
+                with self.subTest(score=score):
+                    conflict = detect_position_conflict(
+                        bot, self.asset.symbol, "sell", score, scalper_cfg=config, scalper_ctx=risk_context,
+                    )
+                    self.assertEqual((conflict.action, conflict.reason), ("open", "opposite_scalp"))
+                    self.assertEqual(conflict.params["primary_position_id"], primary.pk)
+            self.account_info.margin_mode = 0
+            conflict = detect_position_conflict(bot, self.asset.symbol, "sell", 0.85, scalper_cfg=config)
+            self.assertEqual(conflict.reason, "opposite_scalp_requires_hedging_account")
+
     def test_analytics_omits_missing_exit_pnl_instead_of_inventing_breakeven(self):
         from execution.models import Execution
         from execution.services.overlay_analytics import account_overlay_report
