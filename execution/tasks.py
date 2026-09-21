@@ -77,6 +77,7 @@ from execution.services.position_management import plan_scalper_position
 from execution.services.portfolio import record_fill
 from execution.services.equity import update_equity_high_water
 from execution.services.trade_constraints import distance_to_price
+from execution.services.trading_type import is_within_trading_window
 from execution.services.strategies.harami import detect_harami
 from execution.services.strategy_registry import (
     SCALPER_STRATEGY_REGISTRY,
@@ -1696,11 +1697,12 @@ def trade_scalper_strategies_for_bot(
                         "best_score": None,
                         "best_strategy": None,
                         "rejection_reason": reason,
-                        "htf_status": (
-                            "unavailable"
-                            if reason == "htf_bias_unavailable"
-                            else "not_evaluated"
-                        ),
+                        "htf_status": {
+                            "htf_bias_unavailable": "unavailable",
+                            "htf_bias_neutral": "neutral",
+                            "htf_context_conflict": "conflict",
+                            "htf_timeframe_unsupported": "unsupported",
+                        }.get(reason, "not_evaluated"),
                         "spread_status": (
                             "unavailable"
                             if reason.startswith("market_data")
@@ -1786,6 +1788,22 @@ def trade_scalper_strategies_for_bot(
             effective_timeframe,
         )
     timeframe = effective_timeframe
+
+    # Apply the same visible schedule as the decision layer before fetching
+    # candles or running detectors, so a closed window is the reported blocker.
+    schedule_checked_at = timezone.now()
+    if not is_within_trading_window(bot, now=schedule_checked_at):
+        _log_skip("outside_trading_window", {
+            "schedule": {
+                "checked_at": schedule_checked_at.isoformat(),
+                "windows": bot.trading_windows,
+                "timezone": bot.trading_timezone,
+                "allowed_days": bot.allowed_trading_days,
+                "start": str(bot.trading_window_start),
+                "end": str(bot.trading_window_end),
+            },
+        })
+        return {"status": "skipped", "reason": "outside_trading_window"}
 
     broker_constraints = get_broker_symbol_constraints(
         broker_account,

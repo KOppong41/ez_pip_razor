@@ -280,3 +280,34 @@ frozen attribution, malformed configurations and baseline scope. Logs are
 `.runtime/identity-full-flutter-tests.log`, and
 `.runtime/identity-regression-tests.log`. No distributable was built and no
 demo/live orders were submitted during validation.
+
+## Gold scan diagnostics and trading-window enforcement
+
+The 21 September investigation found that Gold's 18 September scans stopped
+on neutral or conflicting M15/H1 direction. Valid neutral analysis was reported
+as `htf_bias_unavailable`, and scans outside the configured trading windows
+could report detector rejections before the decision layer checked the schedule.
+
+The context analyzer now retains every configured frame's analysis and reports
+valid neutral direction as `htf_bias_neutral`. Missing or malformed analysis
+remains `htf_bias_unavailable`; conflicting directions remain
+`htf_context_conflict`. Run summaries distinguish `neutral`, `unavailable`,
+`conflict`, and unsupported context timeframes. All configured frames still
+need an agreeing directional bias before detector evaluation.
+
+Scans use the existing timezone-aware bot schedule before fetching candles or
+evaluating detectors. A closed window records `outside_trading_window`, the
+checked time, and the configured schedule, with higher-timeframe and strategy
+evaluation marked as not performed. The decision-stage schedule check remains
+in place. The same shared task is used by isolated bot replay. Risk settings,
+strategy thresholds and configured trading hours are not altered by this fix.
+
+Focused validation covers the recorded neutral-H1 case, missing context,
+conflicting directions, all-frame evidence, Gold's post-close restart time,
+the next London window, and disabled schedule enforcement. Source desktop
+workers must restart to load these changes.
+
+Validation on 2026-09-21: all **46 focused regressions** and the complete
+**372-test Django suite** passed. Django system checks, migration checks and
+whitespace checks passed. Tests used an isolated in-memory database. Logs:
+`.runtime/gold-gate-fix-focused.log` and `.runtime/gold-gate-fix-full.log`.

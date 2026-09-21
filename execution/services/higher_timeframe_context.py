@@ -8,12 +8,14 @@ def analyze_context(timeframes, fetch, analyze):
     frames = {normalize_execution_timeframe(value) for value in timeframes or ("15m",)}
     if None in frames or not frames.issubset(FRAME_MINUTES):
         return None, {}, "htf_timeframe_unsupported"
-    details = {}
-    for frame in sorted(frames, key=FRAME_MINUTES.get):
-        detail = analyze(fetch(frame))
-        details[frame] = detail
-        if not detail or not detail.get("bias"):
-            return None, details, "htf_bias_unavailable"
+    # Keep every frame's evidence, including when the immediate frame is
+    # neutral. A valid neutral analysis is different from missing candle data.
+    details = {frame: analyze(fetch(frame)) for frame in sorted(frames, key=FRAME_MINUTES.get)}
+    if any(not isinstance(detail, dict) or detail.get("bias", "invalid") not in (None, "buy", "sell")
+           for detail in details.values()):
+        return None, details, "htf_bias_unavailable"
+    if any(detail["bias"] is None for detail in details.values()):
+        return None, details, "htf_bias_neutral"
     immediate = min(frames, key=FRAME_MINUTES.get)
     dominant = max(frames, key=FRAME_MINUTES.get)
     if len({detail["bias"] for detail in details.values()}) != 1:
