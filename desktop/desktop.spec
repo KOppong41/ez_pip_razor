@@ -1,12 +1,20 @@
 """PyInstaller onedir build for the backend bundled beside the Flutter app."""
 
 from pathlib import Path
+import json
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_root = Path.cwd()
 desktop_dir = project_root / "desktop"
+sys.path.insert(0, str(project_root))
+from core.build_info import capture_build_identity
+
+build_manifest = project_root / ".runtime" / "build-info.json"
+build_manifest.parent.mkdir(parents=True, exist_ok=True)
+build_manifest.write_text(json.dumps(capture_build_identity(project_root, frozen=False)), encoding="utf-8")
 
 project_packages = [
     "config",
@@ -44,6 +52,7 @@ def gather_datas():
                         (str(file_path), str(file_path.parent.relative_to(project_root)))
                     )
     collected.append((str(desktop_dir / "config.sample.yml"), "desktop"))
+    collected.append((str(build_manifest), "core"))
     for package in project_packages:
         collected.extend(collect_data_files(package, include_py_files=False))
     return collected

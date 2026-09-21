@@ -7,7 +7,7 @@ copy stored on ``Asset.recommended_config`` so administrators can adjust it.
 from copy import deepcopy
 
 
-ASSET_PRESET_VERSION = 3
+ASSET_PRESET_VERSION = 4
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"]
 ALL_DAYS = WEEKDAYS + ["sat", "sun"]
 
@@ -220,9 +220,11 @@ ASSET_STRATEGY_OVERRIDES = {
     "XAUUSDm": {
         "momentum_ignition": {
             "min_impulse_pct": 0.0007,
-            "min_tick_volume": 70,
+            "min_tick_volume": 70,  # legacy setting, inactive in relative mode
+            "min_relative_volume": 1.0,
+            "volume_lookback": 20,
         },
-        "breakout_retest": {"min_range_pct": 0.0008},
+        "breakout_retest": {"min_range_pct": 0.0008, "min_relative_volume": 1.0, "volume_lookback": 20},
     },
     "XAGUSDm": {"momentum_ignition": {"min_impulse_pct": 0.0011}},
     "USOILm": {"momentum_ignition": {"min_impulse_pct": 0.0012}},

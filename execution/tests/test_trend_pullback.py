@@ -50,6 +50,9 @@ class TrendPullbackFractalTests(SimpleTestCase):
 
         self.assertEqual(result.action, "open")
         self.assertEqual(result.direction, "buy")
+        self.assertEqual(result.entry_price, Decimal("10.1"))
+        self.assertEqual(result.target_rr, Decimal("2"))
+        self.assertEqual((result.tp - result.entry_price) / (result.entry_price - result.sl), result.target_rr)
         self.assertGreaterEqual(result.score, 0.0)
         self.assertLessEqual(result.score, 1.0)
 

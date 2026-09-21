@@ -10,6 +10,7 @@ import 'api_client.dart';
 import 'backend_manager.dart';
 
 part 'historical_backtesting.dart';
+part 'trade_history.dart';
 
 void main() => runApp(EzTradeApp(backendManager: BackendManager()));
 
@@ -5291,11 +5292,12 @@ class _WorkspaceHeader extends StatelessWidget {
             ),
           ],
         );
-        final controls = Row(
-          mainAxisSize: MainAxisSize.min,
+        final controls = Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          alignment: WrapAlignment.end,
           children: [
             _StatusPill(text: badge, color: blue),
-            const SizedBox(width: 12),
             action,
           ],
         );
@@ -6364,145 +6366,6 @@ class _BacktestStrategyRow extends StatelessWidget {
   }
 }
 
-class HistoryPage extends StatefulWidget {
-  const HistoryPage({super.key, required this.client});
-  final ApiClient client;
-
-  @override
-  State<HistoryPage> createState() => _HistoryPageState();
-}
-
-class _HistoryPageState extends State<HistoryPage> {
-  late Future<dynamic> future = widget.client.get('/api/personal/history/');
-
-  Future<void> reload() async {
-    final next = widget.client.get('/api/personal/history/');
-    setState(() => future = next);
-    await next;
-  }
-
-  @override
-  Widget build(BuildContext context) => FutureBuilder(
-    future: future,
-    builder: (context, snapshot) {
-      if (snapshot.hasError) {
-        return Empty(icon: Icons.cloud_off, text: snapshot.error.toString());
-      }
-      if (!snapshot.hasData) {
-        return const Center(child: CircularProgressIndicator());
-      }
-      final root = mapOf(snapshot.data);
-      final summary = mapOf(root['summary']);
-      final overlay = mapOf(root['opposite_scalp']);
-      final trades = listOfMaps(root['trades']);
-      final metrics = [
-        ('TOTAL TRADES', '${integerValue(summary['total_trades']) ?? 0}', blue),
-        ('WINS', '${integerValue(summary['wins']) ?? 0}', green),
-        ('LOSSES', '${integerValue(summary['losses']) ?? 0}', danger),
-        ('WIN RATE', optionalPercent(summary['win_rate']), green),
-        ('GROSS PROFIT', compactNumber(summary['gross_profit']), green),
-        ('GROSS LOSS', compactNumber(summary['gross_loss']), danger),
-        (
-          'NET PROFIT',
-          compactNumber(summary['net_profit']),
-          valueColor(summary['net_profit']),
-        ),
-        ('PROFIT FACTOR', compactNumber(summary['profit_factor']), amber),
-      ];
-      return RefreshIndicator(
-        onRefresh: reload,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 22, 24, 30),
-          children: [
-            _WorkspaceHeader(
-              eyebrow: 'PERFORMANCE LEDGER',
-              title: 'Trade history',
-              description:
-                  'Track closed trades, realized performance and execution outcomes.',
-              badge: '${trades.length} TRADES',
-              action: OutlinedButton.icon(
-                onPressed: reload,
-                icon: const Icon(Icons.refresh_rounded, size: 17),
-                label: const Text('Reload history'),
-              ),
-            ),
-            const SizedBox(height: 14),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final columns = constraints.maxWidth >= 1100
-                    ? 4
-                    : constraints.maxWidth >= 560
-                    ? 2
-                    : 1;
-                return GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    crossAxisSpacing: 10,
-                    mainAxisSpacing: 10,
-                    mainAxisExtent: 74,
-                  ),
-                  itemCount: metrics.length,
-                  itemBuilder: (context, index) => _HistoryMetricCard(
-                    label: metrics[index].$1,
-                    value: metrics[index].$2,
-                    color: metrics[index].$3,
-                  ),
-                );
-              },
-            ),
-            if (overlay.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 16),
-                child: SelectableText(
-                  'Opposite scalps ? ${overlay['trades']} trades ? ${compactNumber(overlay['win_rate_pct'])}% wins ? PF ${compactNumber(overlay['profit_factor'])}\n'
-                  'Net P/L ${compactNumber(overlay['net_pnl'])} ? expectancy ${compactNumber(overlay['expectancy'])} ? recorded costs ${compactNumber(overlay['costs'])}\n'
-                  'Realized drawdown ${compactNumber(overlay['realized_drawdown'])} ? account drawdown change ${compactNumber(overlay['realized_drawdown_delta'])}\n'
-                  '${overlay['drawdown_basis']}\n${overlay['cost_basis']}',
-                  style: const TextStyle(color: muted, fontSize: 12),
-                ),
-              ),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    'EXECUTION LEDGER',
-                    style: TextStyle(
-                      color: blue,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 1.1,
-                    ),
-                  ),
-                ),
-                Text(
-                  'Latest ${trades.length}',
-                  style: const TextStyle(color: muted, fontSize: 10),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            if (trades.isEmpty)
-              const _EmptyWorkspace(
-                icon: Icons.query_stats_rounded,
-                title: 'No closed trades yet',
-                text:
-                    'Completed positions will appear here with entry, exit and realized P&L.',
-              )
-            else
-              for (var index = 0; index < trades.length; index++) ...[
-                _TradeHistoryRow(trade: trades[index]),
-                if (index != trades.length - 1) const SizedBox(height: 8),
-              ],
-          ],
-        ),
-      );
-    },
-  );
-}
-
 class _HistoryMetricCard extends StatelessWidget {
   const _HistoryMetricCard({
     required this.label,
@@ -6604,6 +6467,27 @@ class _TradeHistoryRow extends StatelessWidget {
                     Text(
                       formatDateTime(trade['closed_at'] ?? trade['created_at']),
                       style: const TextStyle(color: muted, fontSize: 9),
+                    ),
+                    Text(
+                      '${trade['bot_name'] ?? 'Unknown bot'} · ${label('${trade['strategy'] ?? 'unknown'}')} · Preset ${trade['preset_version'] ?? 'unknown'}',
+                      style: const TextStyle(color: muted, fontSize: 9),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Tooltip(
+                      message:
+                          'Entry configuration: ${trade['config_fingerprint'] ?? 'unknown'}\n'
+                          'Entry build: ${trade['build_sha'] ?? 'unknown'} '
+                          '(${trade['build_status'] ?? 'unavailable'})\n'
+                          'Timeframe: ${trade['execution_timeframe'] ?? 'unknown'}\n'
+                          'Recommendation: ${trade['recommendation_state'] ?? 'unknown'}',
+                      child: Text(
+                        'Config ${_shortHistoryIdentity(trade['config_fingerprint'])} · '
+                        'Build ${_shortHistoryIdentity(trade['build_sha'])}',
+                        style: const TextStyle(color: muted, fontSize: 9),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ],
                 ),

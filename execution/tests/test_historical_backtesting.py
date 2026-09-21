@@ -383,6 +383,20 @@ class HistoricalBacktestApiTests(TestCase):
         ).config
         self.assertEqual(stored_config["strategy_config"]["min_atr_pct"], "0.123")
 
+    def test_gold_replay_snapshots_relative_volume_for_both_detectors(self):
+        from bots.services import apply_recommendations_to_bot
+        self.bot.asset = Asset.objects.get(symbol="XAUUSDm")
+        apply_recommendations_to_bot(self.bot, save=False)
+        self.bot.save()
+        for strategy in ("momentum_ignition", "breakout_retest"):
+            response = self.client.post("/api/personal/backtests/", {
+                **payload(strategy=strategy), "bot_id": self.bot.id, "csv": csv_data(50),
+            }, content_type="application/json")
+            self.assertEqual(response.status_code, 201, response.content)
+            config = HistoricalBacktest.objects.get(id=response.json()["id"]).config["strategy_config"]
+            self.assertEqual(Decimal(config["min_relative_volume"]), 1)
+            self.assertEqual(config["volume_lookback"], 20)
+
     def test_options_and_submission_are_owner_scoped(self):
         self.client.force_login(self.other)
         options = self.client.get("/api/personal/backtests/options/").json()

@@ -121,6 +121,26 @@ class ReplayBroker:
         return True
 
     def submit(self, order, *args, **kwargs):
+        from execution.services.flip import execute_flip, is_flip_order
+        if is_flip_order(order):
+            return execute_flip(order, self, self._submit)
+        return self._submit(order)
+
+    def preflight_flip(self, order, positions):
+        from django.db import transaction
+        from execution.services.live_risk import enforce_pretrade_risk
+        try:
+            with transaction.atomic():
+                result = enforce_pretrade_risk(
+                    order, self, self.tick_for_account(), self.symbol_info, self.account_info_for_account(),
+                    broker_positions=self.positions_for_account(), replacing_position_ids=[position.pk for position in positions],
+                )
+                transaction.set_rollback(True)
+                return result
+        finally:
+            order.refresh_from_db()
+
+    def _submit(self, order):
         from execution.models import BrokerPosition
         from execution.services.live_risk import RiskRejected, enforce_pretrade_risk
         if order.intent == "exit":
@@ -264,7 +284,8 @@ def replay(payload):
             "execution.tasks.get_broker_symbol_constraints": sim.constraints,
             "execution.services.brokers.get_broker_symbol_constraints": sim.constraints,
             "execution.tasks._queue_or_dispatch_order": sim.submit,
-            "execution.services.positions.dispatch_place_order": sim.submit,
+            "execution.services.brokers.get_market_status": lambda **kwargs: get_market_status_for_bot(bot, now=sim.now, use_mt5_probe=False),
+            "execution.services.brokers.is_liquid_session": lambda: True,
             "execution.services.decision.get_price": lambda *args: sim.bid,
             "execution.tasks.get_price": lambda *args: sim.bid,
             "execution.services.psychology._get_broker_balance_decimal": lambda *args: sim.balance,

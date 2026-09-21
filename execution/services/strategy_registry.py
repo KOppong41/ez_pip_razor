@@ -85,6 +85,7 @@ def build_strategy_config_for_bot(strategy_name: str, bot):
     )
     config = build_strategy_config(
         strategy_name,
+        asset=getattr(bot, "asset", None),
         strategy_overrides=overrides,
     )
     # The visible bot schedule is authoritative, including for older tuning

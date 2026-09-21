@@ -1174,9 +1174,21 @@ class MT5Connector(BaseConnector):
 
     def place_order(self, order: Order) -> None:
         with _MT5Session.serialized():
+            if order.intent == "entry" and order.decision_id and order.decision.params.get("flip_requested"):
+                from execution.services.flip import execute_flip
+                return execute_flip(order, self, self._place_order_serialized)
             return self._place_order_serialized(order)
 
-    def _place_order_serialized(self, order: Order) -> None:
+    def preflight_flip(self, order, positions):
+        try:
+            with transaction.atomic():
+                result = self._place_order_serialized(order, preflight_positions=positions)
+                transaction.set_rollback(True)
+                return result
+        finally:
+            order.refresh_from_db()
+
+    def _place_order_serialized(self, order: Order, *, preflight_positions=None) -> None:
         """
         Market order flow:
         1) login + ensure symbol + terminal sanity
@@ -1446,11 +1458,17 @@ class MT5Connector(BaseConnector):
             raise ConnectorError(msg)
         broker_positions = tuple(broker_positions)
         self._sync_broker_exposure_snapshot(order.broker_account, broker_positions)
+        replacing_tickets = {position.broker_position_ticket for position in preflight_positions or ()}
+        if preflight_positions is not None and not replacing_tickets.issubset({int(p.ticket) for p in broker_positions}):
+            raise ConnectorError("Flip group changed before preflight")
         positions = tuple(
             position
             for position in broker_positions
             if str(getattr(position, "symbol", "")) == order.symbol
+            and int(position.ticket) not in replacing_tickets
         )
+        if order.decision_id and order.decision.params.get("flip_requested") and positions:
+            raise ConnectorError("Flip symbol has exposure outside the replacement group")
         if not allow_hedge and positions and not is_close_order:
             buys = sum(Decimal(str(p.volume)) for p in positions if p.type == mt5.ORDER_TYPE_BUY)
             sells = sum(Decimal(str(p.volume)) for p in positions if p.type == mt5.ORDER_TYPE_SELL)
@@ -1521,6 +1539,7 @@ class MT5Connector(BaseConnector):
                 symbol_info,
                 mt5.account_info(),
                 broker_positions=broker_positions,
+                **({"replacing_position_ids": tuple(p.pk for p in preflight_positions)} if preflight_positions is not None else {}),
             )
             qty_dec = risk_result.volume
             order.requested_price = risk_result.entry_price
@@ -1714,6 +1733,11 @@ class MT5Connector(BaseConnector):
             _clear_risk_reservation(order)
             update_order_status(order, "rejected", error_msg=msg)
             raise ConnectorError(msg)
+
+        if preflight_positions is not None:
+            # All local, risk, protection and broker order_check guards passed.
+            # No acknowledgement, execution attempt or order_send in preflight.
+            return risk_result
 
         update_order_status(order, "ack")
 

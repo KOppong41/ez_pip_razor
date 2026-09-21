@@ -39,7 +39,7 @@ from execution.services.daily_risk import (
     daily_equity_change_pcts,
     update_account_risk_day,
 )
-from execution.services.ai_strategy_selector import select_ai_strategies
+from execution.services.ai_strategy_selector import effective_spread_allowance, select_ai_strategies
 from execution.services.engine import run_engine_on_candles
 from execution.services.fanout import fanout_orders
 from execution.services.marketdata import get_candles_for_account
@@ -77,6 +77,7 @@ from execution.services.position_management import plan_scalper_position
 from execution.services.portfolio import record_fill
 from execution.services.equity import update_equity_high_water
 from execution.services.trade_constraints import distance_to_price
+from execution.services.trading_type import is_within_trading_window
 from execution.services.strategies.harami import detect_harami
 from execution.services.strategy_registry import (
     SCALPER_STRATEGY_REGISTRY,
@@ -975,7 +976,8 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
             )
             htf_candles = None
 
-    htf_bias = _compute_bias_from_htf(htf_candles) if htf_candles else None
+    htf_bias_detail = (_analyze_htf_bias(htf_candles) if htf_candles else None) or {}
+    htf_bias = htf_bias_detail.get("bias")
 
     # 2) Build engine context + run engine (auto-trade mode uses asset/profile presets)
     if getattr(bot, "auto_trade", False):
@@ -990,7 +992,7 @@ def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int 
                 "bar_range": last_entry["high"] - last_entry["low"],
                 "last_close": last_entry.get("close"),
                 "htf_bias": htf_bias,
-                "regime": htf_bias_detail.get("regime"),
+                "regime": htf_bias_detail,
             },
         )
     else:
@@ -1307,6 +1309,16 @@ def validate_broker_configs_task():
     return {"issues": issues}
 
 
+def _rank_scalper_candidates(candidates):
+    best_by_bot = {}
+    for candidate in candidates:
+        bot_id = int(candidate["bot_id"])
+        existing = best_by_bot.get(bot_id)
+        if existing is None or float(candidate["score"]) > float(existing["score"]):
+            best_by_bot[bot_id] = candidate
+    return sorted(best_by_bot.values(), key=lambda candidate: (-float(candidate["score"]), int(candidate["bot_id"])))
+
+
 def _dispatch_scalper_candidate(decision: Decision, strategy_name: str) -> dict:
     """Create and queue one ranked scalper candidate with local broker guards."""
     orders_placed = []
@@ -1537,20 +1549,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
                 candidates.append(candidate)
         dispatched += 1
 
-    best_by_bot = {}
-    for candidate in candidates:
-        bot_id = int(candidate["bot_id"])
-        existing = best_by_bot.get(bot_id)
-        if existing is None or float(candidate["score"]) > float(existing["score"]):
-            best_by_bot[bot_id] = candidate
-
-    ranked = sorted(
-        best_by_bot.values(),
-        key=lambda candidate: (
-            -float(candidate["score"]),
-            int(candidate["bot_id"]),
-        ),
-    )
+    ranked = _rank_scalper_candidates(candidates)
     slots_by_account = {}
     slot_winners_by_account = defaultdict(list)
     awarded = []
@@ -1561,7 +1560,9 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             account = BrokerAccount.objects.get(pk=account_id)
             slots_by_account[account_id] = _account_entry_slots(account)
         available = slots_by_account[account_id]
-        if available == 0:
+        decision = Decision.objects.select_related("signal", "bot__broker_account").get(pk=int(candidate["decision_id"]))
+        replacing_group = bool(decision.params.get("flip_requested"))
+        if available == 0 and not replacing_group:
             slot_losses.append(candidate)
             winner_ids = slot_winners_by_account[account_id]
             lost_to_another_bot = bool(winner_ids)
@@ -1582,10 +1583,6 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             )
             continue
 
-        decision = Decision.objects.select_related(
-            "signal",
-            "bot__broker_account",
-        ).get(pk=int(candidate["decision_id"]))
         dispatch_result = _dispatch_scalper_candidate(
             decision,
             str(candidate["strategy"]),
@@ -1593,7 +1590,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
         if dispatch_result["orders"]:
             awarded.append(candidate)
             slot_winners_by_account[account_id].append(int(candidate["bot_id"]))
-            if available is not None:
+            if available is not None and not replacing_group:
                 slots_by_account[account_id] = max(0, available - 1)
             _update_scalper_run_allocation(
                 candidate.get("run_log_id"),
@@ -1700,11 +1697,12 @@ def trade_scalper_strategies_for_bot(
                         "best_score": None,
                         "best_strategy": None,
                         "rejection_reason": reason,
-                        "htf_status": (
-                            "unavailable"
-                            if reason == "htf_bias_unavailable"
-                            else "not_evaluated"
-                        ),
+                        "htf_status": {
+                            "htf_bias_unavailable": "unavailable",
+                            "htf_bias_neutral": "neutral",
+                            "htf_context_conflict": "conflict",
+                            "htf_timeframe_unsupported": "unsupported",
+                        }.get(reason, "not_evaluated"),
                         "spread_status": (
                             "unavailable"
                             if reason.startswith("market_data")
@@ -1790,6 +1788,22 @@ def trade_scalper_strategies_for_bot(
             effective_timeframe,
         )
     timeframe = effective_timeframe
+
+    # Apply the same visible schedule as the decision layer before fetching
+    # candles or running detectors, so a closed window is the reported blocker.
+    schedule_checked_at = timezone.now()
+    if not is_within_trading_window(bot, now=schedule_checked_at):
+        _log_skip("outside_trading_window", {
+            "schedule": {
+                "checked_at": schedule_checked_at.isoformat(),
+                "windows": bot.trading_windows,
+                "timezone": bot.trading_timezone,
+                "allowed_days": bot.allowed_trading_days,
+                "start": str(bot.trading_window_start),
+                "end": str(bot.trading_window_end),
+            },
+        })
+        return {"status": "skipped", "reason": "outside_trading_window"}
 
     broker_constraints = get_broker_symbol_constraints(
         broker_account,
@@ -1997,6 +2011,16 @@ def trade_scalper_strategies_for_bot(
     # largest supplies the dominant regime. Gold uses M15 and H1 above M5.
     from execution.services.higher_timeframe_context import analyze_context
     symbol_config = scalper_cfg.resolve_symbol(symbol)
+    allowed_spread_price = effective_spread_allowance(
+        bot, symbol_config, point=broker_point,
+        market_price=(Decimal(str(tick_snapshot["bid"])) + Decimal(str(tick_snapshot["ask"]))) / 2,
+        digits=getattr(broker_constraints, "digits", None), atr=entry_atr_points,
+    )
+    strategy_context["allowed_spread_price"] = str(allowed_spread_price) if allowed_spread_price is not None else None
+    strategy_context["spread_allowance_ratio"] = (
+        float(spread_price / allowed_spread_price)
+        if spread_price is not None and allowed_spread_price else None
+    )
     try:
         htf_bias, htf_bias_detail, context_reason = analyze_context(
             symbol_config.context_timeframes if symbol_config else (),
@@ -2039,6 +2063,7 @@ def trade_scalper_strategies_for_bot(
                 "bar_range": bar_range,
                 "last_close": last_entry["close"],
                 "spread_price": spread_price,
+                "allowed_spread_price": allowed_spread_price,
                 "session": session_label,
                 "htf_bias": htf_bias,
                 "regime": htf_bias_detail.get("regime"),

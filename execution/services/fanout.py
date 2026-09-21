@@ -156,6 +156,7 @@ def fanout_orders(decision: Decision, master_qty: str | None) -> List[Tuple[Orde
             symbol=decision.signal.symbol,
             created_at__gte=cutoff,
             status__in=["new", "ack", "filled", "part_filled"],
+            intent="entry",
         ).exists()
         if recent:
             return []

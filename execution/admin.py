@@ -205,6 +205,7 @@ def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
             )
         run_logs = []
         outcome_counts = {}
+        rejection_counts = {}
         strategy_counts = {}
         try:
             from bots.models import Bot
@@ -244,6 +245,9 @@ def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
                 summary = run.summary or {}
                 outcome = str(summary.get("outcome") or "unknown")
                 outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+                rejection_reason = str(summary.get("rejection_reason") or "").strip()
+                if rejection_reason:
+                    rejection_counts[rejection_reason] = rejection_counts.get(rejection_reason, 0) + 1
                 for event in summary.get("strategies") or []:
                     key = (
                         str(event.get("strategy") or "unknown"),
@@ -254,6 +258,7 @@ def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
         except Exception:
             run_logs = []
             outcome_counts = {}
+            rejection_counts = {}
             strategy_counts = {}
         data.append(
             {
@@ -270,6 +275,13 @@ def _diagnostics_for_symbols(symbols_cfg: dict) -> list[dict]:
                     {"outcome": outcome, "count": count}
                     for outcome, count in sorted(
                         outcome_counts.items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                ],
+                "rejection_counts": [
+                    {"reason": reason, "count": count}
+                    for reason, count in sorted(
+                        rejection_counts.items(),
                         key=lambda item: (-item[1], item[0]),
                     )
                 ],

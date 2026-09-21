@@ -41,6 +41,7 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = "__all__"
         read_only_fields = (
+            "performance_context",
             "owner",
             "status",
             "created_at",

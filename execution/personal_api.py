@@ -437,37 +437,38 @@ def personal_risk(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def personal_history(request):
-    from execution.services.overlay_analytics import account_overlay_report
+    from execution.services.performance_history import history_report
     try:
         account = _account_for(request)
+        return Response(history_report(account, request.user, request.query_params))
     except (BrokerAccount.DoesNotExist, ValueError) as exc:
         return Response({"detail": str(exc)}, status=400)
-    rows = TradeLog.objects.filter(broker_account=account).order_by("-closed_at", "-created_at")[:1000]
-    values = list(
-        rows.values(
-            "id", "created_at", "closed_at", "symbol", "side", "qty", "price", "exit_price", "pnl", "status", "broker_ticket"
-        )
-    )
-    wins = sum(1 for row in values if (row["pnl"] or 0) > 0)
-    losses = sum(1 for row in values if (row["pnl"] or 0) < 0)
-    gross_profit = sum((row["pnl"] or Decimal("0") for row in values if (row["pnl"] or 0) > 0), Decimal("0"))
-    gross_loss = sum((row["pnl"] or Decimal("0") for row in values if (row["pnl"] or 0) < 0), Decimal("0"))
-    return Response(
-        {
-            "summary": {
-                "total_trades": len(values),
-                "wins": wins,
-                "losses": losses,
-                "win_rate": Decimal(wins * 100) / len(values) if values else Decimal("0"),
-                "gross_profit": gross_profit,
-                "gross_loss": gross_loss,
-                "net_profit": gross_profit + gross_loss,
-                "profit_factor": gross_profit / abs(gross_loss) if gross_loss else None,
-            },
-            "trades": values,
-            "opposite_scalp": account_overlay_report(account),
-        }
-    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def personal_history_baseline(request):
+    from execution.models import PerformanceBaseline
+    from execution.services.performance_history import baseline_dict, timestamp, validate_scope
+    try:
+        if not isinstance(request.data, dict):
+            raise ValueError("Expected a JSON object.")
+        account = _account_for(request)
+        name = str(request.data.get("name") or "").strip()
+        if not name or len(name) > 120:
+            raise ValueError("Baseline name must contain 1 to 120 characters.")
+        started_at = timestamp(request.data.get("started_at")) or timezone.now()
+        if started_at > timezone.now():
+            raise ValueError("A baseline cannot start in the future.")
+        filters = request.data.get("filters") or {}
+        if not isinstance(filters, dict):
+            raise ValueError("Baseline filters must be an object.")
+        scope = validate_scope(filters, account)
+        baseline = PerformanceBaseline.objects.create(owner=request.user, broker_account=account,
+                                                       name=name, started_at=started_at, filters=scope)
+        return Response(baseline_dict(baseline), status=201)
+    except (BrokerAccount.DoesNotExist, ValueError) as exc:
+        return Response({"detail": str(exc)}, status=400)
 
 
 @api_view(["GET"])
