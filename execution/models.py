@@ -225,6 +225,7 @@ class Order(models.Model):
 
     def save(self, *args, **kwargs):
         if self._state.adding and self.intent == "entry" and self.status == "new" and self.decision_id:
+            from execution.services.performance_identity import performance_identity
             decision = self.decision
             payload = decision.signal.payload or {} if decision.signal_id else {}
             self.performance_context = {
@@ -232,6 +233,7 @@ class Order(models.Model):
                 "preset_version": self.bot.asset_preset_version_applied,
                 "is_opposite_scalp": bool((decision.params or {}).get("is_opposite_scalp")),
                 "source": "entry_snapshot",
+                **performance_identity(self.bot, self.symbol, decision.signal.timeframe),
             }
         if not self.owner:
             if self.bot and self.bot.owner_id:

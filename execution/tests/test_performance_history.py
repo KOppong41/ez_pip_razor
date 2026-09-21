@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
@@ -164,3 +164,86 @@ class PerformanceHistoryTests(TestCase):
         result = self.history()
         self.assertEqual(result["summary"]["total_trades"], 0)
         self.assertEqual(result["data_quality"]["positions_with_missing_exit_results"], 1)
+
+    @override_settings(EXECUTION_BUILD_IDENTITY={"sha": "a" * 40, "status": "clean"})
+    def test_entry_identity_survives_bot_and_running_build_changes(self):
+        entry, _, _ = self.outcome("2")
+        original = dict(entry.performance_context)
+        self.assertIsNotNone(original["config_fingerprint"])
+        self.bot.risk_per_trade_pct = Decimal("0.8")
+        self.bot.save()
+        with override_settings(EXECUTION_BUILD_IDENTITY={"sha": "b" * 40, "status": "clean"}):
+            entry.status = "filled"
+            entry.save()
+            changed, _, _ = self.outcome("-1")
+            self.assertNotEqual(changed.performance_context["config_fingerprint"], original["config_fingerprint"])
+            result = self.history(config_fingerprint=original["config_fingerprint"], build_sha="a" * 40)
+        entry.refresh_from_db()
+        self.assertEqual(entry.performance_context, original)
+        self.assertEqual(result["summary"]["total_trades"], 1)
+        self.assertEqual(result["trades"][0]["build_sha"], "a" * 40)
+        self.assertEqual(result["trades"][0]["execution_timeframe"], "5m")
+        self.assertNotIn("config_snapshot", result["trades"][0])
+
+    @override_settings(EXECUTION_BUILD_IDENTITY={"sha": None, "status": "dirty"})
+    def test_dirty_legacy_and_mixed_entries_do_not_invent_build_or_configuration(self):
+        entry, _, _ = self.outcome("2")
+        self.outcome("-1", snapshot=False)
+        result = self.history(build_sha="unknown")
+        self.assertEqual(result["summary"]["total_trades"], 2)
+        self.assertEqual(result["data_quality"]["unknown_build_trades"], 2)
+        self.assertEqual(result["data_quality"]["unknown_configuration_trades"], 1)
+        self.assertEqual(self.history(config_fingerprint="unknown")["summary"]["total_trades"], 1)
+        Order.objects.create(bot=self.bot, broker_account=self.account, intent="entry", symbol=entry.symbol,
+                             side="buy", qty=1, client_order_id="mixed-identity-entry", status="filled",
+                             broker_position_ticket=entry.broker_position_ticket)
+        mixed = next(row for row in self.history()["trades"] if row["strategy"] == "mixed_entries")
+        for key in ("config_fingerprint", "build_sha", "execution_timeframe", "recommendation_state"):
+            self.assertIsNone(mixed[key])
+
+    @override_settings(EXECUTION_BUILD_IDENTITY={"sha": "a" * 40, "status": "clean"})
+    def test_preview_and_baseline_pin_configuration_before_first_closed_trade(self):
+        from bots.services import apply_recommendations_to_bot
+        apply_recommendations_to_bot(self.bot, save=False)
+        self.bot.save()
+        preview = self.history(bot_id=self.bot.pk)
+        identity = preview["current_identity"]
+        self.assertIsNotNone(identity["config_fingerprint"])
+        self.assertEqual(identity["symbol"], "XAUUSD")
+        self.assertNotIn("config_snapshot", identity)
+        self.assertIn(identity["config_fingerprint"], preview["options"]["config_fingerprint"])
+        scope = {"bot_id": str(self.bot.pk), "config_fingerprint": identity["config_fingerprint"], "build_sha": "a" * 40}
+        response = self.client.post('/api/personal/history/baselines/', {
+            "broker_account_id": self.account.pk, "name": "Pinned identity", "started_at": self.at.isoformat(),
+            "filters": scope}, content_type="application/json")
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()["filters"], scope)
+        baseline = response.json()["id"]
+        self.outcome("2")
+        self.bot.risk_per_trade_pct += Decimal("0.1")
+        self.bot.save()
+        changed, _, _ = self.outcome("-5")
+        report = self.history(baseline_id=baseline)
+        self.assertEqual(report["summary"]["total_trades"], 1)
+        self.assertEqual(Decimal(str(report["summary"]["net_profit"])), 2)
+        self.assertEqual(self.history(baseline_id=baseline, config_fingerprint=changed.performance_context["config_fingerprint"])["summary"]["total_trades"], 0)
+        self.assertEqual(self.history()["summary"]["total_trades"], 2)
+
+    def test_identity_filter_validation_applies_to_history_and_baselines(self):
+        for key in ("config_fingerprint", "build_sha"):
+            for value in ("short", "g" * 64, "a" * 65):
+                with self.subTest(key=key, value=value):
+                    response = self.client.get('/api/personal/history/', {"broker_account_id": self.account.pk, key: value})
+                    self.assertEqual(response.status_code, 400)
+                    response = self.client.post('/api/personal/history/baselines/', {
+                        "broker_account_id": self.account.pk, "name": "Invalid", "filters": {key: value}}, content_type="application/json")
+                    self.assertEqual(response.status_code, 400)
+
+    def test_invalid_current_configuration_does_not_hide_recorded_history(self):
+        self.outcome("2")
+        self.bot.engine_mode = "scalper"
+        self.bot.scalper_params = {"risk": "invalid"}
+        self.bot.save()
+        report = self.history(bot_id=self.bot.pk)
+        self.assertEqual(report["summary"]["total_trades"], 1)
+        self.assertIsNone(report["current_identity"])

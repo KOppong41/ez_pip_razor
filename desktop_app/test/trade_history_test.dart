@@ -9,6 +9,9 @@ class HistoryClient extends ApiClient {
   final requests = <Uri>[];
   final baselines = <Map<String, dynamic>>[];
   final posts = <Map<String, dynamic>>[];
+  final fingerprint = List.filled(64, 'a').join();
+  String? buildSha = List.filled(40, 'b').join();
+  final trades = <Map<String, dynamic>>[];
   Completer<dynamic>? pending;
 
   Map<String, dynamic> result(Uri uri) => {
@@ -20,14 +23,26 @@ class HistoryClient extends ApiClient {
       'symbols': ['XAUUSD'],
       'strategies': ['trend_pullback'],
       'preset_versions': ['3', 'unknown'],
+      'config_fingerprint': [fingerprint, 'unknown'],
+      'build_sha': [if (buildSha != null) buildSha, 'unknown'],
     },
+    'current_identity': uri.queryParameters['bot_id'] == '10'
+        ? {
+            'symbol': 'XAUUSD',
+            'execution_timeframe': '5m',
+            'recommendation_state': 'recommended',
+            'config_fingerprint': fingerprint,
+            'build_sha': buildSha,
+            'build_status': buildSha == null ? 'dirty' : 'clean',
+          }
+        : null,
     'baselines': baselines,
     'baseline': uri.queryParameters.containsKey('baseline_id')
         ? baselines.first
         : null,
     'page': 1,
     'total_pages': 2,
-    'trades': [],
+    'trades': trades,
     'strategy_breakdown': [],
   };
 
@@ -73,6 +88,112 @@ Future<void> showHistory(WidgetTester tester, HistoryClient client) async {
 }
 
 void main() {
+  Future<void> selectBot(WidgetTester tester) async {
+    await tester.tap(find.text('All bots'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Gold demo').last);
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'current configuration and revision persist in a saved baseline',
+    (tester) async {
+      final client = HistoryClient();
+      await showHistory(tester, client);
+      await selectBot(tester);
+      expect(find.textContaining('Preview for new entries'), findsOneWidget);
+      await tester.ensureVisible(find.text('Use current configuration'));
+      await tester.tap(find.text('Use current configuration'));
+      await tester.pumpAndSettle();
+      expect(
+        client.requests.last.queryParameters['config_fingerprint'],
+        client.fingerprint,
+      );
+      expect(
+        client.requests.last.queryParameters['build_sha'],
+        client.buildSha,
+      );
+      expect(client.requests.last.queryParameters['symbol'], 'XAUUSD');
+      await tester.ensureVisible(
+        find.widgetWithText(OutlinedButton, 'Save baseline'),
+      );
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Save baseline'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Baseline name'),
+        'Pinned configuration',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Save baseline'));
+      await tester.pumpAndSettle();
+      expect(client.posts.single['filters'], {
+        'bot_id': '10',
+        'symbol': 'XAUUSD',
+        'config_fingerprint': client.fingerprint,
+        'build_sha': client.buildSha,
+      });
+      expect(
+        client.requests.last.queryParameters['build_sha'],
+        client.buildSha,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('dirty build preview cannot pin an invented revision', (
+    tester,
+  ) async {
+    final client = HistoryClient()..buildSha = null;
+    await showHistory(tester, client);
+    await selectBot(tester);
+    expect(find.textContaining('No verified build revision'), findsOneWidget);
+    await tester.ensureVisible(find.text('Use current configuration'));
+    await tester.tap(find.text('Use current configuration'));
+    await tester.pumpAndSettle();
+    expect(
+      client.requests.last.queryParameters['config_fingerprint'],
+      client.fingerprint,
+    );
+    expect(
+      client.requests.last.queryParameters.containsKey('build_sha'),
+      isFalse,
+    );
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('entry identity details preserve full hashes and legacy unknowns', (
+    tester,
+  ) async {
+    final client = HistoryClient();
+    client.trades.addAll([
+      {
+        'symbol': 'XAUUSD',
+        'config_fingerprint': client.fingerprint,
+        'build_sha': client.buildSha,
+        'execution_timeframe': '5m',
+        'build_status': 'clean',
+        'recommendation_state': 'recommended',
+      },
+      {'symbol': 'XAUUSD'},
+    ]);
+    await showHistory(tester, client);
+    await tester.scrollUntilVisible(
+      find.text('Config unknown · Build unknown'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      find.byTooltip(
+        'Entry configuration: ${client.fingerprint}\nEntry build: ${client.buildSha} (clean)\nTimeframe: 5m\nRecommendation: recommended',
+      ),
+      findsOneWidget,
+    );
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Gold filtering and pagination preserve account and scope', (
     tester,
   ) async {

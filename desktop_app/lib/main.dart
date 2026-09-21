@@ -6474,6 +6474,21 @@ class _TradeHistoryRow extends StatelessWidget {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    Tooltip(
+                      message:
+                          'Entry configuration: ${trade['config_fingerprint'] ?? 'unknown'}\n'
+                          'Entry build: ${trade['build_sha'] ?? 'unknown'} '
+                          '(${trade['build_status'] ?? 'unavailable'})\n'
+                          'Timeframe: ${trade['execution_timeframe'] ?? 'unknown'}\n'
+                          'Recommendation: ${trade['recommendation_state'] ?? 'unknown'}',
+                      child: Text(
+                        'Config ${_shortHistoryIdentity(trade['config_fingerprint'])} · '
+                        'Build ${_shortHistoryIdentity(trade['build_sha'])}',
+                        style: const TextStyle(color: muted, fontSize: 9),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                   ],
                 ),
               ),

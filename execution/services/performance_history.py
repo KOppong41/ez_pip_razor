@@ -2,6 +2,7 @@
 from collections import defaultdict
 from datetime import datetime, time, timedelta, timezone as dt_timezone
 from decimal import Decimal
+import re
 
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -11,7 +12,8 @@ from execution.models import BrokerPosition, Execution, Order, PerformanceBaseli
 from execution.utils.symbols import canonical_symbol
 
 ZERO = Decimal("0")
-SCOPE_KEYS = ("market", "bot_id", "symbol", "strategy", "preset_version")
+SCOPE_KEYS = ("market", "bot_id", "symbol", "strategy", "preset_version", "config_fingerprint", "build_sha")
+IDENTITY_KEYS = ("config_fingerprint", "build_sha", "build_status", "execution_timeframe", "recommendation_state")
 GOLD_STRATEGIES = ("trend_pullback", "breakout_retest", "momentum_ignition", "price_action_pinbar", "doji_breakout")
 
 
@@ -55,6 +57,9 @@ def validate_scope(values, account):
         scope["preset_version"] = str(version)
     if "symbol" in scope:
         scope["symbol"] = canonical_symbol(scope["symbol"])
+    for key, pattern in (("config_fingerprint", r"[0-9a-f]{64}"), ("build_sha", r"[0-9a-f]{40}|[0-9a-f]{64}")):
+        if key in scope and scope[key] != "unknown" and not re.fullmatch(pattern, scope[key]):
+            raise ValueError(f"Invalid {key} filter.")
     if any(len(value) > 128 for value in scope.values()):
         raise ValueError("Filter value is too long.")
     return scope
@@ -139,6 +144,7 @@ def closed_outcomes(account):
             "attribution_source": "mixed_entries" if mixed else snapshot.get("source", "historical_entry" if entry else "unknown"),
             "is_opposite_scalp": not mixed and bool(snapshot.get("is_opposite_scalp", (decision.params or {}).get("is_opposite_scalp") if decision else False)),
             "exit_records": len(parts), "completion_verified": position is not None,
+            **{key: None if mixed else snapshot.get(key) for key in IDENTITY_KEYS},
         })
     return rows, {"open_position_exit_records_omitted": omitted_open,
                   "positions_with_missing_exit_results": len(missing_results),
@@ -165,7 +171,7 @@ def matches(row, scope):
         return False
     if market == "forex" and row["category"] != "forex":
         return False
-    for key in ("bot_id", "symbol", "strategy", "preset_version"):
+    for key in SCOPE_KEYS[1:]:
         if key in scope and str(row.get(key) if row.get(key) is not None else "unknown") != scope[key]:
             return False
     return True
@@ -202,6 +208,29 @@ def history_report(account, user, params):
         "preset_versions": sorted(current_versions | {"unknown"} | {
             str(row["preset_version"]) if row["preset_version"] is not None else "unknown" for row in rows}),
     }
+    for key in ("config_fingerprint", "build_sha"):
+        options[key] = sorted({"unknown"} | {row[key] for row in rows if row[key]})
+    # A selected bot can define a baseline before its first closed outcome.
+    # This is a preview only: historical rows always use their entry snapshot.
+    current_identity = None
+    selected_bot_id = scope.get("bot_id") or (baseline.filters.get("bot_id") if baseline else None)
+    if selected_bot_id:
+        from execution.services.performance_identity import performance_identity
+        from execution.services.scalper_config import resolve_scalper_execution_timeframe
+        bot = Bot.objects.filter(pk=selected_bot_id, broker_account=account).select_related("asset").first()
+        if bot and bot.asset:
+            try:
+                frame = (resolve_scalper_execution_timeframe(bot, bot.asset.symbol)
+                         if bot.engine_mode == "scalper" else bot.default_timeframe)
+            except (ArithmeticError, AttributeError, LookupError, TypeError, ValueError):
+                frame = None
+            if frame:
+                current_identity = performance_identity(bot, bot.asset.symbol, frame)
+                current_identity.pop("config_snapshot", None)
+                current_identity["symbol"] = canonical_symbol(bot.asset.symbol)
+                for key in ("config_fingerprint", "build_sha"):
+                    if current_identity.get(key):
+                        options[key] = sorted(set(options[key]) | {current_identity[key]})
     selected = [row for row in rows if matches(row, scope) and (not start or row["closed_at"] >= start)
                 and (not end or row["closed_at"] < end)
                 and (not baseline or (matches(row, baseline.filters) and row["opened_at"] is not None
@@ -215,6 +244,8 @@ def history_report(account, user, params):
             if not scope.get("strategy") or scope["strategy"] == strategy:
                 grouped.setdefault(("XAUUSD", strategy), [])
     quality.update({"unknown_preset_trades": sum(row["preset_version"] is None for row in selected),
+                    "unknown_configuration_trades": sum(row["config_fingerprint"] is None for row in selected),
+                    "unknown_build_trades": sum(row["build_sha"] is None for row in selected),
                     "unverified_completion_trades": sum(not row["completion_verified"] for row in selected)})
     return {"summary": summary(selected), "trades": selected[(page - 1) * page_size:page * page_size],
             "page": page, "page_size": page_size, "total_pages": max(1, (len(selected) + page_size - 1) // page_size),
@@ -223,5 +254,6 @@ def history_report(account, user, params):
             "opposite_scalp": summary([row for row in selected if row["is_opposite_scalp"]]),
             "baseline": baseline_dict(baseline) if baseline else None,
             "baselines": [baseline_dict(item) for item in baselines], "filters": scope, "options": options,
+            "current_identity": current_identity,
             "data_quality": quality,
-            "basis": "Recorded realized P/L, grouped by position ticket where available. Known open positions and positions with missing recorded exit results are excluded; legacy outcomes without position records have unverified completion. Positions with multiple entries have mixed attribution. Dates filter closes in UTC; baselines require a recorded entry at or after the start. Missing historical presets remain unknown. Costs follow recorded realized P/L; missing charges are not estimated."}
+            "basis": "Recorded realized P/L, grouped by position ticket where available. Known open positions and positions with missing recorded exit results are excluded; legacy outcomes without position records have unverified completion. Positions with multiple entries have mixed attribution. Dates filter closes in UTC; baselines require a recorded entry at or after the start. Presets, configuration and build revisions come from entry snapshots; missing historical values remain unknown. Dirty or unavailable builds have no verified revision. Costs follow recorded realized P/L; missing charges are not estimated."}

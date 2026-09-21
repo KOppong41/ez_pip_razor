@@ -4,8 +4,10 @@ import os
 from decimal import Decimal
 import sys
 from celery.schedules import crontab
+from core.build_info import capture_build_identity
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+EXECUTION_BUILD_IDENTITY = capture_build_identity(BASE_DIR)
 TESTING = "test" in sys.argv
 
 env = environ.Env(

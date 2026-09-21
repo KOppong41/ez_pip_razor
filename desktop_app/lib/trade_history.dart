@@ -1,5 +1,10 @@
 part of 'main.dart';
 
+String _shortHistoryIdentity(dynamic value) {
+  final text = '${value ?? 'unknown'}';
+  return text.length > 12 ? text.substring(0, 12) : text;
+}
+
 class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key, required this.client});
   final ApiClient client;
@@ -146,6 +151,7 @@ class _HistoryPageState extends State<HistoryPage> {
       final overlay = mapOf(root['opposite_scalp']);
       final trades = listOfMaps(root['trades']);
       final quality = mapOf(root['data_quality']);
+      final currentIdentity = mapOf(root['current_identity']);
       final busy = snapshot.connectionState != ConnectionState.done;
       Map<String, String> choices(String key, String all) => {
         '': all,
@@ -270,6 +276,20 @@ class _HistoryPageState extends State<HistoryPage> {
                   enabled: !busy && baselineId == null,
                 ),
                 dropdown(
+                  'Configuration',
+                  filters['config_fingerprint'],
+                  choices('config_fingerprint', 'All configurations'),
+                  (value) => setFilter('config_fingerprint', value),
+                  enabled: !busy && baselineId == null,
+                ),
+                dropdown(
+                  'Build revision',
+                  filters['build_sha'],
+                  choices('build_sha', 'All builds'),
+                  (value) => setFilter('build_sha', value),
+                  enabled: !busy && baselineId == null,
+                ),
+                dropdown(
                   'Baseline',
                   baselineId,
                   {
@@ -297,6 +317,48 @@ class _HistoryPageState extends State<HistoryPage> {
               ],
             ),
             const SizedBox(height: 16),
+            if (currentIdentity.isNotEmpty && !busy && !snapshot.hasError) ...[
+              Text(
+                'Current bot configuration (${currentIdentity['symbol']} / ${currentIdentity['execution_timeframe']}): '
+                '${label('${currentIdentity['recommendation_state'] ?? 'unknown'}')}. '
+                'Preview for new entries.',
+                style: const TextStyle(color: muted, fontSize: 12),
+              ),
+              SelectableText(
+                'Configuration: ${currentIdentity['config_fingerprint'] ?? 'unavailable'}\n'
+                'Build: ${currentIdentity['build_sha'] ?? 'unknown'} '
+                '(${currentIdentity['build_status'] ?? 'unavailable'})',
+                style: const TextStyle(color: muted, fontSize: 12),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed:
+                      baselineId != null ||
+                          currentIdentity['config_fingerprint'] == null
+                      ? null
+                      : () {
+                          filters['config_fingerprint'] =
+                              '${currentIdentity['config_fingerprint']}';
+                          filters['symbol'] = '${currentIdentity['symbol']}';
+                          final revision = currentIdentity['build_sha'];
+                          if (revision == null) {
+                            filters.remove('build_sha');
+                          } else {
+                            filters['build_sha'] = '$revision';
+                          }
+                          reload(resetPage: true);
+                        },
+                  child: const Text('Use current configuration'),
+                ),
+              ),
+              if (currentIdentity['build_sha'] == null)
+                const Text(
+                  'No verified build revision is available. Using the current configuration leaves the build filter at All builds.',
+                  style: TextStyle(color: muted, fontSize: 12),
+                ),
+              const SizedBox(height: 16),
+            ],
             Wrap(
               spacing: 12,
               runSpacing: 8,
@@ -383,7 +445,10 @@ class _HistoryPageState extends State<HistoryPage> {
                 style: const TextStyle(color: muted, fontSize: 12),
               ),
               Text(
-                'Unknown preset: ${quality['unknown_preset_trades'] ?? 0} trades. Unverified historical completion: ${quality['unverified_completion_trades'] ?? 0}.',
+                'Unknown preset: ${quality['unknown_preset_trades'] ?? 0} trades. '
+                'Unknown configuration: ${quality['unknown_configuration_trades'] ?? 0}. '
+                'Unknown build: ${quality['unknown_build_trades'] ?? 0}. '
+                'Unverified historical completion: ${quality['unverified_completion_trades'] ?? 0}.',
                 style: const TextStyle(color: muted, fontSize: 12),
               ),
               const SizedBox(height: 20),
@@ -494,7 +559,7 @@ class _HistoryBaselineDialogState extends State<_HistoryBaselineDialog> {
         mainAxisSize: MainAxisSize.min,
         children: [
           const Text(
-            'Save the current market, bot, strategy and preset filters. Counts only entries opened from this time onward. Previous trades remain available. This does not start or change any bot.',
+            'Save the selected market, bot, symbol, strategy, preset, configuration and build filters. Counts only entries opened from this time onward. Previous trades remain available. This does not start or change any bot.',
           ),
           const SizedBox(height: 16),
           TextField(

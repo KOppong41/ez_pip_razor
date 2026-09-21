@@ -135,11 +135,13 @@ Missing, negative or nonfinite volume, insufficient history and zero-median
 baselines produce explicit skips. Successful and low-volume decisions retain
 the ratio, median, lookback and threshold for review.
 
-Gold's shared configuration builder enables this default for existing frozen
-presets as well as new ones; legacy absolute volume fields are inactive in
-relative mode. Explicit relative-volume overrides remain available. Other
-assets retain their existing absolute-volume defaults. Both the backtest API's
-saved detector configuration and full bot replay use the same builder.
+Gold's relative-volume rule is enabled by the explicitly applied detector
+overrides. Existing frozen presets retain their absolute-volume thresholds
+until recommendations are reapplied; the shared builder does not silently
+upgrade their behavior. Legacy absolute volume fields are inactive in relative
+mode. Other assets retain their existing absolute-volume defaults. Both the
+backtest API's saved detector configuration and full bot replay use the same
+builder.
 Migration `0053_gold_relative_volume` records these defaults in Gold's asset
 recommendation, preserving explicit relative-volume overrides and all frozen
 bot settings. The catalog version becomes 4; other asset recommendations keep
@@ -234,3 +236,47 @@ Django system checks, migration checks and whitespace checks passed. Logs:
 `.runtime/performance-history-backend-tests.log`,
 `.runtime/performance-history-final-regressions.log`, and
 `.runtime/performance-history-flutter-tests.log`.
+
+## Entry configuration and build attribution
+
+New automated entries record a versioned configuration snapshot and SHA-256
+fingerprint, execution timeframe, recommendation state, and startup build
+identity. The fingerprint covers the bot's strategy selection, detector tuning,
+scalper profile, schedule and bot risk settings. Numeric representations and
+unordered bot allowlists are normalized. Display names, current prices, P/L,
+bot start/stop state and recommendation catalog updates are excluded. Shared
+account policies, external services and broker conditions are not represented
+by this bot configuration fingerprint.
+
+Source processes capture their revision once when settings load. Only a clean
+repository rooted at the application directory produces a revision; dirty or
+unavailable checkouts remain unknown. Desktop packaging writes the same identity
+to a bundled manifest, which packaged processes read without consulting Git on
+the destination machine. Restart source processes after code changes; this is
+startup attribution, not a continuous integrity check or signed build attestation.
+
+History uses the entry snapshot after bot edits, process restarts and preset
+changes. Legacy records are not backfilled; positions with mixed entries have
+unknown configuration/build attribution. Configuration and build filters apply
+to the entire report and can be pinned in saved baselines. Invalid fingerprints
+and revisions are rejected by both history and baseline APIs.
+
+The desktop history screen exposes both filters and the full entry hashes in
+trade tooltips. Selecting a bot shows its current configuration as a preview
+for future entries. Use current configuration selects that bot's primary symbol,
+fingerprint and verified revision, when available. If the build is unknown, it
+explicitly leaves the build filter at All builds. Baselines store the selected
+filters; their names do not verify a revision. Preview settings never replace
+historical snapshots.
+
+Validation on 2026-09-21: all **365 Django tests** and **41 Flutter tests**
+passed; Flutter analysis reported no issues. Django system checks, migration
+checks, desktop build-spec syntax and whitespace checks passed. The full
+Django run emitted fixed-time-default warnings for the existing 18:00 trading
+window fields at startup; the separate system check reported no issues.
+The focused identity/history suite passed 27 tests, including manifest handling,
+frozen attribution, malformed configurations and baseline scope. Logs are
+`.runtime/identity-full-backend-tests.log`,
+`.runtime/identity-full-flutter-tests.log`, and
+`.runtime/identity-regression-tests.log`. No distributable was built and no
+demo/live orders were submitted during validation.

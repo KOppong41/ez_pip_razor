@@ -10,8 +10,8 @@ from execution.services.strategies.volume import relative_tick_volume
 
 class GoldRelativeVolumeTests(SimpleTestCase):
     def config(self, strategy, symbol="XAUUSDm", **overrides):
-        bot = SimpleNamespace(asset=SimpleNamespace(symbol=symbol), asset_preset_version_applied=3,
-                              asset_strategy_overrides_applied={strategy: overrides})
+        bot = SimpleNamespace(asset=SimpleNamespace(symbol=symbol), asset_preset_version_applied=4,
+                              asset_strategy_overrides_applied={strategy: {"min_relative_volume": 1, **overrides}})
         return build_strategy_config_for_bot(strategy, bot)
 
     def candles(self, strategy):
@@ -26,13 +26,15 @@ class GoldRelativeVolumeTests(SimpleTestCase):
         bars[-2]["tick_volume"] = 30
         return bars
 
-    def test_gold_adopts_relative_volume_even_with_frozen_absolute_overrides(self):
+    def test_relative_volume_requires_an_explicit_applied_override(self):
         for strategy in ("momentum_ignition", "breakout_retest"):
             for symbol in ("XAUUSDm", "GOLD", "XAUUSD.micro"):
                 cfg = self.config(strategy, symbol, min_tick_volume=999, min_breakout_volume=999)
                 self.assertEqual(cfg.min_relative_volume, 1)
                 self.assertEqual(cfg.volume_lookback, 20)
-            self.assertEqual(self.config(strategy, "EURUSDm").min_relative_volume, 0)
+                legacy = SimpleNamespace(asset=SimpleNamespace(symbol=symbol), asset_preset_version_applied=3,
+                                         asset_strategy_overrides_applied={strategy: {"min_tick_volume": 80, "min_breakout_volume": 80}})
+                self.assertEqual(build_strategy_config_for_bot(strategy, legacy).min_relative_volume, 0)
 
     def test_both_gold_detectors_and_scores_are_invariant_to_feed_volume_scale(self):
         for strategy in ("momentum_ignition", "breakout_retest"):

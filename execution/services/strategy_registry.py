@@ -9,7 +9,6 @@ from execution.services.strategies.momentum_ignition import MomentumIgnitionConf
 from execution.services.strategies.price_action_pinbar import PinBarConfig, run_price_action_pinbar
 from execution.services.strategies.range_reversion import RangeReversionConfig, run_range_reversion
 from execution.services.strategies.trend_pullback import TrendPullbackConfig, run_trend_pullback
-from execution.utils.symbols import canonical_symbol
 
 
 @dataclass(frozen=True)
@@ -62,10 +61,6 @@ def build_strategy_config(strategy_name: str, asset=None, *, strategy_overrides=
     """Build generic strategy config and apply explicitly supplied tuning."""
     entry = SCALPER_STRATEGY_REGISTRY[strategy_name]
     config = entry.config_factory()
-    # Gold defaults also apply to existing frozen presets: their legacy
-    # absolute thresholds remain inert when relative volume is enabled.
-    if canonical_symbol(getattr(asset, "symbol", None)) == "XAUUSD" and hasattr(config, "min_relative_volume"):
-        config = replace(config, min_relative_volume=Decimal("1"))
     if strategy_overrides is None:
         preset = getattr(asset, "recommended_config", None) or {}
         strategy_overrides = (
