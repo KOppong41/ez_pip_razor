@@ -1466,7 +1466,12 @@ class _BotStatusRow extends StatelessWidget {
               ],
             ),
           ),
-          _StatusPill(text: status.toUpperCase(), color: color),
+          _StatusPill(
+            text: status == 'paused' && row['schedule_paused'] == true
+                ? 'SCHEDULE PAUSED'
+                : status.toUpperCase(),
+            color: color,
+          ),
         ],
       ),
     );
@@ -2699,15 +2704,29 @@ class _BotsPageState extends State<BotsPage> {
   String? error;
   bool loading = true;
   int? busyBotId;
+  Timer? refreshTimer;
+  // Keep background refreshes from overlapping requests after a control action.
+  bool fetching = false;
 
   @override
   void initState() {
     super.initState();
     load();
+    refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (busyBotId == null) load(quiet: true);
+    });
   }
 
-  Future<void> load() async {
-    if (mounted) {
+  @override
+  void dispose() {
+    refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> load({bool quiet = false}) async {
+    if (fetching) return;
+    fetching = true;
+    if (mounted && !quiet) {
       setState(() {
         loading = true;
         error = null;
@@ -2723,6 +2742,7 @@ class _BotsPageState extends State<BotsPage> {
         botsData = values[0];
         options = mapOf(values[1]);
         loading = false;
+        error = null;
       });
     } catch (e) {
       if (mounted) {
@@ -2731,6 +2751,8 @@ class _BotsPageState extends State<BotsPage> {
           loading = false;
         });
       }
+    } finally {
+      fetching = false;
     }
   }
 
@@ -5042,6 +5064,7 @@ class _BotCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final status = '${bot['status'] ?? 'stopped'}'.toLowerCase();
+    final schedulePaused = status == 'paused' && bot['schedule_paused'] == true;
     final statusAccent = status == 'active'
         ? green
         : status == 'paused'
@@ -5098,7 +5121,7 @@ class _BotCard extends StatelessWidget {
                     _PulseDot(color: statusAccent, size: 6),
                     const SizedBox(width: 7),
                     Text(
-                      status.toUpperCase(),
+                      schedulePaused ? 'SCHEDULE PAUSED' : status.toUpperCase(),
                       style: TextStyle(
                         color: statusAccent,
                         fontFamily: 'Consolas',
@@ -5121,6 +5144,13 @@ class _BotCard extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (schedulePaused) ...[
+                  const SizedBox(height: 5),
+                  const Text(
+                    'Resumes in its next trading window',
+                    style: TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
               ],
             ),
           ),
@@ -5175,7 +5205,7 @@ class _BotCard extends StatelessWidget {
                   onPressed: onEdit,
                   icon: const Icon(Icons.tune_rounded, size: 19),
                 ),
-                if (status != 'active')
+                if (status != 'active' && !schedulePaused)
                   FilledButton.icon(
                     onPressed: () => onControl('start'),
                     icon: const Icon(Icons.play_arrow_rounded, size: 17),
@@ -5185,7 +5215,7 @@ class _BotCard extends StatelessWidget {
                   OutlinedButton.icon(
                     onPressed: () => onControl('pause'),
                     icon: const Icon(Icons.pause_rounded, size: 16),
-                    label: const Text('Pause'),
+                    label: Text(schedulePaused ? 'Keep paused' : 'Pause'),
                   ),
                 if (status != 'stopped')
                   IconButton(

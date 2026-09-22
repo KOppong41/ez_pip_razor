@@ -120,6 +120,9 @@ def _stop_bot(bot, *, event_type: str, message: str, context: dict | None = None
     if not bot:
         return
     update_fields: list[str] = []
+    if hasattr(bot, "schedule_paused"):
+        from execution.services.bot_schedule import set_bot_status
+        set_bot_status(bot, "stopped")
     if getattr(bot, "status", None) != "stopped":
         bot.status = "stopped"
         update_fields.append("status")
@@ -204,17 +207,15 @@ def update_bot_after_realized_pnl(order, realized_pnl: Decimal) -> None:
 
     bot.current_loss_streak = streak
 
-    # Auto-pause when streak exceeded.
+    update_fields = ["current_loss_streak"]
+    # Auto-pause when streak exceeded. Risk ownership supersedes schedule ownership.
     if streak >= effective_max and effective_cd > 0:
+        if hasattr(bot, "schedule_paused"):
+            from execution.services.bot_schedule import set_bot_status
+            set_bot_status(bot, "paused")
         bot.status = "paused"
         bot.paused_until = timezone.now() + timezone.timedelta(minutes=effective_cd)
-
-    # Persist minimal fields; status/bot_id already part of the model.
-    update_fields = ["current_loss_streak"]
-    if hasattr(bot, "paused_until"):
-        update_fields.append("paused_until")
-    if hasattr(bot, "status"):
-        update_fields.append("status")
+        update_fields.extend(["status", "paused_until"])
 
     bot.save(update_fields=update_fields)
 

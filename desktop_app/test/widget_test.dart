@@ -5,11 +5,26 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class FakeApiClient extends ApiClient {
-  FakeApiClient({this.markets, this.assetPresetState})
-    : super('http://127.0.0.1:8000');
+  FakeApiClient({
+    this.markets,
+    this.assetPresetState,
+    this.schedulePaused = false,
+  }) : super('http://127.0.0.1:8000');
 
   final List<Map<String, dynamic>>? markets;
   final String? assetPresetState;
+  bool schedulePaused;
+  String? lastControlAction;
+
+  @override
+  Future<dynamic> post(String path, [Map<String, dynamic>? body]) async {
+    if (path == '/api/bots/10/control/') {
+      lastControlAction = body?['action'] as String?;
+      schedulePaused = false;
+      return {};
+    }
+    return super.post(path, body);
+  }
 
   @override
   Future<dynamic> get(String path) async {
@@ -19,7 +34,10 @@ class FakeApiClient extends ApiClient {
           'id': 10,
           'bot_id': 'DEMO123',
           'name': 'Gold London Scalper',
-          'status': 'stopped',
+          'status': schedulePaused || lastControlAction == 'pause'
+              ? 'paused'
+              : 'stopped',
+          'schedule_paused': schedulePaused,
           'asset': 1,
           'asset_details': {
             'id': 1,
@@ -584,6 +602,34 @@ void main() {
     expect(find.text('DRAWDOWN SIZING'), findsOneWidget);
     expect(find.text('Soft drawdown'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('scheduled pause refreshes automatically and can stay paused', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final client = FakeApiClient();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: BotsPage(client: client)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('SCHEDULE PAUSED'), findsNothing);
+    client.schedulePaused = true;
+    await tester.pump(const Duration(seconds: 15));
+    await tester.pumpAndSettle();
+    expect(find.text('SCHEDULE PAUSED'), findsOneWidget);
+    expect(find.text('Resumes in its next trading window'), findsOneWidget);
+    await tester.tap(find.text('Keep paused'));
+    await tester.pumpAndSettle();
+    expect(client.lastControlAction, 'pause');
+    expect(find.text('SCHEDULE PAUSED'), findsNothing);
+    expect(find.text('PAUSED'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('bot editor changes sizing fields without mixing semantics', (

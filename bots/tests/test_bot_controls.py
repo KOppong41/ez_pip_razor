@@ -42,6 +42,7 @@ class BotControlsTest(TestCase):
             default_qty="0.10",
             asset=self.asset,
             broker_account=self.account,
+            trading_schedule_enabled=False,
         )
 
     def test_start_pause_stop(self):

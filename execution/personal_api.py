@@ -168,7 +168,7 @@ def personal_dashboard(request):
         {
             "bot": {
                 "running": bots.filter(status="active").exists() and risk.entries_enabled and not risk.emergency_stop,
-                "statuses": list(bots.values("id", "name", "status", "engine_mode")),
+                "statuses": list(bots.values("id", "name", "status", "schedule_paused", "engine_mode")),
                 "emergency_stop": risk.emergency_stop,
             },
             "mt5": {
@@ -218,6 +218,8 @@ def personal_dashboard(request):
 @permission_classes([IsAuthenticated])
 @transaction.atomic
 def personal_control(request):
+    from execution.services.bot_schedule import set_bots_status
+
     try:
         account = _account_for(request)
     except (BrokerAccount.DoesNotExist, ValueError) as exc:
@@ -234,16 +236,16 @@ def personal_control(request):
         policy.emergency_stop = False
         policy.entries_enabled = True
         policy.save(update_fields=["emergency_stop", "entries_enabled", "updated_at"])
-        bots.update(status="active")
+        set_bots_status(bots, "active")
     elif action == "stop":
         policy.entries_enabled = False
         policy.save(update_fields=["entries_enabled", "updated_at"])
-        bots.update(status="stopped")
+        set_bots_status(bots, "stopped")
     elif action == "emergency_stop":
         policy.entries_enabled = False
         policy.emergency_stop = True
         policy.save(update_fields=["entries_enabled", "emergency_stop", "updated_at"])
-        bots.update(status="stopped")
+        set_bots_status(bots, "stopped")
         # The serialized MT5 worker cancels outstanding entries first, then
         # flattens positions only for bots that explicitly opt in.
         from execution.tasks import kill_switch_monitor_task

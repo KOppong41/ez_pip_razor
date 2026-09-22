@@ -10,6 +10,7 @@ import time
 from bots.models import Bot
 from brokers.models import BrokerAccount
 from execution.models import RiskPolicy
+from execution.services.bot_schedule import set_bots_status
 
 
 RUNTIME_STOP_SALT = "ez-trade.runtime-stop.v1"
@@ -44,9 +45,11 @@ def _stop_user_automation_once(user) -> dict[str, int]:
         policies = RiskPolicy.objects.filter(broker_account_id__in=account_ids).update(
             entries_enabled=False
         )
-        bots = Bot.objects.filter(owner=user).exclude(status="stopped").update(
-            status="stopped"
+        bots = set_bots_status(
+            Bot.objects.filter(owner=user).exclude(status="stopped"), "stopped"
         )
+        # A stopped legacy market-guard bot must not restart after app exit.
+        set_bots_status(Bot.objects.filter(owner=user, status="stopped", scalper_params__has_key="_market_guard"), "stopped")
         return {"accounts_stopped": policies, "bots_stopped": bots}
 
 

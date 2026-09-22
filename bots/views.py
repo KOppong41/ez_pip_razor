@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -7,6 +8,7 @@ from brokers.models import BrokerAccount
 from core.utils import structured_log
 from execution.models import MT5ConnectionState, RiskPolicy
 from execution.services.brokers import get_broker_symbol_constraints
+from execution.services.bot_schedule import set_bot_status
 from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
 from subscription.utils import get_bot_limit
 
@@ -162,14 +164,14 @@ class BotViewSet(
             "stop": "stopped",
         }[action_name]
         bot.status = new_status
-        bot.save(update_fields=["status"])
+        bot.full_clean()
+        set_bot_status(bot, new_status)
 
         if action_name in {"pause", "stop"} and bot.broker_account_id:
             has_active_sibling = Bot.objects.filter(
                 owner=request.user,
                 broker_account=bot.broker_account,
-                status="active",
-            ).exists()
+            ).filter(Q(status="active") | Q(status="paused", schedule_paused=True)).exists()
             if not has_active_sibling:
                 RiskPolicy.objects.filter(
                     broker_account=bot.broker_account
@@ -179,7 +181,7 @@ class BotViewSet(
             "bot.control",
             bot_id=bot.id,
             control_action=action_name,
-            status=new_status,
+            status=bot.status,
             owner_id=request.user.id,
         )
         return Response(BotSerializer(bot, context={"request": request}).data)

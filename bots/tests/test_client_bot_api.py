@@ -67,7 +67,10 @@ class ClientBotApiTest(TestCase):
         self.assertEqual(bot.owner, self.user)
         self.assertEqual(bot.status, "stopped")
         self.assertEqual(bot.position_sizing_mode, "risk")
-        self.assertEqual(bot.risk_per_trade_pct, Decimal("0.5"))
+        self.assertEqual(
+            bot.risk_per_trade_pct,
+            Decimal(str(self.asset.recommended_config["risk_per_trade_pct"])),
+        )
 
     def test_client_cannot_see_or_control_another_users_bot(self):
         response = self.client.get("/api/bots/")

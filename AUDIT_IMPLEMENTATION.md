@@ -311,3 +311,40 @@ Validation on 2026-09-21: all **46 focused regressions** and the complete
 **372-test Django suite** passed. Django system checks, migration checks and
 whitespace checks passed. Tests used an isolated in-memory database. Logs:
 `.runtime/gold-gate-fix-focused.log` and `.runtime/gold-gate-fix-full.log`.
+
+## Automatic trading-window pauses (2026-09-22)
+
+The schedule guard checks active bots every 30 seconds. Outside a bot's configured
+windows it sets `status=paused` and `schedule_paused=true`. It resumes only pauses
+owned by the schedule, inside an allowed window, with an active asset/account,
+an open market calendar, no outstanding cooldown, and no account entry block or
+emergency stop. Disabling the schedule releases its own pause on the next check.
+Manual pauses/stops, app shutdown, account stops and loss-streak pauses cancel
+automatic resuming. Stopped bots are never started by the schedule guard.
+
+Single and multiple windows share overnight weekday handling; an overnight
+session belongs to its starting day. Each window uses its configured IANA
+timezone, including daylight-saving changes. The market-hours guard respects
+these windows and user controls, preserves cooldowns, and runs on the serialized
+MT5 queue. Position monitoring, trailing stops and exits continue while entries
+are paused. Risk percentages, presets and trading windows are not rewritten.
+
+The desktop shows **SCHEDULE PAUSED**, refreshes the bot list every 15 seconds,
+and offers **Keep paused** to cancel automatic resuming. Settings updates lock and
+re-read the bot so a stale form cannot overwrite a concurrent pause. Migration
+`bots.0054_bot_schedule_paused` initializes existing bots without changing status.
+
+Validation: the complete Django suite passed (391 tests), followed by 42 focused
+schedule, control, settings-race and preset tests after the final fixes. All 42
+Flutter tests and Flutter analysis passed. Migration and whitespace checks passed.
+Logs: `.runtime/schedule-full-tests.log`, `.runtime/schedule-final-focused-tests.log`,
+`.runtime/schedule-flutter-tests.log`, `.runtime/schedule-flutter-analyze.log`.
+
+Runtime adoption: migration applied and all four supervised backend children
+reloaded while Flutter and MT5 stayed open. At 22:53:04 UTC the periodic task
+paused Gold with no errors. Gold retained its approved 3% risk; Bitcoin remained
+stopped at 0.25%. The before/after receipts are
+`.runtime/schedule-before-reload.json` and `.runtime/schedule-after-reload.json`.
+The running Flutter app was hot reloaded; its VM confirmed that the schedule
+label, Keep paused control and automatic refresh code were loaded. Later
+30-second guard runs were idempotent and reported no errors.

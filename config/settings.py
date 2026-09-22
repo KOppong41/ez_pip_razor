@@ -205,6 +205,7 @@ CELERY_TASK_ROUTES = {
     "execution.tasks.kill_switch_monitor_task": {"queue": "mt5_execution", "priority": 0},
     "execution.tasks.cancel_stale_orders_task": {"queue": "mt5_execution", "priority": 3},
     "execution.tasks.reconcile_broker_positions_task": {"queue": "mt5_execution", "priority": 9},
+    "execution.tasks.market_hours_guard_task": {"queue": "mt5_execution", "priority": 9},
     "execution.mt5_tasks.execute_mt5_order_task": {"queue": "mt5_execution", "priority": 6},
     "execution.mt5_tasks.cancel_mt5_order_task": {"queue": "mt5_execution", "priority": 3},
     "execution.mt5_tasks.modify_mt5_position_task": {"queue": "mt5_execution", "priority": 3},
@@ -214,6 +215,10 @@ CELERY_TASK_ROUTES = {
     "execution.mt5_tasks.reconcile_mt5_order_task": {"queue": "mt5_execution", "priority": 9},
 }
 CELERY_BEAT_SCHEDULE = {
+    "trading-schedule-guard-30s": {
+        "task": "execution.tasks.trading_schedule_guard_task",
+        "schedule": 30.0,
+    },
     "monitor-positions-every-60s": {
         "task": "execution.tasks.monitor_positions_task",
         "schedule": 60.0,

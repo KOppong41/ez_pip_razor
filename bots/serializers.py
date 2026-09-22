@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -53,6 +54,7 @@ class BotSerializer(serializers.ModelSerializer):
             "bot_id",
             "name",
             "status",
+            "schedule_paused",
             "asset",
             "asset_details",
             "broker_account",
@@ -107,6 +109,7 @@ class BotSerializer(serializers.ModelSerializer):
             "id",
             "bot_id",
             "status",
+            "schedule_paused",
             "asset_preset_version_applied",
             "asset_preset_applied_at",
             "asset_preset_state",
@@ -271,7 +274,11 @@ class BotSerializer(serializers.ModelSerializer):
         except DjangoValidationError as exc:
             raise serializers.ValidationError(self._validation_detail(exc)) from exc
 
+    @transaction.atomic
     def update(self, instance, validated_data):
+        # Settings edits must not restore status/ownership read before a
+        # concurrent schedule transition or manual control action.
+        instance = Bot.objects.select_for_update().get(pk=instance.pk)
         apply_recommendations = validated_data.pop(
             "apply_asset_recommendations", False
         )

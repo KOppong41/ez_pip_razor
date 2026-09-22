@@ -281,6 +281,11 @@ class Bot(models.Model):
         default="stopped",
         help_text="High-level state of the bot. Only bots with status='active' are allowed to trade.",
     )
+    schedule_paused = models.BooleanField(
+        default=False,
+        editable=False,
+        help_text="Paused by the trading schedule and eligible to resume in its next window.",
+    )
 
     default_timeframe = models.CharField(
         max_length=10,

@@ -148,15 +148,16 @@ def is_within_trading_window(bot, now: Optional[datetime] = None) -> bool:
         now = timezone.make_aware(now, bot_timezone)
     now = now.astimezone(bot_timezone)
 
-    weekday = WEEKDAY_MAP[now.weekday()]
     days = bot.allowed_trading_days or get_profile_config(bot.trading_profile).allowed_days
-    if days and weekday not in [d.lower() for d in days]:
-        return False
     start = getattr(bot, "trading_window_start", None)
     end = getattr(bot, "trading_window_end", None)
     if start and end:
-        current = now.time()
-        if start <= end:
-            return start <= current <= end
-        return current >= start or current <= end
-    return True
+        from core.trading_schedule import window_contains
+
+        return window_contains({
+            "timezone": str(bot_timezone),
+            "allowed_days": [d.lower() for d in days] if days else list(WEEKDAY_MAP.values()),
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        }, now)
+    return not days or WEEKDAY_MAP[now.weekday()] in [d.lower() for d in days]

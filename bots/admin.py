@@ -418,17 +418,20 @@ class BotForm(forms.ModelForm):
 
 @admin.action(description="Start selected bots")
 def start_bots(modeladmin, request, queryset):
-    queryset.update(status="active")
+    from execution.services.bot_schedule import set_bots_status
+    set_bots_status(queryset, "active")
 
 
 @admin.action(description="Pause selected bots")
 def pause_bots(modeladmin, request, queryset):
-    queryset.update(status="paused")
+    from execution.services.bot_schedule import set_bots_status
+    set_bots_status(queryset, "paused")
 
 
 @admin.action(description="Stop selected bots")
 def stop_bots(modeladmin, request, queryset):
-    queryset.update(status="stopped")
+    from execution.services.bot_schedule import set_bots_status
+    set_bots_status(queryset, "stopped")
 
 
 @admin.register(Bot)
@@ -706,8 +709,8 @@ class BotAdmin(admin.ModelAdmin):
         if not self.has_change_permission(request, bot):
             raise PermissionDenied
 
-        bot.status = new_status
-        bot.save()
+        from execution.services.bot_schedule import set_bot_status
+        set_bot_status(bot, new_status)
         if reset_allocation:
             try:
                 reset_allocation_cycle(bot, reason="manual_start")
@@ -757,6 +760,9 @@ class BotAdmin(admin.ModelAdmin):
         new_bot.id = None
         new_bot.name = f"{bot.name} (Copy)"
         new_bot.status = "stopped"
+        new_bot.schedule_paused = False
+        new_bot.scalper_params = dict(new_bot.scalper_params or {})
+        new_bot.scalper_params.pop("_market_guard", None)
         new_bot.save()
 
         self.message_user(request, f"Bot '{bot.name}' duplicated as '{new_bot.name}'.")
@@ -845,6 +851,9 @@ class BotAdmin(admin.ModelAdmin):
         if obj.engine_mode == "scalper":
             self._apply_scalper_presets(obj, form.cleaned_data)
         super().save_model(request, obj, form, change)
+        if not change or "status" in form.changed_data:
+            from execution.services.bot_schedule import set_bot_status
+            set_bot_status(obj, obj.status)
 
     def _apply_scalper_presets(self, bot, cleaned_data):
         cfg = default_scalper_profile_config()

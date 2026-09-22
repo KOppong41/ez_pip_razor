@@ -345,7 +345,8 @@ def run_service(service: str, config: dict[str, Any]) -> int:
         policies = RiskPolicy.objects.filter(entries_enabled=True).update(
             entries_enabled=False
         )
-        bots = Bot.objects.exclude(status="stopped").update(status="stopped")
+        from execution.services.bot_schedule import set_bots_status
+        bots = set_bots_status(Bot.objects.all(), "stopped")
         print(f"Desktop safety reset: {policies} policies and {bots} bots stopped.")
         return 0
 

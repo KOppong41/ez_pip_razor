@@ -78,6 +78,7 @@ from execution.services.portfolio import record_fill
 from execution.services.equity import update_equity_high_water
 from execution.services.trade_constraints import distance_to_price
 from execution.services.trading_type import is_within_trading_window
+from execution.services.bot_schedule import reconcile_trading_schedules
 from execution.services.strategies.harami import detect_harami
 from execution.services.strategy_registry import (
     SCALPER_STRATEGY_REGISTRY,
@@ -2808,6 +2809,12 @@ def market_hours_guard_task(self):
         len(result["errors"]),
     )
     return result
+
+
+@shared_task
+def trading_schedule_guard_task():
+    """Pause outside configured sessions and resume only schedule-owned pauses."""
+    return reconcile_trading_schedules()
 
 
 # Celery autodiscovery imports this module. Re-export the dedicated queue tasks
