@@ -24,6 +24,29 @@ positions regardless of the separate account-emergency flatten option. The stop
 is latched so failed exits can retry even if prices recover. Only an explicit
 operator Start clears the latch; schedule guards cannot restart it.
 
+Risk-based entry sizing uses `min(allocation_amount, current_account_equity)`
+when allocation is positive, and current equity when allocation is zero.
+The effective risk percentage applies to that capital basis. For example,
+a 100 allocation at 0.25% permits an estimated stop-loss budget of 0.25 in
+account currency, even on a 1,000-equity account. Broker volume steps are rounded
+down; an unaffordable minimum lot rejects the entry rather than increasing risk.
+Accepted orders retain the sizing basis, budget and estimated stop loss in
+`performance_context.sizing`; minimum-lot rejections include the same basis.
+Adaptive risk may reduce this budget but cannot raise the configured percentage.
+Fixed-lot mode continues to use the requested lot size and its existing limits;
+the allocation does not silently convert fixed lots to percentage-based sizing.
+
+The allocation is a nominal bankroll, not a segregated broker account or a
+continuously compounded per-bot equity value. Realized allocation limits and
+floating-loss stops remain separate controls. The floating stop continues to use
+allocation (or account balance when unallocated), while the equity cap ensures
+entry sizing cannot grow beyond current account capital.
+
+Account emergency stops journal one `kill_switch.triggered` event per episode.
+Cancellation and opted-in closure attempts continue on every monitor cycle.
+Clearing `emergency_stop` resets the durable journal latch for the next episode.
+Apply migrations before loading updated backend services.
+
 Outstanding entry volume remains reserved until broker terminal evidence is
 available. Partial fills reserve the unfilled remainder as well as any fill not
 yet represented by a broker position. Ambiguous submissions and missing position

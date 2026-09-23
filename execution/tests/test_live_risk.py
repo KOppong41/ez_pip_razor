@@ -230,6 +230,8 @@ class LiveRiskTest(TestCase):
 
         self.assertEqual(result.loss_per_lot, Decimal("100.00"))
         self.assertEqual(result.risk_amount, Decimal("100"))
+        self.assertEqual(result.capital_basis, Decimal("10000"))
+        self.assertEqual(result.capital_source, "account_equity")
         self.assertEqual(result.volume, Decimal("1"))
         self.assertNotEqual(result.volume, bot.default_qty)
 

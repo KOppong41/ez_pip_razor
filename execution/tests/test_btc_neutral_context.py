@@ -146,6 +146,9 @@ class BtcNeutralContextTests(TestCase):
             bias = next(value for value in frames if value)
             for direction in ("buy", "sell"):
                 with self.subTest(frames=frames, direction=direction):
+                    # Keep each decision independent of previous test entries'
+                    # interval and same-direction cooldown history.
+                    self.bot.signals.all().delete()
                     # Each scan needs a fresh candle to avoid signal deduplication.
                     self.bars[-1]["time"] = timezone.now()
                     decision = EngineDecision(action="open", direction=direction, strategy="trend_pullback", score=.99,

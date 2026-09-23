@@ -516,3 +516,41 @@ structural-stop rejection, Gold's strict gate, malformed/unsupported/conflicting
 context, effective spread diagnostics, and a `None` runner result. System,
 migration and whitespace checks passed. Logs: `.runtime/btc-neutral-focused.log`
 and `.runtime/btc-neutral-full-tests.log`.
+
+## Allocation sizing and mixed BTC context follow-up (2026-09-23)
+
+Risk-mode submission now uses configured allocation capped by fresh account
+equity, with equity as the fallback when allocation is zero. The effective
+percentage, lot floors, broker profit calculation, account limits and adaptive
+downscaling remain authoritative. Minimum-lot diagnostics and persisted order
+sizing receipts identify the capital source and monetary budget. Fixed-lot mode
+retains explicit volume. Model help, desktop labels and the runbook describe the
+same policy; existing configured percentages and allocations are not migrated.
+
+Mixed BTC context preserves the sole directional frame as the entry direction
+constraint while leaving strategy selection neutral and pullback-only. Missing,
+malformed, unsupported and conflicting frames retain their hard gates; Gold's
+neutral gate remains strict. Regression cases cover both frame orders and both
+entry directions through persisted decisions.
+
+Account loss monitoring serializes the policy transition under account/policy
+locks and persists an emergency-stop journal latch. Repeated and concurrent
+monitor calls retry cleanup without duplicating the trigger event. Explicitly
+clearing emergency stop resets the latch, including through existing Start
+controls; unrelated partial policy saves cannot reset it.
+
+Validation: 462 backend tests plus 9 separately discovered bot API tests passed
+on an isolated PostgreSQL 18 cluster. SQLite passed the same suites with the
+three PostgreSQL row-lock tests skipped. All 42 desktop tests and Flutter
+analysis passed; Django system, migration-drift and whitespace checks passed.
+Receipts: `.runtime/allocation-full-postgres.log`,
+`.runtime/allocation-full-sqlite.log`, `.runtime/allocation-api-postgres.log`,
+`.runtime/allocation-api-sqlite.log`, `.runtime/allocation-flutter-test.log`,
+and `.runtime/allocation-dart-analyze.log`.
+
+The desktop had already applied migrations `bots.0057` and `execution.0062` at
+14:34 UTC and started backend services after the implementation files changed.
+No additional service restart was needed. At 18:41 UTC, the API reported healthy
+database and worker status; BTC was active at 0.25%, Gold was schedule-paused at
+0.30%, and there were no recorded open positions, pending entries or unresolved
+submissions. Runtime receipt: `.runtime/allocation-final-runtime.json`.

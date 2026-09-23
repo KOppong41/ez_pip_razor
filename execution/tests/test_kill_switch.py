@@ -47,6 +47,17 @@ class KillSwitchRiskDayTests(TestCase):
             currency="USD",
         )
 
+    def test_unrelated_save_from_stale_policy_cannot_clear_account_latch(self):
+        from execution.services.account_loss_guard import latch_account_loss
+        latch_account_loss(self.account, daily_loss_pct=2, drawdown_pct=2,
+                           daily_baseline_source="manual", daily_baseline_locked=True)
+        # self.policy still represents the pre-trigger state.
+        self.policy.max_order_lot_size = ".02"
+        self.policy.save(update_fields=["max_order_lot_size"])
+        self.policy.refresh_from_db()
+        self.assertTrue(self.policy.emergency_stop)
+        self.assertIsNotNone(self.policy.emergency_stop_triggered_at)
+
     @patch("execution.tasks.MT5Connector")
     def test_account_stop_logs_once_but_retries_cleanup_until_restart(self, connector_type):
         connector = connector_type.return_value
