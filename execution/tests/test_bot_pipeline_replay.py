@@ -150,6 +150,23 @@ class BotPipelineReplayTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("volume_min", response.json()["detail"])
 
+    def test_replay_respects_allocation_budget_and_minimum_lot(self):
+        bars, dataset = self.scenario()
+        self.bot.allocation_amount = Decimal("1000")
+        self.bot.save()
+        result = run_bot_replay(bars, self.config(), dataset, self.asset.symbol)
+        self.assertGreater(result["summary"]["trades"], 0, result)
+        trade = result["trades"][0]
+        stop_distance = abs(Decimal(trade["entry_price"]) - Decimal(trade["sl"]))
+        estimated_loss = stop_distance * Decimal(self.data["contract_size"]) * Decimal(trade["original_quantity"])
+        self.assertGreater(estimated_loss, 0)
+        self.assertLessEqual(estimated_loss, Decimal("2.50"))
+        self.bot.allocation_amount = Decimal("1")
+        self.bot.save()
+        result = run_bot_replay(bars, self.config(), dataset, self.asset.symbol)
+        self.assertEqual(result["summary"]["trades"], 0)
+        self.assertIn("BROKER_MIN_VOLUME", {row["reason"] for row in result["skip_reasons"]})
+
     def test_missing_completed_context_explains_zero_trade_result(self):
         bars, _ = self.scenario()
         result = run_bot_replay(bars, self.config(), {"first_index": 50, "last_index": 52}, self.asset.symbol)

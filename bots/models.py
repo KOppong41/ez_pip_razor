@@ -312,14 +312,14 @@ class Bot(models.Model):
         max_length=12,
         choices=POSITION_SIZING_CHOICES,
         default="risk",
-        help_text="Use the fixed default lot or calculate volume from equity and stop-loss risk.",
+        help_text="Use the fixed default lot or calculate volume from allocation (capped by equity), or equity when unallocated, and stop-loss risk.",
     )
     risk_per_trade_pct = models.DecimalField(
         max_digits=6,
         decimal_places=3,
         default=Decimal("0.5"),
         validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
-        help_text="Percentage of current account equity risked when position sizing is risk based.",
+        help_text="Percentage of allocation capped by current account equity, or equity when allocation is zero, risked in risk-based mode.",
     )
     max_bot_lot_size = models.DecimalField(
         max_digits=12,
@@ -515,6 +515,7 @@ class Bot(models.Model):
         validators=[MinValueValidator(Decimal("0"))],
         help_text=(
             "Virtual bankroll for this bot in account currency. "
+            "Risk-based sizing uses this amount capped by equity; zero uses account equity. Fixed lots are unchanged. "
             "When cumulative realized losses reach this allocation (or the configured loss %), trading pauses."
         ),
     )

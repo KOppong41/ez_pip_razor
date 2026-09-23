@@ -45,6 +45,8 @@ class PreTradeRiskResult:
     spread_limit_points: Decimal
     deviation_points: int
     effective_risk_pct: Decimal = Decimal("0")
+    capital_basis: Decimal = Decimal("0")
+    capital_source: str = "fixed_lot"
 
 
 def _decimal(value, default="0") -> Decimal:
@@ -158,7 +160,7 @@ def enforce_pretrade_risk(
 
     equity = _decimal(getattr(account_info, "equity", 0))
     free_margin = _decimal(getattr(account_info, "margin_free", 0))
-    if equity <= 0 or free_margin < 0:
+    if not equity.is_finite() or not free_margin.is_finite() or equity <= 0 or free_margin < 0:
         reject("ACCOUNT_FINANCIALS_UNAVAILABLE", "MT5 account equity/free margin is unavailable")
 
     snapshot = create_account_snapshot(account, account_info)
@@ -334,6 +336,8 @@ def enforce_pretrade_risk(
     effective_cap = _positive_min(account_order_cap, bot_order_cap, runtime_max_lot, volume_max)
     loss_per_lot = Decimal("0")
     risk_amount = Decimal("0")
+    capital_basis = Decimal("0")
+    capital_source = "fixed_lot"
     bot_risk_pct = _decimal(bot.risk_per_trade_pct)
     effective_risk_pct = bot_risk_pct
     adaptive_risk_applied = False
@@ -358,6 +362,11 @@ def enforce_pretrade_risk(
         adaptive_risk_applied = effective_risk_pct < bot_risk_pct
 
     if bot.position_sizing_mode == "risk":
+        allocation = _decimal(bot.allocation_amount, default="NaN")
+        if not allocation.is_finite() or allocation < 0:
+            reject("BOT_ALLOCATION_INVALID", "Bot allocation must be finite and nonnegative")
+        capital_basis = min(allocation, equity) if allocation > 0 else equity
+        capital_source = ("allocation" if allocation <= equity else "allocation_capped_by_equity") if allocation > 0 else "account_equity"
         tick_size = _decimal(getattr(symbol_info, "trade_tick_size", 0))
         tick_value = max(
             _decimal(getattr(symbol_info, "trade_tick_value_loss", 0)),
@@ -375,7 +384,7 @@ def enforce_pretrade_risk(
             reject("RISK_CALCULATION_UNAVAILABLE", "Broker monetary loss calculation failed")
         # A strategy may reduce risk in response to current conditions, but
         # may never use this channel to exceed the bot's configured ceiling.
-        risk_amount = equity * effective_risk_pct / Decimal("100")
+        risk_amount = capital_basis * effective_risk_pct / Decimal("100")
         if risk_amount <= 0:
             reject("RISK_AMOUNT_INVALID", "Risk amount is not positive")
         calculated_volume = risk_amount / loss_per_lot
@@ -428,11 +437,14 @@ def enforce_pretrade_risk(
             minimum_volume_risk = loss_per_lot * volume_min
             sizing_context.update(
                 equity=str(equity),
+                allocation_amount=str(allocation),
+                capital_basis=str(capital_basis),
+                capital_source=capital_source,
                 account_currency=account_currency,
                 risk_budget=str(risk_amount),
                 loss_per_lot=str(loss_per_lot),
                 minimum_volume_risk=str(minimum_volume_risk),
-                minimum_volume_risk_pct=str(minimum_volume_risk / equity * Decimal("100")),
+                minimum_volume_risk_pct=str(minimum_volume_risk / capital_basis * Decimal("100")),
             )
             if calculated_volume < volume_min:
                 limiting_factor = "risk_budget"
@@ -488,6 +500,13 @@ def enforce_pretrade_risk(
     locked_order.risk_reserved_at = now
     from execution.services.performance_identity import submission_identity
     locked_order.performance_context = submission_identity(locked_order, bot)
+    locked_order.performance_context["sizing"] = {
+        "mode": bot.position_sizing_mode,
+        "capital_basis": str(capital_basis), "capital_source": capital_source,
+        "equity": str(equity), "allocation_amount": str(bot.allocation_amount),
+        "effective_risk_pct": str(effective_risk_pct),
+        "risk_amount": str(risk_amount), "estimated_stop_loss": str(loss_per_lot * volume),
+    }
     if take_profit is not None:
         locked_order.tp = take_profit.quantize(quantum)
     locked_order.save(update_fields=["qty", "remaining_qty", "requested_price", "sl", "tp", "risk_reserved_at", "performance_context"])
@@ -508,4 +527,6 @@ def enforce_pretrade_risk(
         spread_limit_points=spread_limit_points,
         deviation_points=deviation_points,
         effective_risk_pct=effective_risk_pct,
+        capital_basis=capital_basis,
+        capital_source=capital_source,
     )

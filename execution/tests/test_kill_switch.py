@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
-from execution.models import AccountRiskDay, BrokerPosition, Order, RiskPolicy
+from execution.models import AccountRiskDay, BrokerPosition, JournalEntry, Order, RiskPolicy
 from execution.tasks import _cancel_outstanding_entry_orders, kill_switch_monitor_task
 
 
@@ -48,6 +48,36 @@ class KillSwitchRiskDayTests(TestCase):
         )
 
     @patch("execution.tasks.MT5Connector")
+    def test_account_stop_logs_once_but_retries_cleanup_until_restart(self, connector_type):
+        connector = connector_type.return_value
+        connector.account_info_for_account.return_value = self.account_info
+        connector.positions_for_account.return_value = ()
+        connector.history_deals_for_account.return_value = ()
+        self.policy.emergency_stop = True
+        self.policy.save(update_fields=["emergency_stop"])
+        with patch("execution.tasks._cancel_outstanding_entry_orders", return_value={
+            "canceled_local_order_ids": [], "broker_cancel_order_ids": [], "cancel_failures": [],
+        }) as cancel:
+            for _ in range(3):
+                self.assertTrue(kill_switch_monitor_task.run()["triggered"])
+            self.assertEqual(cancel.call_count, 3)
+        events = JournalEntry.objects.filter(broker_account=self.account, event_type="kill_switch.triggered")
+        self.assertEqual(events.count(), 1)
+        self.policy.refresh_from_db()
+        self.assertIsNotNone(self.policy.emergency_stop_triggered_at)
+        first_trigger = self.policy.emergency_stop_triggered_at
+        self.policy.emergency_stop = False
+        self.policy.save(update_fields=["emergency_stop"])
+        self.policy.refresh_from_db()
+        self.assertIsNone(self.policy.emergency_stop_triggered_at)
+        self.policy.emergency_stop = True
+        self.policy.save(update_fields=["emergency_stop"])
+        kill_switch_monitor_task.run()
+        self.assertEqual(events.count(), 2)
+        self.policy.refresh_from_db()
+        self.assertGreater(self.policy.emergency_stop_triggered_at, first_trigger)
+
+    @patch("execution.tasks.MT5Connector")
     def test_reconstructed_daily_loss_triggers_account_kill_switch(self, connector_type):
         connector = connector_type.return_value
         connector.account_info_for_account.return_value = self.account_info
@@ -83,6 +113,9 @@ class KillSwitchRiskDayTests(TestCase):
         risk_day = AccountRiskDay.objects.get(broker_account=self.account)
         self.assertEqual(risk_day.starting_equity, 10000)
         self.assertEqual(risk_day.baseline_source, "mt5_history")
+        kill_switch_monitor_task.run()
+        self.assertEqual(JournalEntry.objects.filter(event_type="kill_switch.triggered").count(), 1)
+        self.assertIn("maximum_daily_loss", JournalEntry.objects.get(event_type="kill_switch.triggered").message)
 
     @patch("execution.tasks.MT5Connector")
     def test_missing_live_baseline_does_not_invent_daily_loss(self, connector_type):

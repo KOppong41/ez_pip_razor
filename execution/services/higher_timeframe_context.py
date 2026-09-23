@@ -24,6 +24,9 @@ def analyze_context(timeframes, fetch, analyze):
     directional = {detail["bias"] for detail in details.values() if detail["bias"] is not None}
     if len(directional) > 1:
         return None, context, "htf_context_conflict"
+    # Selection remains neutral if any frame is neutral, but the sole valid
+    # direction must still constrain the resulting entry.
+    context["directional_context_bias"] = next(iter(directional), None)
     if any(detail["bias"] is None for detail in details.values()):
         return None, context, "htf_bias_neutral"
     return details[dominant]["bias"], context, None

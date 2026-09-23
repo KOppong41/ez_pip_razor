@@ -262,6 +262,63 @@ class LiveRiskTest(TestCase):
         self.assertEqual(second.effective_risk_pct, Decimal("1"))
         self.assertEqual(second.volume, Decimal("1"))
 
+    def test_allocated_risk_uses_bot_capital_and_records_the_budget(self):
+        self.account_info.equity = self.account_info.balance = Decimal("1000")
+        self.symbol_info.volume_min = self.symbol_info.volume_step = Decimal(".001")
+        bot = self._bot(allocation_amount=Decimal("100"), risk_per_trade_pct=Decimal(".25"))
+        order = self._order(bot, sl=Decimal("99.92"))
+        result = self._enforce(order)
+        self.assertEqual(result.capital_basis, Decimal("100"))
+        self.assertEqual(result.capital_source, "allocation")
+        self.assertEqual(result.risk_amount, Decimal(".25"))
+        self.assertEqual(result.volume, Decimal(".025"))
+        order.refresh_from_db()
+        self.assertEqual(Decimal(order.performance_context["sizing"]["estimated_stop_loss"]), Decimal(".25"))
+        self.assertEqual(order.performance_context["sizing"]["capital_source"], "allocation")
+
+    def test_allocation_is_capped_by_fresh_equity(self):
+        bot = self._bot(allocation_amount=Decimal("2000"), risk_per_trade_pct=Decimal(".25"))
+        self.account_info.equity = Decimal("1000")
+        result = self._enforce(self._order(bot))
+        self.assertEqual(result.capital_basis, Decimal("1000"))
+        self.assertEqual(result.capital_source, "allocation_capped_by_equity")
+        self.assertEqual(result.risk_amount, Decimal("2.5"))
+        self.assertEqual(result.volume, Decimal(".02"))
+
+    def test_allocated_budget_never_rounds_up_to_broker_minimum(self):
+        bot = self._bot(allocation_amount=Decimal("100"), risk_per_trade_pct=Decimal(".25"))
+        order = self._order(bot)
+        with self.assertRaises(RiskRejected) as caught:
+            self._enforce(order)
+        self.assertEqual(caught.exception.code, "BROKER_MIN_VOLUME")
+        context = caught.exception.context
+        self.assertEqual(context["capital_source"], "allocation")
+        self.assertEqual(Decimal(context["risk_budget"]), Decimal(".25"))
+        self.assertEqual(Decimal(context["minimum_volume_risk_pct"]), Decimal("1"))
+        order.refresh_from_db()
+        self.assertIsNone(order.risk_reserved_at)
+
+    def test_adaptive_risk_cannot_raise_allocated_budget(self):
+        bot = self._bot(allocation_amount=Decimal("1000"), risk_per_trade_pct=Decimal(".5"))
+        signal = Signal.objects.create(bot=bot, source="engine_v1", symbol=self.asset.symbol,
+                                       direction="buy", dedupe_key="allocated-adaptive")
+        decision = Decision.objects.create(bot=bot, signal=signal, action="open", score=1)
+        order = self._order(bot, decision=decision)
+        for proposed, expected in ((".25", "2.5"), ("2", "5")):
+            with self.subTest(proposed=proposed):
+                decision.params = {"risk_pct": proposed}
+                decision.save(update_fields=["params"])
+                result = self._enforce(order)
+                self.assertEqual(result.risk_amount, Decimal(expected))
+                self.assertLessEqual(result.volume * result.loss_per_lot, Decimal(expected))
+
+    def test_fixed_lot_allocation_does_not_silently_change_explicit_volume(self):
+        bot = self._bot(allocation_amount=Decimal("100"), position_sizing_mode="fixed", default_qty=Decimal(".03"))
+        result = self._enforce(self._order(bot))
+        self.assertEqual(result.volume, Decimal(".03"))
+        self.assertEqual(result.risk_amount, Decimal("3"))
+        self.assertEqual(result.capital_source, "fixed_lot")
+
     def test_decision_risk_reduces_fixed_sizing_as_a_modifier(self):
         bot = self._bot(
             position_sizing_mode="fixed",

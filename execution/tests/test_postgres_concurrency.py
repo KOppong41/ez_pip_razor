@@ -8,7 +8,8 @@ from unittest import skipUnless
 from django.db import close_old_connections, connection, transaction
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
-from execution.models import Order
+from execution.models import JournalEntry, Order
+from execution.services.account_loss_guard import latch_account_loss
 from execution.services.live_risk import RiskRejected, enforce_pretrade_risk
 from execution.tests import test_live_risk
 
@@ -80,3 +81,44 @@ class PostgresAdmissionConcurrencyTests(TransactionTestCase):
 
     def test_different_bots_cannot_race_past_position_limit(self):
         self.concurrent_admission(position_limit=1, lot_limit="10", expected_code="ACCOUNT_MAX_POSITIONS")
+
+    def test_competing_account_monitors_emit_one_trigger(self):
+        self.policy.max_daily_loss_pct = Decimal("1")
+        self.policy.save()
+        holding, release, second_started, second_finished = Event(), Event(), Event(), Event()
+
+        def monitor(index):
+            close_old_connections()
+            if index == 1:
+                second_started.set()
+            try:
+                with transaction.atomic():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET LOCAL lock_timeout = '8s'")
+                    reason = latch_account_loss(self.account, daily_loss_pct=Decimal("2"), drawdown_pct=Decimal("2"),
+                                                daily_baseline_source="manual", daily_baseline_locked=True)
+                    if index == 0:
+                        holding.set()
+                        if not release.wait(10):
+                            raise RuntimeError("Test monitor lock was not released")
+                    return reason
+            finally:
+                if index == 1:
+                    second_finished.set()
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(monitor, 0)
+            try:
+                self.assertTrue(holding.wait(10))
+                second = pool.submit(monitor, 1)
+                self.assertTrue(second_started.wait(3))
+                self.assertFalse(second_finished.wait(.25))
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=12), "maximum_daily_loss")
+            self.assertEqual(second.result(timeout=12), "explicit_emergency_stop")
+        self.assertEqual(JournalEntry.objects.filter(event_type="kill_switch.triggered").count(), 1)
+        self.policy.refresh_from_db()
+        self.assertTrue(self.policy.emergency_stop)
+        self.assertFalse(self.policy.entries_enabled)

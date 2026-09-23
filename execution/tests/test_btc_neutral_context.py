@@ -141,6 +141,28 @@ class BtcNeutralContextTests(TestCase):
         self.assertEqual(saved.signal.payload["htf_status"], "neutral")
         self.assertEqual(summary["outcome"], "candidate_pending_allocation")
 
+    def test_mixed_context_allows_only_the_remaining_direction(self):
+        for frames in (("buy", None), (None, "buy"), ("sell", None), (None, "sell")):
+            bias = next(value for value in frames if value)
+            for direction in ("buy", "sell"):
+                with self.subTest(frames=frames, direction=direction):
+                    # Each scan needs a fresh candle to avoid signal deduplication.
+                    self.bars[-1]["time"] = timezone.now()
+                    decision = EngineDecision(action="open", direction=direction, strategy="trend_pullback", score=.99,
+                        entry_price=Decimal(86000), sl=Decimal(85580 if direction == "buy" else 86420),
+                        tp=Decimal(86840 if direction == "buy" else 85160), target_rr=Decimal(2),
+                        entry_trigger=Decimal(85990 if direction == "buy" else 86010), reason="confirmed_pullback")
+                    _, summary, selector, _ = self.scan(frames, decision=decision)
+                    self.assertIsNone(selector.call_args.kwargs["context"]["htf_bias"])
+                    self.assertEqual(summary["strategies_evaluated"], ["trend_pullback"])
+                    saved = Decision.objects.filter(bot=self.bot).latest("id")
+                    self.assertEqual(saved.signal.direction, direction)
+                    self.assertEqual(saved.signal.payload["context_bias"], bias)
+                    if direction == bias:
+                        self.assertEqual(saved.action, "open", saved.reason)
+                    else:
+                        self.assertEqual((saved.action, saved.reason), ("ignore", "scalper:context_direction_conflict"))
+
     def test_neutral_context_keeps_structural_stop_enforcement(self):
         decision = EngineDecision(action="open", direction="buy", strategy="trend_pullback", score=.99,
             entry_price=Decimal(86000), sl=Decimal(85900), tp=Decimal(86200), reason="too_tight")

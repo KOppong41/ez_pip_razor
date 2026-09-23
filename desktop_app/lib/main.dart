@@ -4401,12 +4401,12 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     decoration: const InputDecoration(
                       labelText: 'Position sizing',
                       helperText:
-                          'Choose fixed lots or equity risk at the stop',
+                          'Risk sizing uses allocation capped by equity, or equity when allocation is 0',
                     ),
                     items: const [
                       DropdownMenuItem(
                         value: 'risk',
-                        child: Text('Risk based (equity + stop loss)'),
+                        child: Text('Risk based (capital + stop loss)'),
                       ),
                       DropdownMenuItem(
                         value: 'fixed',
@@ -4444,7 +4444,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                       ),
                       decoration: InputDecoration(
                         labelText: 'Risk per trade',
-                        suffixText: '% equity',
+                        suffixText: '% capital',
                         helperText: _recommendedHelper(
                           'risk_per_trade_pct',
                           suffix: '%',
@@ -4788,7 +4788,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                 const SizedBox(height: 24),
                 _sectionHeading(
                   'Allocation & limits',
-                  'Assign a virtual bankroll and stop this bot at its allocation profit or loss boundary.',
+                  'Assign a virtual bankroll for risk sizing and allocation limits. Risk sizing caps it at account equity; fixed lots stay unchanged.',
                 ),
                 const SizedBox(height: 12),
                 _responsiveFields([
@@ -4799,7 +4799,7 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     ),
                     decoration: const InputDecoration(
                       labelText: 'Allocation amount',
-                      helperText: '0 disables allocation-based limits',
+                      helperText: '0 uses equity for sizing and disables allocation-based limits',
                     ),
                   ),
                   TextField(

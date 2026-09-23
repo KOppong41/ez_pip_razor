@@ -218,11 +218,16 @@ class BotLossGuardTests(TestCase):
         self.position()
         self.assertTrue(self.guard(self.raw()))
         self.assertTrue(self.guard(self.raw(profit=10)))
+        from execution.models import JournalEntry
+        events = JournalEntry.objects.filter(bot=self.bot, event_type="bot.kill_switch_triggered")
+        self.assertEqual(events.count(), 1)
         self.bot.trading_schedule_enabled = False
         self.bot.save(update_fields=["trading_schedule_enabled"])
         set_bot_status(self.bot, "active")
         self.assertIsNone(self.bot.kill_switch_triggered_at)
         self.assertEqual(self.guard(self.raw(profit=10)), [])
+        self.assertTrue(self.guard(self.raw()))
+        self.assertEqual(events.count(), 2)
 
     def test_monitor_cancels_only_triggered_bot_entries_and_flattens_without_account_opt_in(self):
         self.position()

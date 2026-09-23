@@ -597,7 +597,18 @@ class RiskPolicy(models.Model):
     )
     entries_enabled = models.BooleanField(default=False)
     emergency_stop = models.BooleanField(default=False)
+    emergency_stop_triggered_at = models.DateTimeField(null=True, blank=True, editable=False)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        fields = kwargs.get("update_fields")
+        if not self.emergency_stop and (fields is None or "emergency_stop" in fields):
+            # Explicitly clearing the stop begins a new episode. Unrelated
+            # partial saves must not clear a latch using a stale model instance.
+            self.emergency_stop_triggered_at = None
+            if fields is not None:
+                kwargs["update_fields"] = set(fields) | {"emergency_stop_triggered_at"}
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Risk policy for account {self.broker_account_id}"

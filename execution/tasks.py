@@ -2252,7 +2252,8 @@ def trade_scalper_strategies_for_bot(
                 "volatility": volatility_snapshot,
                 "strategy_metrics": engine_decision.metadata or {},
                 "htf_status": htf_status,
-                **({"bias_m15": htf_bias, "context_bias": htf_bias} if htf_bias else {}),
+                **({"bias_m15": htf_bias} if htf_bias else {}),
+                "context_bias": htf_bias_detail.get("directional_context_bias", htf_bias),
             }
             if htf_bias_detail:
                 strategy_payload["htf_bias_detail"] = htf_bias_detail
@@ -2606,20 +2607,6 @@ def kill_switch_monitor_task(self):
             snapshot.equity,
             observed_at=snapshot.captured_at,
         )
-        reason = None
-        if policy.emergency_stop:
-            reason = "explicit_emergency_stop"
-        elif (
-            policy.max_daily_loss_pct > 0
-            and daily_loss is not None
-            and daily_loss >= policy.max_daily_loss_pct
-        ):
-            reason = "maximum_daily_loss"
-        elif (
-            policy.max_account_drawdown_pct > 0
-            and drawdown >= policy.max_account_drawdown_pct
-        ):
-            reason = "maximum_account_drawdown"
         from execution.services.bot_loss_guard import latch_bot_losses
         guarded = latch_bot_losses(account, info, connector.positions_for_account(account))
         for stopped_bot, positions in guarded:
@@ -2636,25 +2623,14 @@ def kill_switch_monitor_task(self):
                 except Exception as exc:
                     flatten_failures.append({"broker_position_ticket": position.broker_position_ticket,
                                              "bot_id": stopped_bot.pk, "error": str(exc)})
+        from execution.services.account_loss_guard import latch_account_loss
+        reason = latch_account_loss(
+            account, daily_loss_pct=daily_loss, drawdown_pct=drawdown,
+            daily_baseline_source=risk_day.baseline_source, daily_baseline_locked=risk_day.baseline_locked,
+        )
         if reason is None:
             continue
-        policy.entries_enabled = False
-        policy.emergency_stop = True
-        policy.save(update_fields=["entries_enabled", "emergency_stop", "updated_at"])
         triggered.append({"broker_account_id": account.id, "reason": reason})
-        log_journal_event(
-            "kill_switch.triggered",
-            severity="error",
-            broker_account=account,
-            owner=account.owner,
-            message=f"Kill switch triggered: {reason}",
-            context={
-                "daily_loss_pct": str(daily_loss) if daily_loss is not None else None,
-                "drawdown_pct": str(drawdown),
-                "daily_baseline_source": risk_day.baseline_source,
-                "daily_baseline_locked": risk_day.baseline_locked,
-            },
-        )
         cancellation = _cancel_outstanding_entry_orders(account)
         canceled_local.extend(cancellation["canceled_local_order_ids"])
         broker_cancels.extend(cancellation["broker_cancel_order_ids"])
