@@ -67,7 +67,7 @@ def select_ai_strategies(
     canon_symbol = canonical_symbol(symbol)
 
     vol_ratio = _volatility_ratio(context)
-    spread = _to_decimal(context.get("spread_price") or 0) if canon_symbol == "XAUUSD" else _to_decimal(
+    spread = _to_decimal(context.get("spread_price") or 0) if canon_symbol in {"XAUUSD", "BTCUSD"} else _to_decimal(
         context.get("spread_price") or context.get("spread_points") or 0
     )
     bias = (context.get("htf_bias") or "").lower()
@@ -81,7 +81,7 @@ def select_ai_strategies(
     # selection only; execution still enforces the actual cap independently.
     wide_spread = False
     allowed_spread = _to_decimal(context.get("allowed_spread_price"))
-    if canon_symbol == "XAUUSD" and allowed_spread > 0:
+    if canon_symbol in {"XAUUSD", "BTCUSD"} and allowed_spread > 0:
         wide_spread = spread / allowed_spread >= Decimal("0.8")
     elif canon_symbol != "XAUUSD" and spread > 0 and _to_decimal(context.get("last_close") or 0) > 0:
         # Preserve legacy selection for callers without an effective allowance.
@@ -133,7 +133,22 @@ def select_ai_strategies(
             ) if name not in candidates
         ]
     elif canon_symbol == "BTCUSD":
-        symbol_bias = ["momentum_ignition", "breakout_retest", "trend_pullback", "price_action_pinbar"]
+        regime = context.get("regime") if isinstance(context.get("regime"), Mapping) else {}
+        directional_structure = (
+            (bias == "buy" and regime.get("structure") == "higher_high")
+            or (bias == "sell" and regime.get("structure") == "lower_low")
+        )
+        slope = _to_decimal(regime.get("ema_slope_pct"))
+        directional_slope = (bias == "buy" and slope >= Decimal("0.00015")) or (
+            bias == "sell" and slope <= Decimal("-0.00015")
+        )
+        expanding = _to_decimal(regime.get("atr_ratio")) >= Decimal("1.25")
+        if bias in {"buy", "sell"} and (directional_structure or directional_slope or expanding):
+            candidates = ["momentum_ignition", "breakout_retest", "trend_pullback"]
+        else:
+            # Wait for a confirmed pullback in quiet conditions; a clock-based
+            # session hint alone is not evidence of BTC momentum.
+            candidates = ["trend_pullback"]
     elif canon_symbol in {"EURUSD", "GBPUSD"}:
         symbol_bias = ["trend_pullback", "doji_breakout", "price_action_pinbar", "range_reversion"]
 
@@ -148,13 +163,16 @@ def select_ai_strategies(
 
     if wide_spread:
         # When spreads are wide, avoid breakout/momentum-heavy sets; keep precise setups.
-        candidates = [s for s in candidates if s in {"price_action_pinbar", "harami", "engulfing", "range_reversion"}]
+        precise = {"trend_pullback"} if canon_symbol == "BTCUSD" else {
+            "price_action_pinbar", "harami", "engulfing", "range_reversion"
+        }
+        candidates = [s for s in candidates if s in precise]
 
     # Engine-specific availability filtering
     selected = [s for s in candidates if s in available_set]
 
     # Fallback: if nothing matched (e.g., scalper with limited registry), pick any available up to max_strategies.
-    if not selected:
+    if not selected and canon_symbol != "BTCUSD":
         selected = available_order
 
     return selected[:max_strategies]

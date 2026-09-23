@@ -21,6 +21,7 @@ class BreakoutRetestConfig:
     # A positive relative threshold replaces the absolute gate and score.
     min_relative_volume: Decimal = Decimal("0")
     volume_lookback: int = 20
+    require_retest_rejection: bool = False
     rr: Decimal = Decimal("2")
 
 
@@ -81,6 +82,12 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
 
     if not broke_up and not broke_down:
         return EngineDecision(action="skip", reason="breakout_retest_no_break", strategy="breakout_retest")
+
+    if cfg.require_retest_rejection:
+        directional_break = prev["close"] > prev["open"] if broke_up else prev["close"] < prev["open"]
+        directional_retest = last["close"] > last["open"] if broke_up else last["close"] < last["open"]
+        if not directional_break or not directional_retest:
+            return EngineDecision(action="skip", reason="breakout_retest_unconfirmed_rejection", strategy="breakout_retest")
 
     volume_metadata = {}
     volume_value = Decimal("0")
@@ -151,8 +158,10 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
         if not near_level or last["close"] < range_high:
             return EngineDecision(action="skip", reason="breakout_retest_no_retest_up", strategy="breakout_retest")
         confidence, score_components = setup_quality(level_distance, tolerance)
-        sl = max(range_low, prev["low"])
+        sl = min(prev["low"], last["low"]) if cfg.require_retest_rejection else max(range_low, prev["low"])
         risk = last["close"] - sl
+        if risk <= 0:
+            return EngineDecision(action="skip", reason="breakout_retest_invalid_risk", strategy="breakout_retest")
         tp = last["close"] + risk * cfg.rr if risk > 0 else None
         return EngineDecision(
             action="open",
@@ -163,6 +172,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             strategy="breakout_retest",
             score=float(confidence),
             entry_price=last["close"],
+            entry_trigger=range_high if cfg.require_retest_rejection else None,
             target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),
@@ -183,8 +193,10 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
         if not near_level or last["close"] > range_low:
             return EngineDecision(action="skip", reason="breakout_retest_no_retest_down", strategy="breakout_retest")
         confidence, score_components = setup_quality(level_distance, tolerance)
-        sl = min(range_high, prev["high"])
+        sl = max(prev["high"], last["high"]) if cfg.require_retest_rejection else min(range_high, prev["high"])
         risk = sl - last["close"]
+        if risk <= 0:
+            return EngineDecision(action="skip", reason="breakout_retest_invalid_risk", strategy="breakout_retest")
         tp = last["close"] - risk * cfg.rr if risk > 0 else None
         return EngineDecision(
             action="open",
@@ -195,6 +207,7 @@ def run_breakout_retest(candles: List[Candle], cfg: BreakoutRetestConfig | None 
             strategy="breakout_retest",
             score=float(confidence),
             entry_price=last["close"],
+            entry_trigger=range_low if cfg.require_retest_rejection else None,
             target_rr=cfg.rr,
             metadata={
                 "confidence": float(confidence),

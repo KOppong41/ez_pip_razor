@@ -314,7 +314,7 @@ def enforce_pretrade_risk(
             exclude_order=locked_order.pk)
         if reason:
             reject("OPPOSITE_SCALP_REJECTED", reason)
-    from execution.services.entry_contract import gold_stop_reason, target_at_entry
+    from execution.services.entry_contract import structural_stop_reason, target_at_entry
     if decision_params.get("target_rr") is not None:
         try:
             take_profit = target_at_entry(locked_order.side, entry, stop, decision_params["target_rr"],
@@ -322,7 +322,7 @@ def enforce_pretrade_risk(
         except (ValueError, ArithmeticError) as exc:
             reject("ENTRY_CONTRACT_INVALID", str(exc))
     if bot.engine_mode == "scalper" and not decision_params.get("is_opposite_scalp"):
-        reason = gold_stop_reason(build_scalper_config(bot).resolve_symbol(locked_order.symbol), entry, stop,
+        reason = structural_stop_reason(build_scalper_config(bot).resolve_symbol(locked_order.symbol), entry, stop,
                                   point=point, digits=digits, atr=_decimal(decision_params.get("atr_price")))
         if reason:
             reject("STRUCTURAL_STOP_OUTSIDE_ENVELOPE", reason)

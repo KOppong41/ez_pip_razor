@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import List
 
@@ -8,6 +8,7 @@ from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
 from execution.services.indicators import fractals
 from execution.services.strategies.scoring import above_minimum, proximity, score_setup
+from execution.services.strategies.confirmation import confirm_pullback
 
 
 @dataclass
@@ -22,6 +23,7 @@ class TrendPullbackConfig:
     fractal_period: int = 2
     fractal_confirmation_lookback: int = 3
     require_fractal_confirmation: bool = True
+    require_confirmation: bool = False
     rr: Decimal = Decimal("2")
 
 
@@ -50,6 +52,9 @@ def _atr(candles: List[Candle], period: int) -> Decimal:
 
 def run_trend_pullback(candles: List[Candle], cfg: TrendPullbackConfig | None = None) -> EngineDecision:
     cfg = cfg or TrendPullbackConfig()
+    if cfg.require_confirmation and len(candles) >= 2:
+        setup = run_trend_pullback(candles[:-1], replace(cfg, require_confirmation=False))
+        return confirm_pullback(setup, candles[-2], candles[-1])
     if len(candles) < cfg.ema_period + 2:
         return EngineDecision(
             action="skip",

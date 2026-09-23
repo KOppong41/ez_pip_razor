@@ -7,7 +7,7 @@ copy stored on ``Asset.recommended_config`` so administrators can adjust it.
 from copy import deepcopy
 
 
-ASSET_PRESET_VERSION = 4
+ASSET_PRESET_VERSION = 5
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"]
 ALL_DAYS = WEEKDAYS + ["sat", "sun"]
 
@@ -229,7 +229,20 @@ ASSET_STRATEGY_OVERRIDES = {
     "XAGUSDm": {"momentum_ignition": {"min_impulse_pct": 0.0011}},
     "USOILm": {"momentum_ignition": {"min_impulse_pct": 0.0012}},
     "UKOILm": {"momentum_ignition": {"min_impulse_pct": 0.0012}},
-    "BTCUSDm": {"momentum_ignition": {"min_impulse_pct": 0.0015}},
+    "BTCUSDm": {
+        "momentum_ignition": {
+            "min_impulse_pct": 0.0015,
+            "min_relative_volume": 1.0,
+            "volume_lookback": 20,
+            "require_confirmation": True,
+        },
+        "breakout_retest": {
+            "min_relative_volume": 1.0,
+            "volume_lookback": 20,
+            "require_retest_rejection": True,
+        },
+        "trend_pullback": {"require_confirmation": True},
+    },
     "ETHUSDm": {"momentum_ignition": {"min_impulse_pct": 0.0017}},
 }
 

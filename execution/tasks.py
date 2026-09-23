@@ -2085,7 +2085,7 @@ def trade_scalper_strategies_for_bot(
         if s in SCALPER_STRATEGY_REGISTRY and s not in disabled_profile_strats
     ]
     if auto_mode:
-        if not enabled_strats:
+        if not enabled_strats and canonical_sym != "BTCUSD":
             fallback_pool = [
                 s for s in (available_pool or SCALPER_STRATEGY_REGISTRY.keys())
                 if s not in disabled_profile_strats
@@ -2096,11 +2096,12 @@ def trade_scalper_strategies_for_bot(
     else:
         strategy_context["active"] = enabled_strats.copy()
     if not enabled_strats:
+        reason = "no_suitable_strategies" if auto_mode and canonical_sym == "BTCUSD" else "no_active_strategies"
         _log_skip(
-            "no_active_strategies",
+            reason,
             {"strategy_context": strategy_context, "strategy_profile": strategy_profile_key},
         )
-        return {"status": "ok", "reason": "no_active_strategies"}
+        return {"status": "ok", "reason": reason}
     
     # Run each enabled strategy
     for strategy_name in enabled_strats:

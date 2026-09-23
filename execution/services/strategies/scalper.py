@@ -416,12 +416,12 @@ def scalper_entry_block_reason(signal, bot, config: ScalperConfig) -> str | None
     if payload.get("context_bias") in {"buy", "sell"} and payload["context_bias"] != signal.direction:
         return "scalper:context_direction_conflict"
 
-    if symbol_cfg.key.upper() in {"XAUUSD", "GOLD"} and payload.get("sl") is not None:
-        from execution.services.entry_contract import gold_stop_reason
+    if symbol_cfg.key.upper() in {"XAUUSD", "GOLD", "BTCUSD", "XBTUSD"} and payload.get("sl") is not None:
+        from execution.services.entry_contract import structural_stop_reason
         entry = _parse_decimal(payload, "entry", "close", "price")
         if entry is not None:
             try:
-                reason = gold_stop_reason(symbol_cfg, entry, Decimal(str(payload["sl"])),
+                reason = structural_stop_reason(symbol_cfg, entry, Decimal(str(payload["sl"])),
                     point=_parse_decimal(payload, "point"), digits=payload.get("digits"),
                     atr=_parse_decimal(payload, "atr_price", "atr"))
             except (ValueError, ArithmeticError):

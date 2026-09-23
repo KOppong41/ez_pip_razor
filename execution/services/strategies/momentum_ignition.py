@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import List, Tuple
 
@@ -8,6 +8,7 @@ from execution.services.engine_types import EngineDecision
 from execution.services.marketdata import Candle
 from execution.services.strategies.scoring import score_setup
 from execution.services.strategies.volume import relative_tick_volume
+from execution.services.strategies.confirmation import confirm_pullback
 
 
 @dataclass
@@ -21,6 +22,7 @@ class MomentumIgnitionConfig:
     # A positive relative threshold replaces the absolute gate and score.
     min_relative_volume: Decimal = Decimal("0")
     volume_lookback: int = 20
+    require_confirmation: bool = False
     # Entry eligibility is controlled by the bot's visible trading schedule.
     session_hours: Tuple[Tuple[int, int], ...] = ()
     rr: Decimal = Decimal("2.2")
@@ -28,6 +30,9 @@ class MomentumIgnitionConfig:
 
 def run_momentum_ignition(candles: List[Candle], cfg: MomentumIgnitionConfig | None = None) -> EngineDecision:
     cfg = cfg or MomentumIgnitionConfig()
+    if cfg.require_confirmation and len(candles) >= 2:
+        setup = run_momentum_ignition(candles[:-1], replace(cfg, require_confirmation=False))
+        return confirm_pullback(setup, candles[-2], candles[-1])
     if len(candles) < cfg.impulse_lookback + 2:
         return EngineDecision(
             action="skip",

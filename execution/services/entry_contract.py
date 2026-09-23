@@ -15,10 +15,12 @@ def target_at_entry(side, entry, stop, target_rr, trigger=None):
     return entry + sign * risk * rr
 
 
-def gold_stop_reason(symbol_config, entry, stop, *, point, digits=None, atr=None):
-    """Gold's stop envelope validates structure; it never relocates a stop."""
-    if symbol_config is None or symbol_config.key.upper() not in {"XAUUSD", "GOLD"}:
+def structural_stop_reason(symbol_config, entry, stop, *, point, digits=None, atr=None):
+    """Validate Gold/BTC structural stops against their configured envelope."""
+    if symbol_config is None or symbol_config.key.upper() not in {"XAUUSD", "GOLD", "BTCUSD", "XBTUSD"}:
         return None
+    if not entry.is_finite() or entry <= 0 or not stop.is_finite() or stop <= 0:
+        return "scalper:invalid_sl"
     minimum = distance_to_price(symbol_config.sl_points_min, symbol_config.sl_points_unit,
                                 point, market_price=entry, digits=digits, atr=atr)
     maximum = distance_to_price(symbol_config.sl_points_max, symbol_config.sl_points_unit,
@@ -29,3 +31,10 @@ def gold_stop_reason(symbol_config, entry, stop, *, point, digits=None, atr=None
     if distance > maximum:
         return "scalper:sl_above_max"
     return None
+
+
+def gold_stop_reason(symbol_config, entry, stop, *, point, digits=None, atr=None):
+    """Compatibility wrapper for Gold-specific callers."""
+    if symbol_config is None or symbol_config.key.upper() not in {"XAUUSD", "GOLD"}:
+        return None
+    return structural_stop_reason(symbol_config, entry, stop, point=point, digits=digits, atr=atr)

@@ -348,3 +348,75 @@ stopped at 0.25%. The before/after receipts are
 The running Flutter app was hot reloaded; its VM confirmed that the schedule
 label, Keep paused control and automatic refresh code were loaded. Later
 30-second guard runs were idempotent and reported no errors.
+
+## BTC entry quality and structural protection (2026-09-22)
+
+Review of the nine recorded filled BTC entries found stop distances of about
+0.048%–0.127%, below the bot's existing 0.35% minimum. Detector signals bypassed
+the planning path, and the decision/submission structural-stop checks applied
+only to Gold. Both paths now enforce BTC's configured envelope (currently
+0.35%–0.90%), using the current quote again at submission. Invalid structural
+stops cause a rejection; they are never moved to manufacture an eligible trade.
+The sample includes winners as well as losses and does not establish that
+tight stops caused every loss.
+
+BTC preset version 5 requires the next completed directional candle to close
+beyond a momentum/trend pullback's extreme. A confirmation candle that touches
+the original stop invalidates the setup even if its close recovers. The setup's
+structural stop and quality score are retained; its target is recalculated from
+the confirmed entry at the strategy's reward/risk multiple. The trigger is
+checked again against the live quote before submission. Breakout retests require
+a directional breakout and recovery candle, and their stops protect both the
+breakout and retest wicks. Momentum and breakout volume use the median of 20
+preceding completed bars, excluding the impulse/retest/confirmation bars as
+appropriate, instead of the broker-dependent absolute count of 80 ticks.
+
+BTC automatic selection now uses directional H1 structure/slope or ATR expansion
+to enable momentum and breakouts. Quiet conditions retain confirmed trend
+pullbacks. Near the effective spread allowance, selection excludes momentum and
+breakouts. If the configured pool has no suitable strategies, the task records
+`no_suitable_strategies`; fallback cannot restore the excluded detectors.
+The M15/H1 agreement requirement, unrestricted BTC schedule, score threshold,
+loss-streak controls, position management and risk percentage remain in force.
+Gold detector defaults and its applied snapshot are unchanged.
+
+Migration `bots.0055_btc_entry_quality` adds the new BTC recommendation fields
+without replacing custom tuning or any bot's applied snapshot. Existing bots
+need explicit adoption of the new detector flags. Other asset recommendations
+receive only the catalog version increment; their configuration is unchanged.
+
+An offline detector scan used 3,000 saved completed M5 candles (2,901 rolling
+100-bar evaluations per strategy). Raw momentum setups fell from 727 to 71,
+breakout retests from 69 to 33, and trend pullbacks from 163 to 41. After the
+unchanged score threshold and stop envelope, the new detectors yielded 16, 10
+and 1 candidates respectively. These are detector observations, not executed
+trades or profitability results; context, sizing, spreads and position state
+can reject them later. Evidence is in `.runtime/btc-entry-audit-before.json`
+and `.runtime/btc-entry-audit-proposed.json`.
+
+Read-only broker verification found equity of $475.94 and a 0.25% BTC budget
+of $1.18985. At the observed quote, the 0.01 minimum lot would risk about $3.01
+at the 0.35% stop floor. Entries may therefore be correctly rejected even with
+a valid setup. Risk and stops must not be changed to force a minimum lot.
+The estimate uses MetaTrader's account-currency
+[order_calc_profit](https://www.mql5.com/en/docs/python_metatrader5/mt5ordercalcprofit_py),
+with no orders submitted. Broker evidence is `.runtime/btc-broker-evidence.json`.
+
+Validation: all **411 tests in the complete Django suite** passed, plus **9 bot
+control/client API tests** located outside normal discovery. Django system,
+migration and whitespace checks passed. The tests include confirmed buy/sell
+entries, stop-breach recovery rejection, relative-volume scale invariance,
+breakout wick protection, selector fallback prevention, decision and quote-time
+stop validation, minimum-lot budget rejection, preset migration preservation,
+and unchanged Gold/position-management behavior. Logs are
+`.runtime/btc-full-tests.log` and `.runtime/btc-bot-api-tests.log`.
+
+Runtime adoption completed on **2026-09-23 at 00:09 UTC**: migration 0055 is
+applied, and only the new BTC detector tuning and its snapshot version were
+adopted for bot 7. The four supervised backend children reloaded while Flutter
+and MT5 remained open. MT5 reconnected and the scheduled BTC scan completed,
+recording `htf_bias_neutral`; no qualifying live entry was forced for validation.
+BTC remained active at 0.25% risk; Gold retained its schedule-owned pause and
+3% risk. There were no open positions or pending entries at reload. Receipts:
+`.runtime/btc-adoption-applied.json`, `.runtime/btc-before-reload.json`,
+`.runtime/btc-after-reload.json`, and `.runtime/btc-health-after-reload.json`.
