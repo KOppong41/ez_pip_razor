@@ -112,7 +112,7 @@ def _queue_or_dispatch_order(order: Order, *, emergency: bool = False) -> str:
     return "executed"
 
 
-def _cancel_outstanding_entry_orders(broker_account) -> dict:
+def _cancel_outstanding_entry_orders(broker_account, *, bot=None) -> dict:
     """Cancel local and broker-submitted entries before any emergency flatten."""
     canceled_local = []
     cancellation_requested = []
@@ -122,6 +122,8 @@ def _cancel_outstanding_entry_orders(broker_account) -> dict:
         intent="entry",
         status__in=["new", "ack", "part_filled"],
     ).select_related("broker_account", "bot", "decision__signal")
+    if bot is not None:
+        outstanding = outstanding.filter(bot=bot)
     for order in outstanding:
         try:
             has_submission_evidence = bool(
@@ -1406,18 +1408,13 @@ def _account_entry_slots(account: BrokerAccount) -> int | None:
     )
     if limit <= 0:
         return None
-    cutoff = timezone.now() - timedelta(minutes=5)
     occupied = BrokerPosition.objects.filter(
         broker_account=account,
         ownership="ez_trade",
-        status="open",
+        status__in=["open", "missing"],
     ).count()
-    occupied += Order.objects.filter(
-        broker_account=account,
-        intent="entry",
-        status__in=["new", "ack"],
-        risk_reserved_at__gte=cutoff,
-    ).count()
+    from execution.services.exposure import entry_reservations
+    occupied += sum(r.position_slots for r in entry_reservations(account))
     return max(0, limit - occupied)
 
 
@@ -2507,12 +2504,13 @@ def run_harami_engine_for_all_bots(self, timeframe: str = "5m", n_bars: int = 20
 )
 def kill_switch_monitor_task(self):
     """
-    One account-level kill-switch policy using broker equity snapshots.
+    Account capital limits and ticket-attributed per-bot floating-loss stops.
     """
     from execution.services.orchestrator import create_close_order_for_position
 
     connector = MT5Connector()
     triggered = []
+    triggered_bots = []
     closed = []
     canceled_local = []
     broker_cancels = []
@@ -2556,6 +2554,22 @@ def kill_switch_monitor_task(self):
             and drawdown >= policy.max_account_drawdown_pct
         ):
             reason = "maximum_account_drawdown"
+        from execution.services.bot_loss_guard import latch_bot_losses
+        guarded = latch_bot_losses(account, info, connector.positions_for_account(account))
+        for stopped_bot, positions in guarded:
+            triggered_bots.append({"bot_id": stopped_bot.pk, "reason": "maximum_bot_unrealized_loss"})
+            cancellation = _cancel_outstanding_entry_orders(account, bot=stopped_bot)
+            canceled_local.extend(cancellation["canceled_local_order_ids"])
+            broker_cancels.extend(cancellation["broker_cancel_order_ids"])
+            cancel_failures.extend(cancellation["cancel_failures"])
+            for position in positions:
+                try:
+                    order, _ = create_close_order_for_position(position, account)
+                    _queue_or_dispatch_order(order, emergency=True)
+                    closed.append(position.broker_position_ticket)
+                except Exception as exc:
+                    flatten_failures.append({"broker_position_ticket": position.broker_position_ticket,
+                                             "bot_id": stopped_bot.pk, "error": str(exc)})
         if reason is None:
             continue
         policy.entries_enabled = False
@@ -2605,6 +2619,7 @@ def kill_switch_monitor_task(self):
                 logger.exception("Kill switch could not close owned ticket=%s", position.broker_position_ticket)
     result = {
         "triggered": triggered,
+        "triggered_bots": triggered_bots,
         "canceled_local_order_ids": canceled_local,
         "broker_cancel_order_ids": broker_cancels,
         "cancel_failures": cancel_failures,
@@ -2645,23 +2660,17 @@ def cancel_stale_orders_task(self, max_age_seconds: int | None = None):
     connector = MT5Connector()
     for order in stale_qs:
         try:
-            if order.status == "new" and order.submitted_at is None:
+            from execution.services.exposure import has_submission_evidence
+            if order.status == "new" and not has_submission_evidence(order):
                 update_order_status(order, "canceled", error_msg="Local order expired before broker submission")
                 canceled_local.append(order.id)
                 continue
             if connector.reconcile_order(order):
                 reconciled.append(order.id)
                 continue
-            ambiguous = order.attempts.filter(status__in=["submitting", "ambiguous"]).exists()
-            if ambiguous and order.updated_at >= timezone.now() - timedelta(minutes=5):
-                unresolved.append(order.id)
-                continue
-            update_order_status(
-                order,
-                "rejected",
-                error_msg="No matching MT5 order, deal, or position found after reconciliation",
-            )
-            rejected.append(order.id)
+            # Absence from a broker response is not evidence of rejection.
+            # Keep submitted/partial/ambiguous capacity until terminal proof.
+            unresolved.append(order.id)
         except Exception as e:
             logger.exception("[StaleCancel] failed for order %s: %s", order.id, e)
             task_failures_total.labels(task="cancel_stale_orders_task").inc()

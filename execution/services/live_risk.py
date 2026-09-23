@@ -107,17 +107,17 @@ def enforce_pretrade_risk(
     replacing_position_ids=(),
 ) -> PreTradeRiskResult:
     """Apply all final bot/account checks immediately before MT5 submission."""
+    account_model = type(order.broker_account)
+    account = account_model.objects.select_for_update().get(pk=order.broker_account_id)
     locked_order = (
-        Order.objects.select_for_update()
+        Order.objects.select_for_update(of=("self",))
         # Decision is nullable; joining it under FOR UPDATE is rejected by
         # PostgreSQL. The order/account rows are the serialization boundary.
         .select_related("broker_account", "bot")
         .get(pk=order.pk)
     )
-    account_model = type(locked_order.broker_account)
-    account = account_model.objects.select_for_update().get(pk=locked_order.broker_account_id)
     policy, _ = RiskPolicy.objects.select_for_update().get_or_create(broker_account=account)
-    bot = locked_order.bot
+    bot = type(locked_order.bot).objects.select_for_update().get(pk=locked_order.bot_id)
     now = timezone.now()
     base_context = {
         "bot_id": bot.id,
@@ -138,6 +138,8 @@ def enforce_pretrade_risk(
         reject("ACCOUNT_ENTRIES_DISABLED", "New entries are disabled until the account risk policy is enabled")
     if not account.is_active or not account.is_verified:
         reject("ACCOUNT_UNAVAILABLE", "Broker account is not active and verified")
+    if bot.kill_switch_triggered_at:
+        reject("BOT_KILL_SWITCH_ACTIVE", "Bot loss stop is latched; an explicit restart is required")
     if not bot.auto_trade or bot.status != "active":
         reject("BOT_DISABLED", "Bot is not enabled for new automated entries")
     if locked_order.decision_id and locked_order.decision.score < bot.decision_min_score:
@@ -224,7 +226,7 @@ def enforce_pretrade_risk(
     owned_positions = BrokerPosition.objects.filter(
         broker_account=account,
         ownership="ez_trade",
-        status="open",
+        status__in=["open", "missing"],
     )
     if replacing_position_ids:
         # Internal preflight projection only. Never infer exemptions from
@@ -233,20 +235,11 @@ def enforce_pretrade_risk(
         if group.count() != len(set(replacing_position_ids)):
             reject("FLIP_GROUP_CHANGED", "Replacement group no longer matches owned exposure")
         owned_positions = owned_positions.exclude(pk__in=replacing_position_ids)
-    reservation_cutoff = now - timedelta(minutes=5)
-    reservations = Order.objects.filter(
-        broker_account=account,
-        intent="entry",
-        # `ack` is assigned immediately before order_send. Keep counting that
-        # reservation until a fill is synchronized or the short lease expires,
-        # otherwise another worker can slip through the account cap while the
-        # first broker submission is in flight.
-        status__in=["new", "ack"],
-        risk_reserved_at__gte=reservation_cutoff,
-    ).exclude(pk=locked_order.pk)
-    account_positions = owned_positions.count() + reservations.count()
-    symbol_positions = owned_positions.filter(symbol=locked_order.symbol).count() + reservations.filter(symbol=locked_order.symbol).count()
-    bot_positions = owned_positions.filter(bot=bot).count() + reservations.filter(bot=bot).count()
+    from execution.services.exposure import entry_reservations
+    reservations = entry_reservations(account, exclude_order_id=locked_order.pk, positions=owned_positions)
+    account_positions = owned_positions.count() + sum(r.position_slots for r in reservations)
+    symbol_positions = owned_positions.filter(symbol=locked_order.symbol).count() + sum(r.position_slots for r in reservations if r.symbol == locked_order.symbol)
+    bot_positions = owned_positions.filter(bot=bot).count() + sum(r.position_slots for r in reservations if r.bot_id == bot.pk)
     count_context = {
         "bot_position_count": bot_positions,
         "account_position_count": account_positions,
@@ -473,7 +466,7 @@ def enforce_pretrade_risk(
         )
 
     aggregate_lots = owned_positions.aggregate(total=Sum("volume"))["total"] or Decimal("0")
-    reserved_lots = reservations.aggregate(total=Sum("qty"))["total"] or Decimal("0")
+    reserved_lots = sum((r.lots for r in reservations), Decimal("0"))
     current_aggregate = _decimal(aggregate_lots) + _decimal(reserved_lots)
     if policy.max_aggregate_open_lots > 0 and current_aggregate + volume > policy.max_aggregate_open_lots:
         reject(
@@ -493,15 +486,18 @@ def enforce_pretrade_risk(
     locked_order.requested_price = entry.quantize(quantum)
     locked_order.sl = stop.quantize(quantum)
     locked_order.risk_reserved_at = now
+    from execution.services.performance_identity import submission_identity
+    locked_order.performance_context = submission_identity(locked_order, bot)
     if take_profit is not None:
         locked_order.tp = take_profit.quantize(quantum)
-    locked_order.save(update_fields=["qty", "remaining_qty", "requested_price", "sl", "tp", "risk_reserved_at"])
+    locked_order.save(update_fields=["qty", "remaining_qty", "requested_price", "sl", "tp", "risk_reserved_at", "performance_context"])
     order.qty = locked_order.qty
     order.remaining_qty = locked_order.remaining_qty
     order.requested_price = locked_order.requested_price
     order.sl = locked_order.sl
     order.tp = locked_order.tp
     order.risk_reserved_at = locked_order.risk_reserved_at
+    order.performance_context = locked_order.performance_context
     return PreTradeRiskResult(
         volume=volume,
         entry_price=entry,

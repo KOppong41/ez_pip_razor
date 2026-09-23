@@ -720,7 +720,7 @@ class LiveRiskTest(TestCase):
             self._order(bot_b, suffix="second", qty=Decimal("0.50")),
         )
 
-    def test_stale_reservation_does_not_permanently_consume_capacity(self):
+    def test_stale_reservation_requires_terminal_resolution_before_releasing_capacity(self):
         bot_a = self._bot("a")
         bot_b = self._bot("b")
         self.policy.max_total_open_positions = 1
@@ -730,9 +730,10 @@ class LiveRiskTest(TestCase):
             risk_reserved_at=timezone.now() - timedelta(minutes=6)
         )
 
-        result = self._enforce(self._order(bot_b, suffix="new"))
-
-        self.assertGreater(result.volume, 0)
+        self._assert_rejected("ACCOUNT_MAX_POSITIONS", self._order(bot_b, suffix="new"))
+        first.status = "canceled"  # A local, never-submitted reservation can be canceled.
+        first.save(update_fields=["status"])
+        self.assertGreater(self._enforce(self._order(bot_b, suffix="after-cancel")).volume, 0)
 
     # Legacy high-water behavior remains persistent and monotonic.
 
