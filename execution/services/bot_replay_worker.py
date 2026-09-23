@@ -260,7 +260,8 @@ def replay(payload):
         values["scalper_params"].pop(key, None)
     bot = Bot.objects.create(owner=user, asset=asset, broker_account=account, scalper_profile=profile, **values)
     policy_values = model_values(RiskPolicy, snap["policy"])
-    policy_values.update(entries_enabled=True, emergency_stop=False, equity_high_water=config["initial_balance"], equity_high_water_at=None)
+    policy_values.update(entries_enabled=True, emergency_stop=False, emergency_stop_triggered_at=None,
+                         equity_high_water=config["initial_balance"], equity_high_water_at=None)
     RiskPolicy.objects.update_or_create(broker_account=account, defaults=policy_values)
     setting_values = model_values(ExecutionSetting, snap["execution_settings"])
     setting_values.update(model_values(ExecutionSetting, snap["runtime"]))

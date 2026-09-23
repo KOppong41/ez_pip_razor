@@ -219,13 +219,14 @@ def personal_dashboard(request):
 @transaction.atomic
 def personal_control(request):
     from execution.services.bot_schedule import set_bots_status
+    from execution.services.risk_policy import apply_account_control
 
     try:
         account = _account_for(request)
     except (BrokerAccount.DoesNotExist, ValueError) as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     action = str(request.data.get("action", "")).lower()
-    policy, _ = RiskPolicy.objects.select_for_update().get_or_create(broker_account=account)
+    account = BrokerAccount.objects.select_for_update().get(pk=account.pk)
     bots = Bot.objects.filter(broker_account=account)
     if action == "start":
         state = MT5ConnectionState.objects.filter(broker_account=account).first()
@@ -233,18 +234,13 @@ def personal_control(request):
             return Response({"detail": "MT5 must be connected before starting"}, status=409)
         if state.account_mode == "live" and bots.filter(allow_live_account_execution=False).exists():
             return Response({"detail": "Live-account execution is disabled for one or more bots"}, status=409)
-        policy.emergency_stop = False
-        policy.entries_enabled = True
-        policy.save(update_fields=["emergency_stop", "entries_enabled", "updated_at"])
+        policy = apply_account_control(account, "start")
         set_bots_status(bots, "active")
     elif action == "stop":
-        policy.entries_enabled = False
-        policy.save(update_fields=["entries_enabled", "updated_at"])
+        policy = apply_account_control(account, "stop")
         set_bots_status(bots, "stopped")
     elif action == "emergency_stop":
-        policy.entries_enabled = False
-        policy.emergency_stop = True
-        policy.save(update_fields=["entries_enabled", "emergency_stop", "updated_at"])
+        policy = apply_account_control(account, "emergency_stop")
         set_bots_status(bots, "stopped")
         # The serialized MT5 worker cancels outstanding entries first, then
         # flattens positions only for bots that explicitly opt in.
@@ -399,30 +395,20 @@ def personal_position_action(request, position_id: int):
 @api_view(["GET", "PATCH"])
 @permission_classes([IsAuthenticated])
 def personal_risk(request):
+    from execution.services.risk_policy import RISK_LIMIT_FIELDS, update_risk_limits
     try:
         account = _account_for(request)
     except (BrokerAccount.DoesNotExist, ValueError) as exc:
         return Response({"detail": str(exc)}, status=400)
-    policy, _ = RiskPolicy.objects.get_or_create(broker_account=account)
-    editable = {
-        "max_daily_loss_pct",
-        "max_account_drawdown_pct",
-        "max_total_open_positions",
-        "max_positions_per_symbol",
-        "max_order_lot_size",
-        "max_aggregate_open_lots",
-        "stop_after_daily_profit_pct",
-    }
+    editable = RISK_LIMIT_FIELDS
     if request.method == "PATCH":
-        for field in editable:
-            if field in request.data:
-                setattr(policy, field, request.data[field])
         try:
-            policy.full_clean()
-            policy.save()
+            policy = update_risk_limits(account, {field: request.data[field] for field in editable if field in request.data})
         except DjangoValidationError as exc:
             detail = exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages}
             return Response(detail, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        policy, _ = RiskPolicy.objects.get_or_create(broker_account=account)
     fields = [
         "id",
         "broker_account_id",

@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -124,11 +125,14 @@ class BotViewSet(
         )
 
     @action(detail=True, methods=["post"], url_path="control")
+    @transaction.atomic
     def control(self, request, pk=None):
         bot = self.get_object()
         serializer = BotControlSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         action_name = serializer.validated_data["action"]
+        if bot.broker_account_id:
+            type(bot.broker_account).objects.select_for_update().get(pk=bot.broker_account_id)
 
         if action_name == "start":
             if not bot.broker_account_id:
@@ -144,19 +148,13 @@ class BotViewSet(
                     {"detail": "MT5 must be connected before starting this bot."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            risk, _ = RiskPolicy.objects.get_or_create(
-                broker_account=bot.broker_account
-            )
             if connection.account_mode == "live" and not bot.allow_live_account_execution:
                 return Response(
                     {"detail": "Live-account execution is disabled for this bot."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            risk.entries_enabled = True
-            risk.emergency_stop = False
-            risk.save(
-                update_fields=["entries_enabled", "emergency_stop", "updated_at"]
-            )
+            from execution.services.risk_policy import apply_account_control
+            apply_account_control(bot.broker_account, "start")
 
         new_status = {
             "start": "active",
