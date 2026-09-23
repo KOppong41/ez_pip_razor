@@ -9,7 +9,6 @@ from typing import Callable, Iterator
 from django.conf import settings
 
 from execution.connectors.base import ConnectorError
-from execution.services.mt5_autotrading import ensure_algo_trading_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -92,8 +91,6 @@ class MT5SessionService:
                 active_server = getattr(account, "server", cls._active_server)
                 same_account = int(active_login or 0) == login and str(active_server or "") == server
                 if same_account:
-                    if settings.MT5_AUTO_ENABLE_ALGO_TRADING:
-                        ensure_algo_trading_enabled(api, terminal_path=path)
                     cls._active_login = login
                     cls._active_server = server
                     cls._last_error = ""
@@ -127,15 +124,8 @@ class MT5SessionService:
                 cls._reset_locked(reason="post_login_verification_failed")
                 raise ConnectorError("MT5 connection verification failed after login")
 
-            if settings.MT5_AUTO_ENABLE_ALGO_TRADING:
-                ensure_algo_trading_enabled(api, terminal_path=path)
-                terminal = api.terminal_info()
-            if not bool(getattr(terminal, "trade_allowed", False)):
-                raise ConnectorError("MT5 Algo Trading is disabled")
-            if bool(getattr(terminal, "tradeapi_disabled", False)):
-                raise ConnectorError("MT5 external Python trading is disabled")
-            if not bool(getattr(account, "trade_allowed", False)):
-                raise ConnectorError("Automated trading is disabled for this MT5 account")
+            # Login and read-only monitoring remain available with trading
+            # disabled. Mutating commands validate the operator's switches.
 
             actual_login = getattr(account, "login", login)
             actual_server = getattr(account, "server", server)

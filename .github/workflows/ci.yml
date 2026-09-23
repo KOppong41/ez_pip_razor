@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  backend-safety:
+  backend-tests:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: sqlite:///ci.sqlite3
@@ -28,6 +28,55 @@ jobs:
       - run: python manage.py makemigrations --check --dry-run
       - name: Run complete Django test suite
         run: python manage.py test --verbosity 2
+      - name: Run additional bot API tests
+        run: PYTHONPATH=bots/tests python manage.py test test_bot_controls test_client_bot_api --verbosity 2
+
+  postgres-safety:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: eztrade_ci
+          POSTGRES_USER: eztrade_ci
+          POSTGRES_PASSWORD: ci-only-not-for-production
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://eztrade_ci:ci-only-not-for-production@127.0.0.1:5432/eztrade_ci
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_SECRET_KEY: ci-only-not-for-production
+      BROKER_CREDS_KEY: 6jTJHhC0XqsIbvdcq9uC4GRxGWQN52RuWW4jrnTvH60=
+      REQUIRE_POSTGRES_TESTS: "true"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python manage.py check
+      - run: python manage.py makemigrations --check --dry-run
+      - name: Run backend suite including concurrent PostgreSQL transactions
+        run: python manage.py test --verbosity 2
+      - name: Run additional bot API tests on PostgreSQL
+        run: PYTHONPATH=bots/tests python manage.py test test_bot_controls test_client_bot_api --verbosity 2
+
+  backend-safety:
+    runs-on: ubuntu-latest
+    needs: [backend-tests, postgres-safety]
+    if: always()
+    steps:
+      - name: Require both database suites
+        env:
+          SQLITE_RESULT: ${{ needs.backend-tests.result }}
+          POSTGRES_RESULT: ${{ needs.postgres-safety.result }}
+        run: test "$SQLITE_RESULT" = success && test "$POSTGRES_RESULT" = success
 
   desktop-client:
     runs-on: ubuntu-latest

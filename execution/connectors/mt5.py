@@ -108,6 +108,11 @@ def _clear_risk_reservation(order: Order) -> None:
     """Release a final-risk reservation once the submission is terminal."""
     if not getattr(order, "pk", None):
         return
+    # A terminal remainder does not prove its already-filled volume has been
+    # synchronized. The exposure reader releases that portion from broker
+    # position/exit evidence, without a gap between filling and reconciliation.
+    if Decimal(str(getattr(order, "filled_qty", 0) or 0)) > 0:
+        return
     Order.objects.filter(pk=order.pk, risk_reserved_at__isnull=False).update(
         risk_reserved_at=None
     )
@@ -387,8 +392,8 @@ def _check_ready(symbol: str):
     if not acct:
         raise ConnectorError("MT5 not logged in to a trading account")
 
-    if hasattr(term, "trade_allowed") and not term.trade_allowed:
-        raise ConnectorError("MT5 terminal: trading disabled (enable Algo Trading in toolbar & Options>Expert Advisors)")
+    from execution.services.mt5_autotrading import ensure_algo_trading_enabled
+    ensure_algo_trading_enabled(mt5)
 
     if hasattr(acct, "trade_allowed") and not acct.trade_allowed:
         raise ConnectorError("Account trading not allowed (check account permissions)")
@@ -1074,6 +1079,40 @@ class MT5Connector(BaseConnector):
             [item for item in positions if matches(item)],
         )
 
+    def _reconcile_terminal_remainder(self, order: Order) -> bool:
+        """Release a remainder only on exact-ticket terminal broker history."""
+        if not order.broker_order_ticket or order.status not in {"new", "ack", "part_filled"}:
+            return False
+        rows = mt5.history_orders_get(ticket=int(order.broker_order_ticket))
+        if rows is None:
+            return False
+        terminal_states = {
+            getattr(mt5, "ORDER_STATE_CANCELED", 2): "canceled",
+            getattr(mt5, "ORDER_STATE_REJECTED", 5): "rejected",
+            getattr(mt5, "ORDER_STATE_EXPIRED", 6): "canceled",
+        }
+        for row in rows:
+            target = terminal_states.get(getattr(row, "state", None))
+            if _coerce_ticket(getattr(row, "ticket", None)) != order.broker_order_ticket or not target:
+                continue
+            initial = getattr(row, "volume_initial", None)
+            remaining = getattr(row, "volume_current", None)
+            if initial is None or remaining is None:
+                return False
+            expected_filled = Decimal(str(initial)) - Decimal(str(remaining))
+            if not expected_filled.is_finite() or expected_filled > order.filled_qty:
+                # Terminal pending volume can coexist with delayed deal data.
+                return False
+            order.remaining_qty = Decimal(0)
+            order.broker_response = _safe_mt5_metadata(row)
+            order.save(update_fields=["remaining_qty", "broker_response"])
+            update_order_status(order, target)
+            ExecutionAttempt.objects.filter(order=order, resolved_at__isnull=True).update(
+                status="reconciled", resolved_at=timezone.now())
+            _clear_risk_reservation(order)
+            return True
+        return False
+
     def reconcile_order(self, order: Order) -> bool:
         """Resolve an acknowledged/ambiguous order from broker history.
 
@@ -1147,6 +1186,8 @@ class MT5Connector(BaseConnector):
                     order=order,
                     status__in=["submitting", "ambiguous"],
                 ).update(status="reconciled", resolved_at=timezone.now())
+                order.refresh_from_db()
+                self._reconcile_terminal_remainder(order)
                 return True
 
             if positions:
@@ -1168,9 +1209,11 @@ class MT5Connector(BaseConnector):
                     "filled" if order.remaining_qty == 0 else "part_filled",
                     price=price,
                 )
+                order.refresh_from_db()
+                self._reconcile_terminal_remainder(order)
                 return True
 
-            return False
+            return self._reconcile_terminal_remainder(order)
 
     def place_order(self, order: Order) -> None:
         with _MT5Session.serialized():
@@ -2108,4 +2151,6 @@ class MT5Connector(BaseConnector):
                 ]
             )
             update_order_status(order, "canceled")
+            ExecutionAttempt.objects.filter(order=order, resolved_at__isnull=True).update(
+                status="reconciled", resolved_at=timezone.now())
             _clear_risk_reservation(order)

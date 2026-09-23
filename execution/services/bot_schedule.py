@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 def can_automatically_resume(bot, now):
+    if bot.kill_switch_triggered_at:
+        return False
     if bot.paused_until and bot.paused_until > now:
         return False
     if not bot.asset_id or not bot.asset.is_active:
@@ -81,13 +83,16 @@ def set_bot_status(bot, status):
     current = Bot.objects.select_for_update().get(pk=bot.pk)
     params = dict(current.scalper_params or {})
     fields = {"status": status, "schedule_paused": False}
+    if status == "active":
+        # Only an explicit operator start resets the bot's loss-stop latch.
+        fields["kill_switch_triggered_at"] = None
     if "_market_guard" in params:
         params.pop("_market_guard")
         fields["scalper_params"] = params
     Bot.objects.filter(pk=bot.pk).update(**fields)
     if status == "active":
         reconcile_bot_schedule(bot.pk)
-    bot.refresh_from_db(fields=["status", "schedule_paused", "scalper_params"])
+    bot.refresh_from_db(fields=["status", "schedule_paused", "scalper_params", "kill_switch_triggered_at"])
 
 
 def set_bots_status(queryset, status):

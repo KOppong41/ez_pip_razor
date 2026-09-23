@@ -8,6 +8,8 @@ from decimal import Decimal, InvalidOperation
 from django.conf import settings
 
 from bots.services import asset_recommendation_state
+from execution.models import RiskPolicy
+from execution.services.runtime_config import get_runtime_config
 from execution.services.scalper_config import (
     build_scalper_config, normalize_execution_timeframe, resolve_allowed_strategy_pool,
 )
@@ -24,6 +26,20 @@ BOT_FIELDS = (
     "trading_window_start", "trading_window_end", "trading_windows", "allow_opposite_scalp",
     "loss_streak_autopause_enabled", "max_loss_streak_before_pause", "loss_streak_cooldown_min",
     "soft_drawdown_limit_pct", "hard_drawdown_limit_pct", "soft_size_multiplier", "hard_size_multiplier",
+    "close_positions_on_emergency_stop", "allow_live_account_execution",
+)
+
+POLICY_FIELDS = (
+    "max_daily_loss_pct", "max_account_drawdown_pct", "max_total_open_positions",
+    "max_positions_per_symbol", "max_order_lot_size", "max_aggregate_open_lots", "stop_after_daily_profit_pct",
+)
+# These fields have runtime consumers. Deprecated offsets/early-exit controls
+# are intentionally absent; fingerprinting a stored but unused value misleads.
+RUNTIME_FIELDS = (
+    "decision_min_score", "decision_flip_score", "decision_allow_hedging", "decision_order_cooldown_sec",
+    "decision_flip_cooldown_min", "decision_max_flips_per_day",
+    "decision_scalp_qty_multiplier", "order_ack_timeout_seconds", "trailing_trigger", "trailing_trigger_unit",
+    "trailing_distance", "trailing_distance_unit", "max_order_lot", "max_order_notional", "mt5_default_contract_size",
 )
 
 
@@ -66,12 +82,20 @@ def configuration_snapshot(bot, symbol, timeframe):
     }
     params = bot.scalper_params or {}
     bot_values = {field: getattr(bot, field) for field in BOT_FIELDS}
+    if not bot_values["kill_switch_enabled"]:
+        bot_values.pop("kill_switch_max_unrealized_pct")
     for field in ("allowed_timeframes", "enabled_strategies", "allowed_symbols", "allowed_trading_days"):
         bot_values[field] = sorted(set(bot_values[field] or []))
+    account = bot.broker_account if bot.broker_account_id else None
+    policy = (RiskPolicy.objects.filter(broker_account=account).first() if account else None) or RiskPolicy()
+    runtime = get_runtime_config()
     return canonical_settings({
-        "schema": 1, "symbol": canonical_symbol(symbol),
+        "schema": 2, "symbol": canonical_symbol(symbol),
         "execution_timeframe": normalize_execution_timeframe(timeframe) or str(timeframe),
         "bot": bot_values,
+        "account": {"connector": getattr(account, "connector", None), "timezone": getattr(account, "timezone", "UTC"),
+                    "risk_policy": {field: getattr(policy, field) for field in POLICY_FIELDS}},
+        "runtime": {field: getattr(runtime, field) for field in RUNTIME_FIELDS},
         "strategy_pool": sorted(set(resolve_allowed_strategy_pool(bot)[0])),
         "scalper": effective,
         "profile_selection": {key: params.get(key) for key in ("strategy_profile", "score_profile", "score_profile_key", "risk_preset", "psychology_profile")},
@@ -85,7 +109,7 @@ def performance_identity(bot, symbol, timeframe):
     result = {"execution_timeframe": normalize_execution_timeframe(timeframe) or str(timeframe),
               "recommendation_state": "unknown",
               "build_sha": build.get("sha"), "build_status": build.get("status", "unavailable"),
-              "config_fingerprint": None, "config_schema": 1}
+              "config_fingerprint": None, "config_schema": 2}
     try:
         result["recommendation_state"] = asset_recommendation_state(bot)
         snapshot = configuration_snapshot(bot, symbol, timeframe)
@@ -95,3 +119,19 @@ def performance_identity(bot, symbol, timeframe):
         # Attribution must not break order submission or invent a comparable hash.
         result["config_status"] = "unavailable"
     return result
+
+
+def submission_identity(order, bot):
+    """Freeze the controls actually admitted, without rewriting filled history."""
+    context = dict(order.performance_context or {})
+    if order.filled_qty > 0 or not order.decision_id or not order.decision.signal_id:
+        return context
+    identity = performance_identity(bot, order.symbol, order.decision.signal.timeframe)
+    original = context.get("decision_config_fingerprint") or context.get("config_fingerprint")
+    context.pop("config_snapshot", None)
+    context.pop("config_status", None)
+    context.update(identity)
+    if original and original != identity.get("config_fingerprint"):
+        context["decision_config_fingerprint"] = original
+    context["source"] = "submission_snapshot"
+    return context

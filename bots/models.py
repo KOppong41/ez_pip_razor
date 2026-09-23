@@ -473,6 +473,8 @@ class Bot(models.Model):
         ),
     )
 
+    kill_switch_triggered_at = models.DateTimeField(null=True, blank=True, editable=False)
+
     kill_switch_max_unrealized_pct = models.DecimalField(
         max_digits=5,
         decimal_places=2,
