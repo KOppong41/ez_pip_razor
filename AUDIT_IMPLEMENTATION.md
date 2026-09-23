@@ -479,3 +479,40 @@ tests and read-only broker-history reconciliation do not establish broker fault
 recovery under active trading. The supervised demo partial-fill, connection-loss,
 cancellation/flatten-retry and host-recovery checks in `LIVE_TRADING_RUNBOOK.md`
 remain required before that separate release decision.
+
+## BTC neutral higher-timeframe context (2026-09-23)
+
+The shared scan previously returned `htf_bias_neutral` before BTC strategy
+selection, making the selector's quiet-market pullback path unreachable. A
+valid neutral M15 or H1 analysis now reaches the selector with no directional
+bias. BTC then evaluates only `trend_pullback` from its configured pool, including
+when the other frame has directional structure or expanding ATR. An unavailable
+pullback strategy leaves no eligible strategy; fallback cannot enable momentum
+or breakouts. Missing/malformed data, unsupported timeframes, and opposing
+directional frames remain hard blocks. Gold retains its neutral-context block.
+
+The context analyzer preserves both frame analyses, their timeframe identities,
+and the dominant regime for valid neutral results. Scan logs, signal payloads,
+and the cached context identify this case as `neutral`. A neutral third frame
+cannot hide an actual conflict between two directional frames.
+
+The existing confirmation, volume, spread, score, structural-stop, sizing and
+exposure checks continue to govern entries. BTC's 0.25% risk and unrestricted
+session schedule are not changed. Normal no-setup detector results remain in
+`ScalperRunLog`; qualifying detector results create Signals and Decisions through
+the existing pipeline. The isolated replay uses the same scan and selector.
+
+Two diagnostics in the audited path are corrected: spread status and its displayed
+point limit use the effective bot/profile allowance, and a detector returning
+`None` records `strategy_no_decision` before any result-field access.
+
+Validation: the complete backend suite plus the additional bot API tests passed
+461 tests on SQLite (two PostgreSQL-only tests skipped). This includes a separate
+process replay of flat BTC candles with completed neutral M15/H1 context: all
+three evaluated cycles reached the real pullback detector and correctly produced
+no setup. Integration tests cover neutral and mixed contexts, expanding H1
+conditions, absent configured pullbacks, persisted qualifying decisions,
+structural-stop rejection, Gold's strict gate, malformed/unsupported/conflicting
+context, effective spread diagnostics, and a `None` runner result. System,
+migration and whitespace checks passed. Logs: `.runtime/btc-neutral-focused.log`
+and `.runtime/btc-neutral-full-tests.log`.

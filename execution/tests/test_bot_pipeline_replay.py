@@ -156,3 +156,22 @@ class BotPipelineReplayTests(TestCase):
         self.assertEqual(result["summary"]["trades"], 0)
         reasons = {row["reason"]: row["count"] for row in result["skip_reasons"]}
         self.assertEqual(reasons.get("htf_bias_unavailable"), 3)
+
+    def test_quiet_btc_replay_reaches_pullback_detector_with_completed_neutral_context(self):
+        from bots.services import apply_recommendations_to_bot
+        self.bot.asset = Asset.objects.get(symbol="BTCUSDm")
+        apply_recommendations_to_bot(self.bot, save=False)
+        self.bot.save()
+        self.data.update(contract_size="1", point_size=".01", digits=2, spread_points="200")
+        start = datetime(2025, 1, 6, tzinfo=timezone.utc)
+        bars = [{"time": start + timedelta(minutes=5 * i), "open": Decimal(86000),
+                 "close": Decimal(86000), "high": Decimal(86020), "low": Decimal(85980),
+                 "tick_volume": 100} for i in range(483)]
+        before = [model.objects.count() for model in (Order, Signal, Decision, BrokerPosition)]
+        result = run_bot_replay(bars, self.config(), {"first_index": 480, "last_index": 482}, "BTCUSDm")
+        reasons = {row["reason"]: row["count"] for row in result["skip_reasons"]}
+        self.assertNotIn("htf_bias_neutral", reasons)
+        self.assertNotIn("htf_bias_unavailable", reasons)
+        self.assertEqual(sum(count for reason, count in reasons.items() if reason.startswith("trend_pullback_")), 3, result)
+        self.assertEqual(result["summary"]["trades"], 0)
+        self.assertEqual([model.objects.count() for model in (Order, Signal, Decision, BrokerPosition)], before)

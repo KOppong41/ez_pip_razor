@@ -1753,7 +1753,7 @@ def trade_scalper_strategies_for_bot(
                             "htf_bias_neutral": "neutral",
                             "htf_context_conflict": "conflict",
                             "htf_timeframe_unsupported": "unsupported",
-                        }.get(reason, "not_evaluated"),
+                        }.get(reason, context.get("htf_status", "not_evaluated")),
                         "spread_status": (
                             "unavailable"
                             if reason.startswith("market_data")
@@ -2082,9 +2082,15 @@ def trade_scalper_strategies_for_bot(
         )
     except Exception:
         htf_bias, htf_bias_detail, context_reason = None, {}, "htf_bias_unavailable"
-    if context_reason:
+    btc_neutral = canonical_sym == "BTCUSD" and context_reason == "htf_bias_neutral"
+    if context_reason and not btc_neutral:
         _log_skip(context_reason, {"context": htf_bias_detail, "symbol": symbol})
         return {"status": "skipped", "reason": context_reason}
+    # Valid neutral BTC context reaches the selector with no directional bias,
+    # which restricts it to confirmed trend pullbacks. Missing/conflicting
+    # context still returns above, and other assets retain their strict gate.
+    htf_status = "neutral" if btc_neutral else "available"
+    strategy_context["htf_status"] = htf_status
 
     # Cache latest bias for reuse
     try:
@@ -2149,7 +2155,8 @@ def trade_scalper_strategies_for_bot(
         reason = "no_suitable_strategies" if auto_mode and canonical_sym == "BTCUSD" else "no_active_strategies"
         _log_skip(
             reason,
-            {"strategy_context": strategy_context, "strategy_profile": strategy_profile_key},
+            {"strategy_context": strategy_context, "strategy_profile": strategy_profile_key,
+             "htf_status": htf_status, "context": htf_bias_detail},
         )
         return {"status": "ok", "reason": reason}
     
@@ -2179,6 +2186,16 @@ def trade_scalper_strategies_for_bot(
                 e,
             )
             continue
+        # Safety check - should never happen, but guard against it
+        if engine_decision is None:
+            logger.warning(
+                "[ScalperTrade] bot=%s strategy=%s returned None decision, skipping",
+                bot.id,
+                strategy_name,
+            )
+            strategy_events.append({"strategy": strategy_name, "action": "skip",
+                                    "reason": "strategy_no_decision", "score": 0, "metadata": {}})
+            continue
         strategy_events.append(
             {
                 "strategy": strategy_name,
@@ -2188,15 +2205,6 @@ def trade_scalper_strategies_for_bot(
                 "metadata": engine_decision.metadata or {},
             }
         )
-        
-        # Safety check - should never happen, but guard against it
-        if engine_decision is None:
-            logger.warning(
-                "[ScalperTrade] bot=%s strategy=%s returned None decision, skipping",
-                bot.id,
-                strategy_name,
-            )
-            continue
         
         # Skip if strategy doesn't emit "open"
         if engine_decision.action != "open" or not engine_decision.direction:
@@ -2243,6 +2251,7 @@ def trade_scalper_strategies_for_bot(
                 "market_snapshot": market_snapshot,
                 "volatility": volatility_snapshot,
                 "strategy_metrics": engine_decision.metadata or {},
+                "htf_status": htf_status,
                 **({"bias_m15": htf_bias, "context_bias": htf_bias} if htf_bias else {}),
             }
             if htf_bias_detail:
@@ -2361,12 +2370,16 @@ def trade_scalper_strategies_for_bot(
         if spread_price is not None and broker_point is not None and broker_point > 0
         else None
     )
-    spread_limit = Decimal(str(bot.max_spread_points or 0))
+    spread_limit = (
+        allowed_spread_price / broker_point
+        if allowed_spread_price is not None and broker_point is not None and broker_point > 0
+        else Decimal(0)
+    )
     spread_status = "unavailable"
-    if spread_points is not None:
+    if spread_price is not None:
         spread_status = (
             "pass"
-            if spread_limit <= 0 or spread_points <= spread_limit
+            if allowed_spread_price is None or spread_price <= allowed_spread_price
             else "fail"
         )
     rejection_reason = None
@@ -2399,7 +2412,7 @@ def trade_scalper_strategies_for_bot(
             "best_score": best_score,
             "best_strategy": best_strategy,
             "rejection_reason": rejection_reason,
-            "htf_status": "available" if htf_bias else "unavailable",
+            "htf_status": htf_status,
             "spread_status": spread_status,
             "spread_points": str(spread_points) if spread_points is not None else None,
             "spread_limit_points": str(spread_limit),
@@ -2433,7 +2446,7 @@ def trade_scalper_strategies_for_bot(
         "best_score": best_score,
         "best_strategy": best_strategy,
         "rejection_reason": rejection_reason,
-        "htf_status": "available" if htf_bias else "unavailable",
+        "htf_status": htf_status,
         "spread_status": spread_status,
         "spread_points": str(spread_points) if spread_points is not None else None,
         "spread_limit_points": str(spread_limit),

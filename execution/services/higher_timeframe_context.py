@@ -14,14 +14,16 @@ def analyze_context(timeframes, fetch, analyze):
     if any(not isinstance(detail, dict) or detail.get("bias", "invalid") not in (None, "buy", "sell")
            for detail in details.values()):
         return None, details, "htf_bias_unavailable"
-    if any(detail["bias"] is None for detail in details.values()):
-        return None, details, "htf_bias_neutral"
     immediate = min(frames, key=FRAME_MINUTES.get)
     dominant = max(frames, key=FRAME_MINUTES.get)
-    if len({detail["bias"] for detail in details.values()}) != 1:
-        return None, details, "htf_context_conflict"
-    return details[dominant]["bias"], {
+    context = {
         **details[immediate], "frames": details,
         "immediate_timeframe": immediate, "dominant_timeframe": dominant,
         "regime": details[dominant],
-    }, None
+    }
+    directional = {detail["bias"] for detail in details.values() if detail["bias"] is not None}
+    if len(directional) > 1:
+        return None, context, "htf_context_conflict"
+    if any(detail["bias"] is None for detail in details.values()):
+        return None, context, "htf_bias_neutral"
+    return details[dominant]["bias"], context, None

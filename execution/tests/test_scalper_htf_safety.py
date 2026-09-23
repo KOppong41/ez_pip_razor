@@ -179,7 +179,8 @@ class ScalperHtfSafetyTest(TestCase):
             summary = ScalperRunLog.objects.filter(bot=self.bot).latest("id").summary
             self.assertEqual(summary["htf_status"], status)
             self.assertEqual(summary["rejection_reason"], reason)
-            self.assertEqual(summary["context"]["context"], {"15m": {"bias": "buy"}, "1h": h1_detail})
+            context = summary["context"]["context"]
+            self.assertEqual(context.get("frames", context), {"15m": {"bias": "buy"}, "1h": h1_detail})
             self.assertEqual(summary["strategies_evaluated"], [])
         self.assertFalse(self.bot.orders.exists())
         self.assertFalse(self.bot.signals.exists())

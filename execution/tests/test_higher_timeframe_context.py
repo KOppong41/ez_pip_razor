@@ -15,9 +15,11 @@ class HigherTimeframeContextTests(SimpleTestCase):
         bias, details, reason = analyze_context(["H1", "M15"], fetch, _analyze_htf_bias)
         self.assertEqual(reason, "htf_bias_neutral")
         self.assertIsNone(bias)
-        self.assertEqual(list(details), ["15m", "1h"])
+        self.assertEqual(list(details["frames"]), ["15m", "1h"])
+        self.assertEqual(details["regime"], details["frames"]["1h"])
+        self.assertEqual(details["dominant_timeframe"], "1h")
         self.assertEqual([call.args[0] for call in fetch.call_args_list], ["15m", "1h"])
-        for detail in details.values():
+        for detail in details["frames"].values():
             self.assertIsNone(detail["bias"])
             self.assertEqual(detail["position_in_range"], 0.5)
 
@@ -32,13 +34,20 @@ class HigherTimeframeContextTests(SimpleTestCase):
                     self.assertIsNone(bias)
                     self.assertEqual(details, frames)
 
-    def test_directional_and_neutral_frames_still_block_entries(self):
+    def test_directional_and_neutral_frames_retain_neutral_reason_and_dominant_regime(self):
         # These are the final recorded Gold biases on 18 September.
         frames = {"15m": {"bias": "buy"}, "1h": {"bias": None, "position_in_range": 0.5429524604}}
         bias, details, reason = analyze_context(frames, frames.get, lambda value: value)
         self.assertIsNone(bias)
         self.assertEqual(reason, "htf_bias_neutral")
-        self.assertEqual(details, frames)
+        self.assertEqual(details["frames"], frames)
+        self.assertEqual(details["regime"], frames["1h"])
+
+    def test_neutral_frame_cannot_hide_conflicting_directional_frames(self):
+        frames = {"15m": {"bias": None}, "1h": {"bias": "buy"}, "4h": {"bias": "sell"}}
+        bias, details, reason = analyze_context(frames, frames.get, lambda value: value)
+        self.assertEqual((bias, reason), (None, "htf_context_conflict"))
+        self.assertEqual(details["frames"], frames)
 
     def test_directional_agreement_passes_and_disagreement_remains_blocked(self):
         for direction in ("buy", "sell"):
