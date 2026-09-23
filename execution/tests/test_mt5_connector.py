@@ -79,6 +79,9 @@ class MT5ConnectorTest(TestCase):
         api.POSITION_TYPE_SELL = 1
         api.TRADE_ACTION_DEAL = 1
         api.TRADE_ACTION_REMOVE = 8
+        api.ORDER_STATE_CANCELED = 2
+        api.ORDER_STATE_REJECTED = 5
+        api.ORDER_STATE_EXPIRED = 6
         api.ORDER_TIME_GTC = 0
         api.ORDER_FILLING_FOK = 0
         api.ORDER_FILLING_IOC = 1
@@ -673,7 +676,11 @@ class MT5ConnectorTest(TestCase):
         api.orders_get.side_effect = [
             (SimpleNamespace(ticket=555),),
             (),
+            (),
         ]
+        api.history_orders_get.return_value = (
+            SimpleNamespace(ticket=555, state=2, volume_initial=.04, volume_current=.04),
+        )
         api.order_send.return_value = SimpleNamespace(
             retcode=10009,
             comment="removed",

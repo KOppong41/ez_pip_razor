@@ -236,7 +236,7 @@ def enforce_pretrade_risk(
             reject("FLIP_GROUP_CHANGED", "Replacement group no longer matches owned exposure")
         owned_positions = owned_positions.exclude(pk__in=replacing_position_ids)
     from execution.services.exposure import entry_reservations
-    reservations = entry_reservations(account, exclude_order_id=locked_order.pk, positions=owned_positions)
+    reservations = entry_reservations(account, exclude_order_id=locked_order.pk)
     account_positions = owned_positions.count() + sum(r.position_slots for r in reservations)
     symbol_positions = owned_positions.filter(symbol=locked_order.symbol).count() + sum(r.position_slots for r in reservations if r.symbol == locked_order.symbol)
     bot_positions = owned_positions.filter(bot=bot).count() + sum(r.position_slots for r in reservations if r.bot_id == bot.pk)

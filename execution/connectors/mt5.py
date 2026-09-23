@@ -1099,8 +1099,12 @@ class MT5Connector(BaseConnector):
             remaining = getattr(row, "volume_current", None)
             if initial is None or remaining is None:
                 return False
-            expected_filled = Decimal(str(initial)) - Decimal(str(remaining))
-            if not expected_filled.is_finite() or expected_filled > order.filled_qty:
+            initial, remaining = Decimal(str(initial)), Decimal(str(remaining))
+            if (not initial.is_finite() or not remaining.is_finite()
+                    or initial <= 0 or remaining < 0 or remaining > initial):
+                return False
+            expected_filled = initial - remaining
+            if expected_filled > order.filled_qty:
                 # Terminal pending volume can coexist with delayed deal data.
                 return False
             order.remaining_qty = Decimal(0)
@@ -2103,6 +2107,8 @@ class MT5Connector(BaseConnector):
             if not active:
                 if self.reconcile_order(order):
                     order.refresh_from_db()
+                    if order.status in {"canceled", "rejected"}:
+                        return
                     if order.status in {"filled", "part_filled"}:
                         raise ConnectorError(
                             f"Order {order.id} has broker fills and cannot be locally canceled"
@@ -2150,7 +2156,11 @@ class MT5Connector(BaseConnector):
                     "broker_response",
                 ]
             )
-            update_order_status(order, "canceled")
-            ExecutionAttempt.objects.filter(order=order, resolved_at__isnull=True).update(
-                status="reconciled", resolved_at=timezone.now())
-            _clear_risk_reservation(order)
+            # Removal can race a partial fill. Keep its reservation until
+            # history proves the remainder is terminal and all fills are known.
+            self.reconcile_order(order)
+            order.refresh_from_db()
+            if order.status not in {"canceled", "rejected"}:
+                raise ConnectorError(
+                    "MT5 removal acknowledged; final fills/cancellation still require reconciliation"
+                )

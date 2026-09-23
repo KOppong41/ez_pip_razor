@@ -142,6 +142,8 @@ def record_fill(
     commission: Decimal = Decimal("0"),
     swap: Decimal = Decimal("0"),
     broker_metadata: dict | None = None,
+    executed_at=None,
+    update_bot_state: bool = True,
 ) -> Execution:
     """
     Record a single fill for an order, update the running Position,
@@ -170,6 +172,11 @@ def record_fill(
         account_balance=account_balance,
         owner=getattr(order, "owner", None),
     )
+    if executed_at is not None:
+        # auto_now_add records import time; historical reconciliation supplies
+        # the broker's actual fill time for performance and daily PnL queries.
+        Execution.objects.filter(pk=exe.pk).update(exec_time=executed_at)
+        exe.exec_time = executed_at
     log_journal_event(
         "order.execution",
         order=order,
@@ -297,7 +304,8 @@ def record_fill(
 
         # Update bot-level psychology state (loss streak / pause) based on this realized result.
         try:
-            update_bot_after_realized_pnl(order, realized_pnl)
+            if update_bot_state:
+                update_bot_after_realized_pnl(order, realized_pnl)
         except Exception:
             # Fail-soft: PnL recording should never block portfolio updates.
             pass

@@ -420,3 +420,62 @@ BTC remained active at 0.25% risk; Gold retained its schedule-owned pause and
 3% risk. There were no open positions or pending entries at reload. Receipts:
 `.runtime/btc-adoption-applied.json`, `.runtime/btc-before-reload.json`,
 `.runtime/btc-after-reload.json`, and `.runtime/btc-health-after-reload.json`.
+
+## Remaining safety audit findings (2026-09-23)
+
+The failed implementation findings from the supplied checklist are addressed:
+
+| Finding | Implemented behavior |
+| --- | --- |
+| Desktop enables MT5 Algo Trading | Removed keyboard/window automation and its enabling setting. Entry submission checks the operator's switch; login and read-only monitoring do not change it. |
+| Per-bot floating-loss settings unused | Fresh, exact-ticket owned profit plus swap is checked against the allocation, or account balance when allocation is zero. A breach latches the bot stopped, cancels its entries and requests owned exits. Explicit Start clears the latch; scheduling cannot. |
+| Partial and ambiguous volume escapes limits | One shared exposure calculation reserves pending remainders and unsynchronized fills without a time expiry. Missing positions retain capacity until broker evidence resolves them. |
+| Aggregate lots can exceed the configured ceiling | Final admission serializes different bots on the account row and includes durable reservations alongside known positions. Concurrent PostgreSQL tests enforce both lot and position caps. |
+| Performance identity omits effective controls | Schema 2 includes static account RiskPolicy limits and runtime execution controls. Final admission refreshes the snapshot and retains the original decision fingerprint when it differs. Filled history is preserved. |
+| Ineffective controls fragment performance | Disabled loss thresholds and unused runtime offsets/early-exit controls are excluded. Enabled per-bot loss controls now have runtime enforcement. |
+| CI lacks PostgreSQL locking coverage | CI runs complete backend suites on both databases. The existing required `backend-safety` check requires both jobs to succeed; the PostgreSQL job fails if it silently uses SQLite. |
+| Runbook uses an obsolete flatten setting | The runbook uses `close_positions_on_emergency_stop` and explains the separate bot loss stop, manual Algo Trading switch, recovery and release conditions. |
+
+Cancellation acknowledgement alone does not release capacity: removal can race
+another fill. Exact-ticket terminal order history must account for all filled
+volume first. The distinction follows MetaTrader's documented
+[trade return codes](https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes)
+and [order states](https://www.mql5.com/en/docs/constants/tradingconstants/orderproperties).
+Reservations survive delayed deal reporting, and repeated reconciliation can
+release a confirmed canceled remainder without resending the cancellation.
+
+Runtime inspection also found 16 old positions marked `missing`. Read-only MT5
+verification at 08:24 UTC showed no open positions or pending orders and matched
+complete entry/exit history for all 16 tickets. Reconciliation now retries missing
+records, repairs already-recorded closes without duplicate fills, and records
+balanced broker-history evidence for positions whose originating bot was deleted.
+It does not attribute those deleted bots' trades to current bots. Missing history,
+partial closure and netting reversal history continue to reserve exposure.
+Evidence: `.runtime/audit-broker-history.json`.
+Historical fills retain their broker execution timestamp. Importing an earlier
+day's result, or a result preceding an already-recorded exit, does not rewrite
+the bot's current loss streak or cooldown.
+
+Migration `bots.0056_bot_kill_switch_triggered_at` was applied by the desktop
+launcher at 01:02 UTC. It adds only the persistent loss-stop timestamp. Runtime
+inspection confirmed Gold at 3% risk and BTC at 0.25%; both were active within
+their windows. No risk or MT5 Algo Trading setting was changed for this audit.
+
+Validation: the complete PostgreSQL backend and additional bot API suite passed
+**448 tests**, including real concurrent admission transactions. Following the
+final historical-fill timestamp/state change, **93 SQLite** and **96 PostgreSQL**
+regression tests passed. The earlier complete SQLite suite passed 432 tests
+(two PostgreSQL-only skips), followed by 167 audit/control regression tests
+(the same two expected skips). System, migration and whitespace checks passed;
+the CI YAML and required-check dependencies were validated. Logs:
+`.runtime/audit-complete-postgres.log`, `.runtime/audit-final-sqlite.log`,
+`.runtime/audit-history-final-sqlite.log`, and
+`.runtime/audit-history-final-postgres.log`. Deployment verification receipts
+are written to `.runtime/audit-before-reload.json`,
+`.runtime/audit-after-reload.json`, and `.runtime/audit-reconciliation-result.json`.
+
+The unattended live-trading release gate remains **not approved**. Automated
+tests and read-only broker-history reconciliation do not establish broker fault
+recovery under active trading. The supervised demo partial-fill, connection-loss,
+cancellation/flatten-retry and host-recovery checks in `LIVE_TRADING_RUNBOOK.md`
+remain required before that separate release decision.

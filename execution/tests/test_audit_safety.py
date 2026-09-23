@@ -1,19 +1,22 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
+from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from bots.models import Bot
+from execution.connectors.base import ConnectorError
 from execution.connectors.mt5 import MT5Connector
-from execution.models import BrokerPosition, Decision, ExecutionAttempt, Order, Signal
+from execution.models import BrokerPosition, Decision, Execution, ExecutionAttempt, Order, Signal, TradeLog
 from execution.services.bot_loss_guard import latch_bot_losses
 from execution.services.bot_schedule import can_automatically_resume, set_bot_status
 from execution.services.exposure import entry_reservations
 from execution.services.performance_identity import performance_identity
-from execution.tasks import _account_entry_slots, cancel_stale_orders_task, kill_switch_monitor_task
+from execution.tasks import (_account_entry_slots, cancel_stale_orders_task, kill_switch_monitor_task,
+                             reconcile_broker_positions_task)
 from execution.tests import test_live_risk, test_kill_switch
 
 
@@ -50,6 +53,13 @@ class DurableExposureTests(TestCase):
         self.partial(represented=".2")
         rejection = self._assert_rejected("ACCOUNT_MAX_AGGREGATE_LOTS", self.candidate())
         self.assertEqual(Decimal(rejection.context["aggregate_lots"]), Decimal(1))
+
+    def test_closed_link_does_not_hide_unsynchronized_volume_on_open_link(self):
+        order, _ = self.partial(represented=".2")
+        closed = self._position(order.bot, 714, volume=".1")
+        closed.originating_order, closed.status = order, "closed"
+        closed.save()
+        self.assertEqual(entry_reservations(self.account)[0].lots, Decimal(".8"))
 
     def test_partial_position_and_remainder_use_one_position_slot(self):
         self.partial()
@@ -91,6 +101,7 @@ class DurableExposureTests(TestCase):
         api.ORDER_STATE_CANCELED, api.ORDER_STATE_REJECTED, api.ORDER_STATE_EXPIRED = 2, 5, 6
         connector = MT5Connector()
         for rows in (None, (), (SimpleNamespace(ticket=901, state=2, volume_initial=1, volume_current=.6),),
+                     (SimpleNamespace(ticket=900, state=2, volume_initial=1, volume_current=2),),
                      (SimpleNamespace(ticket=900, state=2, volume_initial=1, volume_current=.2),)):
             api.history_orders_get.return_value = rows
             self.assertFalse(connector._reconcile_terminal_remainder(order))
@@ -102,6 +113,37 @@ class DurableExposureTests(TestCase):
         self.assertEqual(entry_reservations(self.account), [])
         self.assertEqual(self._enforce(self.candidate(".5")).volume, Decimal(".5"))
         api.order_send.assert_not_called()
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_cancel_acknowledgement_holds_capacity_until_delayed_fills_resolve(self, api):
+        order, position = self.partial(reserved_at=timezone.now())
+        order.broker_order_ticket = 900
+        order.save()
+        api.TRADE_ACTION_REMOVE, api.TRADE_RETCODE_DONE = 8, 10009
+        api.ORDER_STATE_CANCELED, api.ORDER_STATE_REJECTED, api.ORDER_STATE_EXPIRED = 2, 5, 6
+        api.orders_get.side_effect = [(SimpleNamespace(ticket=900),), ()]
+        api.order_send.return_value = SimpleNamespace(retcode=10009, comment="removed")
+        api.history_orders_get.return_value = (SimpleNamespace(ticket=900, state=2, volume_initial=1, volume_current=.2),)
+        connector = MT5Connector()
+        with (patch.object(connector, "_login_from_order"),
+              patch.object(connector, "_matching_broker_records", return_value=([], [], []))):
+            with self.assertRaisesRegex(ConnectorError, "still require reconciliation"):
+                connector.cancel_order(order)
+            order.refresh_from_db()
+            self.assertEqual((order.status, entry_reservations(self.account)[0].lots), ("part_filled", Decimal(".6")))
+            self._assert_rejected("ACCOUNT_MAX_AGGREGATE_LOTS", self.candidate())
+            # Delayed broker deals/positions have now synchronized the .8 fill.
+            order.filled_qty, order.remaining_qty = Decimal(".8"), Decimal(".2")
+            order.save()
+            position.volume = Decimal(".8")
+            position.save()
+            api.orders_get.side_effect = None
+            api.orders_get.return_value = ()
+            connector.cancel_order(order)
+        order.refresh_from_db()
+        self.assertEqual((order.status, order.remaining_qty), ("canceled", Decimal(0)))
+        self.assertEqual(entry_reservations(self.account), [])
+        self.assertEqual(api.order_send.call_count, 1)
 
     @patch("execution.tasks.MT5Connector")
     def test_stale_worker_keeps_unknown_submitted_and_new_ambiguous_orders(self, connector):
@@ -261,3 +303,89 @@ class PerformanceControlIdentityTests(TestCase):
         self.assertEqual(order.performance_context["decision_config_fingerprint"], original)
         self.assertEqual(order.performance_context["config_fingerprint"], self.identity(bot))
         self.assertEqual(order.performance_context["config_snapshot"]["account"]["risk_policy"]["max_aggregate_open_lots"], "0.8")
+
+
+class MissingPositionRecoveryTests(TestCase):
+    _bot = test_live_risk.LiveRiskTest._bot
+    _position = test_live_risk.LiveRiskTest._position
+
+    def setUp(self):
+        test_live_risk.LiveRiskTest.setUp(self)
+        self.account.owner = get_user_model().objects.create_user("history-owner")
+        self.account.save(update_fields=["owner"])
+
+    def position(self, *, orphan=False):
+        local = self._position(self._bot("missing-history", owner=self.account.owner), 718, volume=".1")
+        local.status = "missing"
+        if orphan:
+            local.bot = None
+        local.save()
+        return local
+
+    def history(self, exit_volume=".1"):
+        return [SimpleNamespace(ticket=ticket, position_id=718, order=ticket + 10,
+                                entry=kind, volume=Decimal(volume), price=100, profit=0,
+                                swap=0, commission=0, time=ticket, time_msc=ticket * 1000)
+                for ticket, kind, volume in ((800, 0, ".1"), (801, 1, exit_volume))]
+
+    def reconcile(self, history):
+        with (patch("execution.tasks.is_mt5_available", return_value=True),
+              patch("execution.tasks.MT5Connector") as connector):
+            connector.return_value.positions_for_account.return_value = ()
+            connector.return_value.history_deals_for_position_account.return_value = history
+            result = reconcile_broker_positions_task.run()
+            connector.return_value.place_order.assert_not_called()
+        self.assertEqual(result["errors"], [])
+        return result
+
+    def test_missing_position_retries_delayed_history_then_releases_capacity(self):
+        local = self.position()
+        self.reconcile([])
+        local.refresh_from_db()
+        self.assertEqual((local.status, _account_entry_slots(self.account)), ("missing", 9))
+        self.reconcile(self.history())
+        local.refresh_from_db()
+        self.assertEqual((local.status, local.volume, _account_entry_slots(self.account)), ("closed", Decimal(0), 10))
+        self.assertEqual(Order.objects.filter(intent="exit").count(), 1)
+        self.reconcile(self.history())
+        self.assertEqual(Order.objects.filter(intent="exit").count(), 1)
+
+    def test_recorded_exit_history_repairs_missing_status_without_duplicate_fill(self):
+        local = self.position()
+        self.reconcile(self.history())
+        BrokerPosition.objects.filter(pk=local.pk).update(status="missing", volume=Decimal(".1"))
+        self.reconcile(self.history())
+        local.refresh_from_db()
+        self.assertEqual(local.status, "closed")
+        self.assertEqual(Order.objects.filter(intent="exit").count(), 1)
+        self.assertEqual(local.broker_metadata["reconciled_close"]["source"], "mt5_position_history")
+
+    def test_deleted_bot_closure_requires_balanced_history_without_reattribution(self):
+        local = self.position(orphan=True)
+        for rows in ([], self.history(".05"), self.history()[1:]):
+            self.reconcile(rows)
+            local.refresh_from_db()
+            self.assertEqual(local.status, "missing")
+        self.reconcile(self.history())
+        local.refresh_from_db()
+        self.assertEqual(local.status, "closed")
+        self.assertIsNone(local.bot_id)
+        self.assertFalse(Order.objects.filter(intent="exit").exists())
+
+    def test_reversal_history_keeps_uncertain_exposure_reserved(self):
+        local = self.position()
+        history = self.history()
+        history[-1].entry = 2
+        self.reconcile(history)
+        local.refresh_from_db()
+        self.assertEqual(local.status, "missing")
+        self.assertFalse(Order.objects.filter(intent="exit").exists())
+
+    def test_old_missing_fill_keeps_broker_time_and_current_bot_state(self):
+        local = self.position()
+        with patch("execution.services.portfolio.update_bot_after_realized_pnl") as psychology:
+            self.reconcile(self.history())
+        psychology.assert_not_called()
+        expected = datetime.fromtimestamp(801, dt_timezone.utc)
+        self.assertEqual(Execution.objects.get(broker_deal_ticket=801).exec_time, expected)
+        self.assertEqual(TradeLog.objects.get(order__intent="exit").closed_at, expected)

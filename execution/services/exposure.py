@@ -24,7 +24,7 @@ class EntryReservation:
     position_slots: int
 
 
-def entry_reservations(account, *, exclude_order_id=None, positions=None):
+def entry_reservations(account, *, exclude_order_id=None):
     """Count unfilled and not-yet-synchronized fills without duplicating positions.
 
     Call inside the account row lock for authoritative admission decisions.
@@ -53,7 +53,7 @@ def entry_reservations(account, *, exclude_order_id=None, positions=None):
         exits = Execution.objects.filter(order__broker_account=account, order__intent="exit",
                                          broker_position_ticket__in=tickets).aggregate(total=Sum("qty"))["total"] or Decimal(0)
         filled = max(Decimal(0), order.filled_qty)
-        if any(p.status == "closed" for p in linked):
+        if linked and all(p.status == "closed" for p in linked):
             exits = max(exits, filled)
         unsynchronized = max(Decimal(0), filled - exits - represented)
         remaining = max(Decimal(0), order.qty - filled, order.remaining_qty) if order.status in OUTSTANDING else Decimal(0)

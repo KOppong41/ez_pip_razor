@@ -37,6 +37,7 @@ from execution.services.decision import make_decision_from_signal
 from execution.services.daily_risk import (
     create_account_snapshot,
     daily_equity_change_pcts,
+    risk_day_window,
     update_account_risk_day,
 )
 from execution.services.ai_strategy_selector import effective_spread_allowance, select_ai_strategies
@@ -308,7 +309,27 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
         local.broker_account,
         local.broker_position_ticket,
     )
-    exit_entries = {1, 2, 3}  # MT5 DEAL_ENTRY_OUT, INOUT, OUT_BY
+    deals = [deal for deal in deals
+             if int(getattr(deal, "position_id", 0) or 0) == local.broker_position_ticket]
+    # A missing snapshot is not closure evidence. Balanced, position-scoped
+    # entry/exit history is, including when an old bot has since been deleted.
+    entries = Decimal(0)
+    exits = Decimal(0)
+    complete_history = bool(deals)
+    for deal in deals:
+        kind = int(getattr(deal, "entry", -1))
+        volume = Decimal(str(getattr(deal, "volume", 0) or 0))
+        if kind not in {0, 1, 3} or not volume.is_finite() or volume <= 0:
+            complete_history = False
+            break  # Netting reversals need separate accounting; keep reserved.
+        if kind == 0:
+            entries += volume
+        else:
+            exits += volume
+    history_closed = complete_history and entries > 0 and entries == exits
+    if any(int(getattr(deal, "entry", -1)) == 2 for deal in deals):
+        return []  # INOUT is a reversal, not proof of full closure.
+    exit_entries = {1, 3}  # MT5 DEAL_ENTRY_OUT, OUT_BY
     exit_deals = [
         deal
         for deal in deals
@@ -318,7 +339,30 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
     if not exit_deals:
         return []
 
-    close_order, _ = create_close_order_for_position(local, local.broker_account)
+    recorded_tickets = set(Execution.objects.filter(
+        order__broker_account=local.broker_account,
+        broker_deal_ticket__in=[getattr(deal, "ticket", 0) for deal in exit_deals],
+    ).values_list("broker_deal_ticket", flat=True))
+    if history_closed and (not local.bot_id or all(deal.ticket in recorded_tickets for deal in exit_deals)):
+        local.status, local.volume = "closed", Decimal(0)
+        local.closed_at = timezone.now()
+        local.last_reconciled_at = timezone.now()
+        local.broker_metadata = {**(local.broker_metadata or {}), "reconciled_close": {
+            "source": "mt5_position_history", "deal_tickets": [int(deal.ticket) for deal in deals],
+            "entry_volume": str(entries), "exit_volume": str(exits),
+        }}
+        local.save(update_fields=["status", "volume", "closed_at", "last_reconciled_at", "broker_metadata"])
+        return []
+    if not local.bot_id:
+        return []  # Never attribute a deleted bot's history to another bot.
+
+    previous_status = local.status
+    try:
+        # This creates a historical ledger entry only; no broker dispatch.
+        local.status = "open"
+        close_order, _ = create_close_order_for_position(local, local.broker_account)
+    finally:
+        local.status = previous_status
     imported = []
     for deal in sorted(
         exit_deals,
@@ -334,6 +378,13 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
         price = Decimal(str(getattr(deal, "price", 0) or 0))
         if qty <= 0 or price <= 0:
             continue
+        deal_seconds = (getattr(deal, "time_msc", 0) or 0) / 1000 or getattr(deal, "time", 0)
+        executed_at = datetime.fromtimestamp(deal_seconds, dt_timezone.utc) if deal_seconds else None
+        update_bot_state = executed_at is None or (
+            executed_at >= risk_day_window(local.broker_account).start
+            and not Execution.objects.filter(order__bot_id=local.bot_id, order__intent="exit",
+                                             exec_time__gt=executed_at).exists()
+        )
         record_fill(
             close_order,
             qty,
@@ -345,6 +396,8 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
             commission=Decimal(str(getattr(deal, "commission", 0) or 0)),
             swap=Decimal(str(getattr(deal, "swap", 0) or 0)),
             broker_metadata=(deal._asdict() if hasattr(deal, "_asdict") else {}),
+            executed_at=executed_at,
+            update_bot_state=update_bot_state,
         )
         imported.append(deal_ticket)
 
@@ -2754,7 +2807,7 @@ def reconcile_broker_positions_task(self):
                 errors.append((acct.id, ticket, str(e)))
                 logger.exception("[Recon] failed to import broker position acct=%s ticket=%s", acct.id, ticket)
 
-        for local in acct.broker_positions.filter(status="open"):
+        for local in acct.broker_positions.filter(status__in=["open", "missing"]):
             if local.broker_position_ticket not in broker_tickets:
                 try:
                     closed_deals = _reconcile_missing_owned_position(connector, local)
@@ -2768,7 +2821,7 @@ def reconcile_broker_positions_task(self):
                     )
                 if closed_deals:
                     imported_closes.extend(closed_deals)
-                else:
+                elif local.status != "closed":
                     local.status = "missing"
                     local.last_reconciled_at = timezone.now()
                     local.save(update_fields=["status", "last_reconciled_at"])
