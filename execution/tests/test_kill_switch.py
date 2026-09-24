@@ -77,10 +77,11 @@ class KillSwitchRiskDayTests(TestCase):
         self.policy.refresh_from_db()
         self.assertIsNotNone(self.policy.emergency_stop_triggered_at)
         first_trigger = self.policy.emergency_stop_triggered_at
-        self.policy.emergency_stop = False
-        self.policy.save(update_fields=["emergency_stop"])
+        from execution.services.risk_policy import apply_account_control
+
+        apply_account_control(self.account, "start")
         self.policy.refresh_from_db()
-        self.assertIsNone(self.policy.emergency_stop_triggered_at)
+        self.assertIsNone(self.policy.emergency_stop_triggered_at)  
         self.policy.emergency_stop = True
         self.policy.save(update_fields=["emergency_stop"])
         kill_switch_monitor_task.run()
