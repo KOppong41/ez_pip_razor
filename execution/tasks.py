@@ -2185,6 +2185,11 @@ def trade_scalper_strategies_for_bot(
                 strategy_name,
                 e,
             )
+            strategy_events.append({
+                "strategy": strategy_name, "action": "error",
+                "reason": "strategy_exception", "score": 0,
+                "metadata": {"error_type": type(e).__name__},
+            })
             continue
         # Safety check - should never happen, but guard against it
         if engine_decision is None:
@@ -2193,7 +2198,7 @@ def trade_scalper_strategies_for_bot(
                 bot.id,
                 strategy_name,
             )
-            strategy_events.append({"strategy": strategy_name, "action": "skip",
+            strategy_events.append({"strategy": strategy_name, "action": "error",
                                     "reason": "strategy_no_decision", "score": 0, "metadata": {}})
             continue
         strategy_events.append(
@@ -2330,6 +2335,8 @@ def trade_scalper_strategies_for_bot(
         orders_placed.extend(dispatch_result["orders"])
         dispatch_failures.extend(dispatch_result["failures"])
     
+    # Keep processing failures distinguishable from a valid no-setup scan.
+    strategy_errors = [event for event in strategy_events if event["action"] == "error"]
     # Log summary with clearer outcome/context for UI
     if defer_dispatch and candidates:
         outcome = "candidate_pending_allocation"
@@ -2339,6 +2346,8 @@ def trade_scalper_strategies_for_bot(
         outcome = "decisions_made_no_orders"
     elif signals_created:
         outcome = "signals_generated_no_decisions"
+    elif strategy_errors:
+        outcome = "strategy_errors"
     else:
         outcome = "no_signals"
 
@@ -2384,8 +2393,10 @@ def trade_scalper_strategies_for_bot(
             else "fail"
         )
     rejection_reason = None
-    if not candidates and best_event is not None:
-        rejection_reason = best_event.get("reason")
+    if not candidates:
+        rejection_event = strategy_errors[0] if strategy_errors else best_event
+        if rejection_event is not None:
+            rejection_reason = rejection_event.get("reason")
 
     log_journal_event(
         "scalper_engine_run",

@@ -7,7 +7,7 @@ from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils.translation import gettext_lazy as _
-from django.db.models import Count, Q
+from django.db.models import Count, OuterRef, Q, Subquery
 
 from bots.models import Bot
 from .models import (
@@ -20,6 +20,7 @@ from .models import (
     ExecutionSetting,
     JournalEntry,
     ScalperProfile,
+    ScalperRunLog,
     AccountRiskDay,
     AccountSnapshot,
     BrokerPosition,
@@ -612,6 +613,14 @@ class DecisionAdmin(OwnedAdmin):
         qs = self.get_queryset(request).select_related("bot", "signal").order_by("-decided_at")
         extra_context = extra_context or {}
         extra_context["decisions"] = qs[:200]
+        latest_run = ScalperRunLog.objects.filter(bot_id=OuterRef("bot_id")).order_by("-created_at", "-pk")
+        runs = ScalperRunLog.objects.select_related("bot", "bot__asset").filter(
+            pk=Subquery(latest_run.values("pk")[:1]),
+            created_at__gte=timezone.now() - timedelta(hours=24),
+        ).order_by("-created_at", "-pk")
+        if not request.user.is_superuser:
+            runs = runs.filter(bot__owner=request.user)
+        extra_context["latest_scalper_runs"] = runs[:20]
         return super().changelist_view(request, extra_context=extra_context)
 
 
