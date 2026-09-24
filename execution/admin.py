@@ -393,6 +393,21 @@ class AccountRiskDayAdmin(admin.ModelAdmin):
 @admin.register(RiskPolicy)
 class RiskPolicyAdmin(admin.ModelAdmin):
     list_display = ("broker_account", "max_order_lot_size", "max_daily_loss_pct", "max_account_drawdown_pct", "entries_enabled", "emergency_stop")
+    readonly_fields = ("entries_enabled", "emergency_stop", "emergency_stop_triggered_at",
+                       "equity_high_water", "equity_high_water_at", "updated_at")
+
+    def get_readonly_fields(self, request, obj=None):
+        # Moving an existing policy to another account must not move its latch.
+        return self.readonly_fields + (("broker_account",) if obj else ())
+
+    def save_model(self, request, obj, form, change):
+        from execution.services.risk_policy import RISK_LIMIT_FIELDS, update_risk_limits
+        fields = set(form.changed_data) & RISK_LIMIT_FIELDS if change else RISK_LIMIT_FIELDS
+        policy = update_risk_limits(obj.broker_account, {field: getattr(obj, field) for field in fields})
+        obj.pk = policy.pk
+        obj._state.adding = False
+        obj._state.db = policy._state.db
+        obj.refresh_from_db()
 
 
 @admin.register(BrokerSymbolMapping)

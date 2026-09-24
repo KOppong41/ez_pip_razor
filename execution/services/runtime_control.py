@@ -38,9 +38,9 @@ def runtime_stop_user_id(token: str) -> int:
 def _stop_user_automation_once(user) -> dict[str, int]:
     with transaction.atomic():
         account_ids = list(
-            BrokerAccount.objects.filter(
+            BrokerAccount.objects.select_for_update().filter(
                 owner=user, connector="mt5_local"
-            ).values_list("id", flat=True)
+            ).order_by("pk").values_list("id", flat=True)
         )
         policies = RiskPolicy.objects.filter(broker_account_id__in=account_ids).update(
             entries_enabled=False
