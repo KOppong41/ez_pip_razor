@@ -808,7 +808,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('24-hour skip counts'), findsOneWidget);
+    expect(find.text('Recent rejection and error counts'), findsOneWidget);
+    expect(
+      find.text('Cycle / Account Slot Awarded To Higher Ranked Setup'),
+      findsOneWidget,
+    );
     expect(
       find.text('Trend Pullback / Trend Pullback No Trend'),
       findsOneWidget,

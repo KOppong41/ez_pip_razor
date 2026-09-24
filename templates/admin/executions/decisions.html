@@ -348,6 +348,39 @@
 
 {% block content %}
 <div class="decisions-container">
+    <section class="filters-bar" aria-label="{% trans 'Recent scalper scans' %}">
+        <div style="width: 100%;">
+            <h2>{% trans "Recent scalper scans" %}</h2>
+            <p>{% trans "A scalper scan creates a Decision only after a strategy emits an entry signal. Scans with no setup or a blocked market context appear here even when there are no Decisions." %}</p>
+            <p>{% trans "Latest scan per bot in the last 24 hours, up to 20 bots. Timestamps show when evidence was recorded; an old scan does not confirm the worker is still running." %}</p>
+            <div style="overflow-x: auto;">
+                <table class="modern-table">
+                    <thead><tr>
+                        <th>{% trans "Bot / symbol" %}</th>
+                        <th>{% trans "Last scan" %}</th>
+                        <th>{% trans "Outcome" %}</th>
+                        <th>{% trans "Reason" %}</th>
+                        <th>{% trans "Strategies evaluated" %}</th>
+                        <th>{% trans "HTF / spread" %}</th>
+                    </tr></thead>
+                    <tbody>
+                        {% for run in latest_scalper_runs %}
+                        <tr>
+                            <td>{{ run.bot.name }} / {{ run.bot.asset.symbol }}</td>
+                            <td>{{ run.created_at|date:"Y-m-d H:i:s T" }}</td>
+                            <td>{{ run.summary.outcome|default:"unknown" }}</td>
+                            <td>{{ run.summary.rejection_reason|default:"—" }}</td>
+                            <td>{{ run.summary.strategies_evaluated|join:", "|default:"—" }}</td>
+                            <td>{{ run.summary.htf_status|default:"not_evaluated" }} / {{ run.summary.spread_status|default:"not_evaluated" }}</td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="6">{% trans "No scalper scans recorded for your bots in the last 24 hours. Check bot status and worker activity." %}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
     <!-- Header Actions -->
     <div class="header-actions" style="margin-bottom: var(--space-xl);">
         <a href="{% url 'admin:execution_decision_changelist' %}" class="btn btn-outline">
@@ -417,7 +450,7 @@
         </div>
 
         <div class="table-container">
-            <table class="modern-table">
+            <table class="modern-table" id="decisions-table">
                 <thead>
                     <tr>
                         <th>{% trans "Time" %}</th>
@@ -562,7 +595,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const toDateInput = document.getElementById('decisions-to-date');
     const dateSortSelect = document.getElementById('decisions-date-sort');
     const paginationInfo = document.querySelector('.pagination-info');
-    const tableBody = document.querySelector('.modern-table tbody');
+    const tableBody = document.querySelector('#decisions-table tbody');
 
     const getRows = () => Array.from(document.querySelectorAll('.decision-row'));
 
