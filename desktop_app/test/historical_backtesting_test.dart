@@ -554,7 +554,7 @@ void main() {
       expect(export.onPressed, isNull);
       await tester.tap(find.text('Run evidence'));
       await tester.pumpAndSettle();
-      expect(find.text('No strategy-run evidence yet'), findsOneWidget);
+      expect(find.text('No scans recorded in the last 24 hours'), findsOneWidget);
       await tester.tap(find.text('Historical backtests'));
       await tester.pumpAndSettle();
       expect(find.text('Backtest #42 · BTCUSDm'), findsOneWidget);
