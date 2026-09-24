@@ -5905,7 +5905,9 @@ class _RunEvidencePageState extends State<RunEvidencePage> {
                 eyebrow: 'STRATEGY LAB',
                 title: 'Strategy run evidence',
                 description:
-                    'Review demo/live engine cycles and strategy outcomes.',
+                    'Latest 250 scans from the last 24 hours. A scan creates a '
+                    'Decision only when a strategy emits an entry signal; '
+                    'setup rejections and blocked scans appear here.',
                 badge: '${runs.length} RUNS',
                 action: OutlinedButton.icon(
                   onPressed: reload,
@@ -5917,9 +5919,10 @@ class _RunEvidencePageState extends State<RunEvidencePage> {
             if (runs.isEmpty)
               const _EmptyWorkspace(
                 icon: Icons.science_outlined,
-                title: 'No strategy-run evidence yet',
+                title: 'No scans recorded in the last 24 hours',
                 text:
-                    'Run the scalper on demo to populate market snapshots and decision results.',
+                    'Check bot status and worker activity. No recent evidence '
+                    'does not establish whether the engine is running.',
               ),
             if (runs.isNotEmpty) ...[
               _StrategyOutcomeSummary(runs: runs),
@@ -5967,7 +5970,8 @@ class _BacktestRunTable extends StatelessWidget {
     final summary = mapOf(run['summary']);
     final strategies = listOfMaps(summary['strategies']);
     final outcome = '${summary['outcome'] ?? 'unknown'}';
-    final outcomeColor = outcome == 'orders_sent' ? green : muted;
+    final hasErrors = strategies.any((event) => event['action'] == 'error');
+    final outcomeColor = hasErrors ? danger : muted;
     final rawEvaluated = summary['strategies_evaluated'];
     final evaluated = rawEvaluated is List ? rawEvaluated : const <dynamic>[];
     final strategyItems = evaluated.isNotEmpty ? evaluated : strategies;
@@ -6060,9 +6064,14 @@ class _StrategyOutcomeSummary extends StatelessWidget {
     final counts = <String, int>{};
     for (final run in runs) {
       final summary = mapOf(run['summary']);
+      final rejection = summary['rejection_reason'];
+      if (rejection != null && '$rejection'.isNotEmpty) {
+        final key = 'Cycle / ${label('$rejection')}';
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
       for (final event in listOfMaps(summary['strategies'])) {
         final action = '${event['action'] ?? 'unknown'}'.toLowerCase();
-        if (action != 'skip') continue;
+        if (action != 'skip' && action != 'error') continue;
         final strategy = label('${event['strategy'] ?? 'unknown strategy'}');
         final reason = label('${event['reason'] ?? 'unspecified'}');
         final key = '$strategy / $reason';
@@ -6082,18 +6091,19 @@ class _StrategyOutcomeSummary extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text(
-              '24-hour skip counts',
+              'Recent rejection and error counts',
               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
             ),
             const SizedBox(height: 4),
             Text(
-              'Aggregated from the ${runs.length} most recent retained runs.',
+              'From ${runs.length} returned scans within 24 hours (maximum 250). '
+              'Cycle and strategy counts overlap; they are not a total.',
               style: const TextStyle(color: muted, fontSize: 10),
             ),
             const SizedBox(height: 10),
             if (rows.isEmpty)
               const Text(
-                'No per-strategy skips were recorded.',
+                'No rejections or strategy errors were recorded.',
                 style: TextStyle(color: muted, fontSize: 10),
               )
             else

@@ -34,10 +34,11 @@ class BtcNeutralContextTests(TestCase):
         self.constraints = BrokerSymbolConstraints(point=Decimal(".01"), digits=2, min_lot=Decimal(".01"),
             max_lot=Decimal(100), lot_step=Decimal(".01"), stops_level_points=Decimal(0))
 
-    def scan(self, frames=(None, None), *, decision=None, null_runner=False, spread=2):
+    def scan(self, frames=(None, None), *, decision=None, null_runner=False, spread=2, runner_error=None):
         details = [frame if isinstance(frame, dict) else {"bias": frame, "structure": "range",
                    "ema_slope_pct": 0, "atr_ratio": 1} for frame in frames]
         runner = Mock(return_value=None if null_runner else decision or EngineDecision(action="skip", reason="no_setup"))
+        runner.side_effect = runner_error
         others = {name: Mock() for name in ("momentum_ignition", "breakout_retest")}
         registry = {"trend_pullback": replace(SCALPER_STRATEGY_REGISTRY["trend_pullback"], runner=runner)}
         registry.update({name: replace(SCALPER_STRATEGY_REGISTRY[name], runner=mock) for name, mock in others.items()})
@@ -184,5 +185,17 @@ class BtcNeutralContextTests(TestCase):
         result, summary, _, _ = self.scan(null_runner=True)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(summary["rejection_reason"], "strategy_no_decision")
+        self.assertEqual(summary["outcome"], "strategy_errors")
         self.assertEqual(summary["strategies_evaluated"], ["trend_pullback"])
         self.assertFalse(self.bot.signals.exists())
+
+    def test_detector_exception_is_visible_in_persisted_scan_evidence(self):
+        _, summary, _, _ = self.scan(runner_error=ValueError("private exception details"))
+        self.assertEqual(summary["outcome"], "strategy_errors")
+        self.assertEqual(summary["rejection_reason"], "strategy_exception")
+        self.assertEqual(summary["strategies_evaluated"], ["trend_pullback"])
+        self.assertEqual(summary["strategies"][0]["action"], "error")
+        self.assertEqual(summary["strategies"][0]["metadata"], {"error_type": "ValueError"})
+        self.assertNotIn("private exception details", str(summary))
+        self.assertFalse(self.bot.signals.exists())
+        self.assertFalse(Decision.objects.filter(bot=self.bot).exists())
