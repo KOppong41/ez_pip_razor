@@ -111,6 +111,58 @@ class PersonalAccountApiTest(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("max_aggregate_open_lots", response.json())
 
+    def test_risk_patch_cannot_overwrite_state_changed_after_policy_was_loaded(self):
+        policy = RiskPolicy.objects.create(broker_account=self.account, entries_enabled=True)
+        triggered_at = timezone.now()
+        save = RiskPolicy.save
+
+        def concurrent_save(instance, *args, **kwargs):
+            # Deterministically reproduce a stale loaded object, including a
+            # concurrent edit to a limit absent from this PATCH. PostgreSQL's
+            # lock serialization is tested separately with real transactions.
+            RiskPolicy.objects.filter(pk=instance.pk).update(
+                entries_enabled=False, emergency_stop=True,
+                emergency_stop_triggered_at=triggered_at,
+                equity_high_water=Decimal('12500'), equity_high_water_at=triggered_at,
+                max_total_open_positions=3,
+            )
+            return save(instance, *args, **kwargs)
+
+        with patch.object(RiskPolicy, 'save', concurrent_save):
+            response = self.client.patch('/api/personal/risk/',
+                data={'max_order_lot_size': '0.02'}, content_type='application/json')
+
+        self.assertEqual(response.status_code, 200, response.json())
+        policy.refresh_from_db()
+        self.assertEqual(policy.max_order_lot_size, Decimal('.02'))
+        self.assertEqual(policy.max_total_open_positions, 3)
+        self.assertFalse(policy.entries_enabled)
+        self.assertTrue(policy.emergency_stop)
+        self.assertEqual(policy.emergency_stop_triggered_at, triggered_at)
+        self.assertEqual(policy.equity_high_water, Decimal('12500'))
+        self.assertEqual(policy.equity_high_water_at, triggered_at)
+        self.assertTrue(response.json()['emergency_stop'])
+        self.assertFalse(response.json()['entries_enabled'])
+        self.assertEqual(Decimal(str(response.json()['equity_high_water'])), Decimal('12500'))
+
+    def test_risk_patch_cannot_restart_account_or_reset_equity_watermark(self):
+        triggered_at = timezone.now()
+        policy = RiskPolicy.objects.create(broker_account=self.account, entries_enabled=False,
+            emergency_stop=True, emergency_stop_triggered_at=triggered_at,
+            equity_high_water=Decimal('12500'), equity_high_water_at=triggered_at)
+        response = self.client.patch('/api/personal/risk/', data={
+            'max_order_lot_size': '0.02', 'entries_enabled': True, 'emergency_stop': False,
+            'emergency_stop_triggered_at': None, 'equity_high_water': '0', 'equity_high_water_at': None,
+        }, content_type='application/json')
+        self.assertEqual(response.status_code, 200, response.json())
+        policy.refresh_from_db()
+        self.assertEqual(policy.max_order_lot_size, Decimal('.02'))
+        self.assertFalse(policy.entries_enabled)
+        self.assertTrue(policy.emergency_stop)
+        self.assertEqual(policy.emergency_stop_triggered_at, triggered_at)
+        self.assertEqual(policy.equity_high_water, Decimal('12500'))
+        self.assertEqual(policy.equity_high_water_at, triggered_at)
+
     def test_positions_lists_current_open_positions_first_and_newest_first(self):
         now = timezone.now()
         rows = [

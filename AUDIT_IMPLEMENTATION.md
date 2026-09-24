@@ -1,5 +1,46 @@
 # Consolidated audit implementation
 
+## BTC audit closure, 24 September 2026
+
+The attached audit referred to an older revision. This checkout already contains
+the `95f9099` risk-save fix: `personal_risk()` uses `update_risk_limits()`, which
+locks account then policy, validates the requested limits and saves only those
+fields plus `updated_at`. Account start/stop uses a separate explicit control
+operation. The admin editor uses the same risk-limit service.
+
+The new regressions cover both outstanding assurances:
+
+- `test_personal_account_api.py` reproduces a stale loaded policy at save time
+  and verifies that PATCH preserves an emergency latch, its timestamp, the
+  equity watermark and its timestamp, and an unrelated concurrent limit edit.
+  Attempts to change safety state through the limits endpoint remain ineffective.
+- `test_postgres_concurrency.py` runs a loss monitor and a competing limit edit
+  on separate database connections. The edit must wait for the account lock
+  and preserve the committed latch and watermark.
+- `test_btc_preset_e2e.py` loads recorded MT5 BTCUSDm candles and applies the
+  actual asset preset. With the real context analyzer, selector, indicators,
+  detector and decision service, the global 1m request resolves to M5 and
+  persists an **open** Trend Pullback Decision. Score is 0.865134 and stop
+  distance is 0.467459%. Additional cases verify failed confirmation and an
+  ignored Decision for a stop below the 0.35% minimum. Fixture provenance and
+  completed-candle boundaries are documented in `execution/tests/fixtures/README.md`.
+
+These checks preserve BTC's 0.25% risk, 0.68 score threshold, 0.35–0.90% stop
+envelope and broker minimum-volume protection. Tests defer dispatch and use
+isolated databases; they place no orders and make no changes to running bots.
+
+A fresh read-only runtime query at **2026-09-24 14:15:33 UTC** resolves the
+audit's lack-of-Decisions uncertainty for the retained database. The preceding
+24 hours contain **3 open and 5 ignored BTC Decisions**. All three corresponding
+entry orders were rejected with `BROKER_MIN_VOLUME`. The latest scan reported
+`htf_context_conflict`; detector skips account for most other scans. This proves
+the live path has reached Decisions and distinguishes subsequent sizing
+rejections from missing signals. It does not explain any independently empty UI
+view or promise an executable trade. The query receipt is retained locally at
+`.runtime/audit-recommendations-live-evidence.json`.
+
+Validation results for this pass are recorded below after the test runs complete.
+
 This records the general, opposite-scalp and Gold audit implementation, merged
 in `3aa3fba`, and its subsequent working-tree fixes. Database migrations are not
 applied to the live account by this continuation.
