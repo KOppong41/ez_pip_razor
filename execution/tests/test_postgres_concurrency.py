@@ -8,9 +8,10 @@ from unittest import skipUnless
 from django.db import close_old_connections, connection, transaction
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
-from execution.models import JournalEntry, Order
+from execution.models import JournalEntry, Order, RiskPolicy
 from execution.services.account_loss_guard import latch_account_loss
 from execution.services.live_risk import RiskRejected, enforce_pretrade_risk
+from execution.services.risk_policy import update_risk_limits
 from execution.tests import test_live_risk
 
 
@@ -122,3 +123,54 @@ class PostgresAdmissionConcurrencyTests(TransactionTestCase):
         self.policy.refresh_from_db()
         self.assertTrue(self.policy.emergency_stop)
         self.assertFalse(self.policy.entries_enabled)
+
+    def test_limit_edit_waits_for_loss_latch_and_preserves_committed_safety_state(self):
+        self.policy.max_daily_loss_pct = Decimal('1')
+        self.policy.save(update_fields=['max_daily_loss_pct'])
+        holding, release, edit_started, edit_finished = Event(), Event(), Event(), Event()
+
+        def monitor():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    reason = latch_account_loss(self.account, daily_loss_pct=Decimal('2'),
+                        drawdown_pct=Decimal('2'), daily_baseline_source='manual', daily_baseline_locked=True)
+                    RiskPolicy.objects.filter(pk=self.policy.pk).update(equity_high_water=Decimal('12500'))
+                    holding.set()
+                    if not release.wait(10):
+                        raise RuntimeError('Test monitor lock was not released')
+                    return reason
+            finally:
+                close_old_connections()
+
+        def edit():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET LOCAL lock_timeout = '8s'")
+                    edit_started.set()
+                    return update_risk_limits(self.account, {'max_order_lot_size': Decimal('.02')})
+            finally:
+                edit_finished.set()
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(monitor)
+            try:
+                self.assertTrue(holding.wait(10))
+                second = pool.submit(edit)
+                self.assertTrue(edit_started.wait(3))
+                self.assertFalse(edit_finished.wait(.25), 'Risk edit bypassed the account lock')
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=12), 'maximum_daily_loss')
+            saved = second.result(timeout=12)
+        self.policy.refresh_from_db()
+        for policy in (saved, self.policy):
+            self.assertEqual(policy.max_order_lot_size, Decimal('.02'))
+            self.assertFalse(policy.entries_enabled)
+            self.assertTrue(policy.emergency_stop)
+            self.assertIsNotNone(policy.emergency_stop_triggered_at)
+            self.assertEqual(policy.equity_high_water, Decimal('12500'))
+        self.assertEqual(JournalEntry.objects.filter(event_type='kill_switch.triggered').count(), 1)
