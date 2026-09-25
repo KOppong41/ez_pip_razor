@@ -2283,20 +2283,38 @@ def trade_scalper_strategies_for_bot(
             )
             continue
         
-        # Make decision from signal
+        # Make or reuse the signal's one authoritative decision.
         try:
-            existing_decision = Decision.objects.filter(signal=signal, action="open").first()
+            existing_decision = (
+                Decision.objects.filter(signal=signal)
+                .order_by("decided_at", "id")
+                .first()
+            )
+
+            decision_created = existing_decision is None
+
             if existing_decision:
                 decision = existing_decision
                 logger.debug(
-                    "[ScalperTrade] bot=%s signal=%s reusing existing decision=%s",
+                    "[ScalperTrade] bot=%s signal=%s reusing existing decision=%s action=%s reason=%s",
                     bot.id,
                     signal.id,
                     decision.id,
+                    decision.action,
+                    decision.reason,
                 )
             else:
                 decision = make_decision_from_signal(signal)
-            decisions_made.append((decision.id, decision.action))
+
+            decisions_made.append(
+                {
+                    "id": decision.id,
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "score": float(decision.score or 0),
+                    "created": decision_created,
+                }
+            )
         except Exception as e:
             task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
             logger.exception(
@@ -2334,14 +2352,41 @@ def trade_scalper_strategies_for_bot(
         dispatch_result = _dispatch_scalper_candidate(decision, strategy_name)
         orders_placed.extend(dispatch_result["orders"])
         dispatch_failures.extend(dispatch_result["failures"])
-    
-    # Keep processing failures distinguishable from a valid no-setup scan.
-    strategy_errors = [event for event in strategy_events if event["action"] == "error"]
-    # Log summary with clearer outcome/context for UI
+        # Aggregate per-cycle observability once and reuse it everywhere.  This
+        # avoids the journal event, ScalperRunLog and task return drifting apart.
+        new_signal_count = sum(
+            1 for _signal_id, created in signals_created if created
+        )
+        reused_signal_count = len(signals_created) - new_signal_count
+        new_decision_count = sum(
+            1 for item in decisions_made if item["created"]
+        )
+        reused_decision_count = len(decisions_made) - new_decision_count
+        open_decision_count = sum(
+            1 for item in decisions_made if item["action"] == "open"
+        )
+        ignored_decision_count = len(decisions_made) - open_decision_count
+        decision_diagnostics = {
+            "signals": len(signals_created),
+            "new_signals": new_signal_count,
+            "reused_signals": reused_signal_count,
+            "decisions": len(decisions_made),
+            "new_decisions": new_decision_count,
+            "reused_decisions": reused_decision_count,
+            "open_decisions": open_decision_count,
+            "ignored_decisions": ignored_decision_count,
+            "decision_results": decisions_made,
+        }
+        # Keep processing failures distinguishable from a valid no-setup scan.
+        strategy_errors = [
+            event for event in strategy_events if event["action"] == "error"
+        ]
     if defer_dispatch and candidates:
         outcome = "candidate_pending_allocation"
     elif orders_placed:
         outcome = "orders_sent"
+    elif decisions_made and open_decision_count == 0:
+        outcome = "decisions_rejected"
     elif decisions_made:
         outcome = "decisions_made_no_orders"
     elif signals_created:
@@ -2355,6 +2400,7 @@ def trade_scalper_strategies_for_bot(
         0,
         int((timezone.now() - cycle_started_at).total_seconds() * 1000),
     )
+
     best_event = max(
         strategy_events,
         key=lambda event: float(event.get("score") or 0),
@@ -2375,15 +2421,20 @@ def trade_scalper_strategies_for_bot(
         if best_candidate is not None
         else best_event.get("strategy") if best_event is not None else None
     )
+
     spread_points = (
         spread_price / broker_point
-        if spread_price is not None and broker_point is not None and broker_point > 0
+        if spread_price is not None
+        and broker_point is not None
+        and broker_point > 0
         else None
     )
     spread_limit = (
         allowed_spread_price / broker_point
-        if allowed_spread_price is not None and broker_point is not None and broker_point > 0
-        else Decimal(0)
+        if allowed_spread_price is not None
+        and broker_point is not None
+        and broker_point > 0
+        else Decimal("0")
     )
     spread_status = "unavailable"
     if spread_price is not None:
@@ -2392,11 +2443,30 @@ def trade_scalper_strategies_for_bot(
             if allowed_spread_price is None or spread_price <= allowed_spread_price
             else "fail"
         )
+
+    # Prefer the final Decision-layer rejection over the detector's earlier
+    # "open" reason.  When no Decision exists, fall back to the strategy event.
     rejection_reason = None
     if not candidates:
-        rejection_event = strategy_errors[0] if strategy_errors else best_event
-        if rejection_event is not None:
-            rejection_reason = rejection_event.get("reason")
+        rejected_decisions = [
+            item for item in decisions_made if item["action"] != "open"
+        ]
+        if rejected_decisions:
+            rejected_decision = max(
+                rejected_decisions,
+                key=lambda item: float(item.get("score") or 0),
+            )
+            rejection_reason = rejected_decision["reason"]
+        else:
+            rejection_event = strategy_errors[0] if strategy_errors else best_event
+            if rejection_event is not None:
+                rejection_reason = rejection_event.get("reason")
+
+    slot_status = (
+        "pending"
+        if defer_dispatch and candidates
+        else "not_applicable"
+    )
 
     log_journal_event(
         "scalper_engine_run",
@@ -2415,8 +2485,7 @@ def trade_scalper_strategies_for_bot(
             "strategies_enabled": enabled_strats,
             "strategy_profile": strategy_profile_key,
             "outcome": outcome,
-            "signals": len(signals_created),
-            "decisions": len(decisions_made),
+            **decision_diagnostics,
             "orders": len(orders_placed),
             "dispatch_failures": dispatch_failures,
             "cycle_duration_ms": cycle_duration_ms,
@@ -2426,14 +2495,17 @@ def trade_scalper_strategies_for_bot(
             "rejection_reason": rejection_reason,
             "htf_status": htf_status,
             "spread_status": spread_status,
-            "spread_points": str(spread_points) if spread_points is not None else None,
+            "spread_points": (
+                str(spread_points) if spread_points is not None else None
+            ),
             "spread_limit_points": str(spread_limit),
-            "slot_status": "pending" if defer_dispatch and candidates else "not_applicable",
+            "slot_status": slot_status,
         },
     )
-    
+
     logger.info(
-        "[ScalperTrade] bot=%s symbol=%s strategies=%s signals=%s decisions=%s orders=%s",
+        "[ScalperTrade] bot=%s symbol=%s strategies=%s signals=%s "
+        "decisions=%s orders=%s",
         bot.id,
         symbol,
         len(enabled_strats),
@@ -2441,12 +2513,11 @@ def trade_scalper_strategies_for_bot(
         len(decisions_made),
         len(orders_placed),
     )
-    
+
     summary = {
         "outcome": outcome,
         "cycle_duration_ms": cycle_duration_ms,
-        "signals": len(signals_created),
-        "decisions": len(decisions_made),
+        **decision_diagnostics,
         "orders": len(orders_placed),
         "dispatch_failures": dispatch_failures,
         "strategies": strategy_events,
@@ -2454,16 +2525,21 @@ def trade_scalper_strategies_for_bot(
         "htf_bias": htf_bias,
         "htf_bias_detail": htf_bias_detail,
         "generated_at": timezone.now().isoformat(),
-        "strategies_evaluated": [event["strategy"] for event in strategy_events],
+        "strategies_evaluated": [
+            event["strategy"] for event in strategy_events
+        ],
         "best_score": best_score,
         "best_strategy": best_strategy,
         "rejection_reason": rejection_reason,
         "htf_status": htf_status,
         "spread_status": spread_status,
-        "spread_points": str(spread_points) if spread_points is not None else None,
+        "spread_points": (
+            str(spread_points) if spread_points is not None else None
+        ),
         "spread_limit_points": str(spread_limit),
-        "slot_status": "pending" if defer_dispatch and candidates else "not_applicable",
+        "slot_status": slot_status,
     }
+
     run_log = None
     try:
         run_log = ScalperRunLog.objects.create(
@@ -2473,16 +2549,22 @@ def trade_scalper_strategies_for_bot(
             summary=_json_safe(summary),
         )
     except Exception:
-        logger.exception("[ScalperTrade] failed to persist run log bot=%s", bot.id)
+        logger.exception(
+            "[ScalperTrade] failed to persist run log bot=%s",
+            bot.id,
+        )
 
     if run_log is not None:
         for candidate in candidates:
             candidate["run_log_id"] = run_log.id
 
     if dispatch_failures:
-        task_failures_total.labels(task="trade_scalper_strategies_for_bot").inc()
+        task_failures_total.labels(
+            task="trade_scalper_strategies_for_bot"
+        ).inc()
         raise ConnectorError(
-            f"{len(dispatch_failures)} scalper order dispatch/fanout operation(s) failed"
+            f"{len(dispatch_failures)} scalper order dispatch/fanout "
+            "operation(s) failed"
         )
 
     return {
@@ -2491,8 +2573,7 @@ def trade_scalper_strategies_for_bot(
         "symbol": symbol,
         "timeframe": timeframe,
         "strategies_enabled": enabled_strats,
-        "signals": len(signals_created),
-        "decisions": len(decisions_made),
+        **decision_diagnostics,
         "orders": len(orders_placed),
         "candidates": candidates,
         "run_log_id": run_log.id if run_log is not None else None,

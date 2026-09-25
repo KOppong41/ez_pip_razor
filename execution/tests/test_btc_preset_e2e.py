@@ -67,7 +67,12 @@ class BtcPresetEndToEndTests(TestCase):
         dispatch.assert_not_called()
         self.assertFalse(self.bot.orders.exists())
         self.assertEqual([call.kwargs['timeframe'] for call in candles.call_args_list], ['5m', '15m', '1h'])
-        return result, ScalperRunLog.objects.get(bot=self.bot).summary
+        return result, (
+            ScalperRunLog.objects.filter(bot=self.bot)
+            .order_by("-created_at", "-id")
+            .first()
+            .summary
+        )
 
     def test_real_btc_candles_and_unmodified_preset_create_open_decision(self):
         result, summary = self.scan()
@@ -87,6 +92,12 @@ class BtcPresetEndToEndTests(TestCase):
         self.assertLessEqual(stop_pct, Decimal('.90'))
         self.assertGreaterEqual(decision.score, float(self.bot.decision_min_score))
         self.assertEqual(summary['outcome'], 'candidate_pending_allocation')
+        self.assertEqual(summary["new_signals"], 1)
+        self.assertEqual(summary["reused_signals"], 0)
+        self.assertEqual(summary["new_decisions"], 1)
+        self.assertEqual(summary["reused_decisions"], 0)
+        self.assertEqual(summary["open_decisions"], 1)
+        self.assertEqual(summary["ignored_decisions"], 0)
         self.assertIn('trend_pullback', summary['strategies_evaluated'])
         self.bot.refresh_from_db()
         self.assertEqual(self.bot.risk_per_trade_pct, Decimal('.25'))
@@ -101,13 +112,57 @@ class BtcPresetEndToEndTests(TestCase):
         self.assertFalse(Decision.objects.filter(bot=self.bot, reason='trend_pullback_bear').exists())
 
     def test_valid_detector_with_tight_stop_creates_ignored_decision(self):
-        setup, confirmation = self.frames['5m'][-2:]
+        setup, confirmation = self.frames["5m"][-2:]
+
         # Retain the genuine setup and its stop, but confirm just past its low.
-        confirmation['open'] = setup['close']
-        confirmation['close'] = setup['low'] - Decimal('.01')
-        confirmation['high'] = setup['close'] + Decimal('.01')
-        confirmation['low'] = confirmation['close'] - Decimal('.01')
+        confirmation["open"] = setup["close"]
+        confirmation["close"] = setup["low"] - Decimal(".01")
+        confirmation["high"] = setup["close"] + Decimal(".01")
+        confirmation["low"] = confirmation["close"] - Decimal(".01")
+
+        _, summary = self.scan()
+
+        decision = Decision.objects.get(
+            bot=self.bot,
+            reason="scalper:sl_below_min",
+        )
+
+        self.assertEqual(decision.action, "ignore")
+        self.assertEqual(
+            Decimal(decision.signal.payload["sl"]),
+            setup["high"],
+        )
+
+        self.assertEqual(
+            summary["outcome"],
+            "decisions_rejected",
+        )
+        self.assertEqual(
+            summary["rejection_reason"],
+            "scalper:sl_below_min",
+        )
+        self.assertEqual(summary["new_decisions"], 1)
+        self.assertEqual(summary["ignored_decisions"], 1)
+        self.assertEqual(summary["open_decisions"], 0)
+
+    def test_repeated_scan_reuses_signal_and_decision_without_reporting_them_as_new(self):
         self.scan()
-        decision = Decision.objects.get(bot=self.bot, reason='scalper:sl_below_min')
-        self.assertEqual(decision.action, 'ignore')
-        self.assertEqual(Decimal(decision.signal.payload['sl']), setup['high'])
+
+        decision_count = Decision.objects.filter(bot=self.bot).count()
+
+        _, summary = self.scan()
+
+        self.assertEqual(
+            Decision.objects.filter(bot=self.bot).count(),
+            decision_count,
+        )
+
+        self.assertEqual(summary["new_signals"], 0)
+        self.assertEqual(summary["reused_signals"], 1)
+        self.assertEqual(summary["new_decisions"], 0)
+        self.assertEqual(summary["reused_decisions"], 1)
+
+        self.assertEqual(
+            summary["decision_results"][0]["created"],
+            False,
+        )
