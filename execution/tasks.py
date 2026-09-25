@@ -339,19 +339,43 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
     if not exit_deals:
         return []
 
+    def _deal_seconds(deal):
+        time_msc = int(getattr(deal, "time_msc", 0) or 0)
+        if time_msc:
+            return time_msc / 1000
+        return float(getattr(deal, "time", 0) or 0)
+
+    last_exit = max(exit_deals, key=_deal_seconds)
+    last_exit_seconds = _deal_seconds(last_exit)
+    final_closed_at = (
+        datetime.fromtimestamp(last_exit_seconds, dt_timezone.utc)
+        if last_exit_seconds else timezone.now()
+    )
+    final_price = Decimal(str(getattr(last_exit, "price", 0) or 0))
+    final_profit = sum((Decimal(str(getattr(deal, "profit", 0) or 0)) for deal in deals), Decimal("0"))
+    final_commission = sum((Decimal(str(getattr(deal, "commission", 0) or 0)) for deal in deals), Decimal("0"))
+    final_swap = sum((Decimal(str(getattr(deal, "swap", 0) or 0)) for deal in deals), Decimal("0"))
+
     recorded_tickets = set(Execution.objects.filter(
         order__broker_account=local.broker_account,
         broker_deal_ticket__in=[getattr(deal, "ticket", 0) for deal in exit_deals],
     ).values_list("broker_deal_ticket", flat=True))
     if history_closed and (not local.bot_id or all(deal.ticket in recorded_tickets for deal in exit_deals)):
         local.status, local.volume = "closed", Decimal(0)
-        local.closed_at = timezone.now()
+        local.current_price = final_price
+        local.profit = final_profit
+        local.commission = final_commission
+        local.swap = final_swap
+        local.closed_at = final_closed_at
         local.last_reconciled_at = timezone.now()
         local.broker_metadata = {**(local.broker_metadata or {}), "reconciled_close": {
             "source": "mt5_position_history", "deal_tickets": [int(deal.ticket) for deal in deals],
             "entry_volume": str(entries), "exit_volume": str(exits),
         }}
-        local.save(update_fields=["status", "volume", "closed_at", "last_reconciled_at", "broker_metadata"])
+        local.save(update_fields=[
+            "status", "volume", "current_price", "profit", "commission", "swap",
+            "closed_at", "last_reconciled_at", "broker_metadata",
+        ])
         return []
     if not local.bot_id:
         return []  # Never attribute a deleted bot's history to another bot.
@@ -364,10 +388,7 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
     finally:
         local.status = previous_status
     imported = []
-    for deal in sorted(
-        exit_deals,
-        key=lambda value: int(getattr(value, "time_msc", 0) or getattr(value, "time", 0) or 0),
-    ):
+    for deal in sorted(exit_deals, key=_deal_seconds):
         deal_ticket = int(getattr(deal, "ticket", 0) or 0)
         if not deal_ticket or Execution.objects.filter(
             order__broker_account=local.broker_account,
@@ -408,7 +429,7 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
     requested_qty = Decimal(str(close_order.qty))
     close_order.filled_qty = min(requested_qty, filled)
     close_order.remaining_qty = max(Decimal("0"), requested_qty - close_order.filled_qty)
-    last = exit_deals[-1]
+    last = last_exit
     close_order.broker_order_ticket = int(getattr(last, "order", 0) or 0) or None
     close_order.broker_deal_ticket = int(getattr(last, "ticket", 0) or 0) or None
     close_order.broker_position_ticket = local.broker_position_ticket
@@ -430,11 +451,24 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
             target,
             price=Decimal(str(getattr(last, "price", 0) or 0)),
         )
-    local.status = "closed" if target == "filled" else "missing"
-    local.volume = close_order.remaining_qty
-    local.closed_at = timezone.now() if target == "filled" else None
     local.last_reconciled_at = timezone.now()
-    local.save(update_fields=["status", "volume", "closed_at", "last_reconciled_at"])
+    if target == "filled" and history_closed:
+        local.status = "closed"
+        local.volume = close_order.remaining_qty
+        local.current_price = final_price
+        local.profit = final_profit
+        local.commission = final_commission
+        local.swap = final_swap
+        local.closed_at = final_closed_at
+        local.save(update_fields=[
+            "status", "volume", "current_price", "profit", "commission", "swap",
+            "closed_at", "last_reconciled_at",
+        ])
+    else:
+        local.status = "missing"
+        local.volume = close_order.remaining_qty
+        local.closed_at = None
+        local.save(update_fields=["status", "volume", "closed_at", "last_reconciled_at"])
     return imported
 
 

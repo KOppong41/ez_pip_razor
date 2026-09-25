@@ -377,6 +377,33 @@ class MissingPositionRecoveryTests(TestCase):
         self.account.owner = get_user_model().objects.create_user("history-owner")
         self.account.save(update_fields=["owner"])
 
+    def test_reconciled_close_persists_authoritative_final_position_state(self):
+        local = self.position()
+        history = self.history()
+
+        exit_deal = history[-1]
+        exit_deal.price = Decimal("101.25")
+        exit_deal.profit = Decimal("2.50")
+        exit_deal.commission = Decimal("-0.10")
+        exit_deal.swap = Decimal("-0.05")
+
+        self.reconcile(history)
+
+        local.refresh_from_db()
+
+        expected_closed_at = datetime.fromtimestamp(
+            exit_deal.time_msc / 1000,
+            dt_timezone.utc,
+        )
+
+        self.assertEqual(local.status, "closed")
+        self.assertEqual(local.volume, Decimal("0"))
+        self.assertEqual(local.current_price, Decimal("101.25"))
+        self.assertEqual(local.profit, Decimal("2.50"))
+        self.assertEqual(local.commission, Decimal("-0.10"))
+        self.assertEqual(local.swap, Decimal("-0.05"))
+        self.assertEqual(local.closed_at, expected_closed_at)
+
     def position(self, *, orphan=False):
         local = self._position(self._bot("missing-history", owner=self.account.owner), 718, volume=".1")
         local.status = "missing"
