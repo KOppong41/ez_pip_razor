@@ -460,7 +460,7 @@ def simulate_fill_task(self, order_id: int):
     except Exception as e:
         task_failures_total.labels(task="simulate_fill_task").inc()
         raise
-    
+
 
 @shared_task(
     bind=True,
@@ -833,8 +833,8 @@ def ingest_tradingview_email(self):
     except Exception as e:
         task_failures_total.labels(task="ingest_tradingview_email").inc()
         raise
-    
-    
+
+
 @shared_task(
     bind=True,
     autoretry_for=(Exception,),
@@ -922,7 +922,7 @@ def scan_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int =
     retry_kwargs={"max_retries": 3},
 )
 def trade_harami_for_bot(self, bot_id: int, timeframe: str = "15m", n_bars: int = 200):
-    
+
     from execution.services.engine import run_engine, EngineContext
     """
     Internal engine task (v1):
@@ -1482,8 +1482,63 @@ def _update_scalper_run_allocation(run_log_id: int | None, **values) -> None:
     run_log.summary = summary
     run_log.save(update_fields=["summary"])
 
-    
-    
+
+def _build_scalper_cycle_diagnostics(
+    *,
+    signals_created,
+    decisions_made,
+    orders_placed,
+    strategy_events,
+    candidates,
+    defer_dispatch: bool,
+):
+    """Build cycle-level counters and outcome after all strategies have run."""
+    new_signal_count = sum(
+        1 for _signal_id, created in signals_created if created
+    )
+    reused_signal_count = len(signals_created) - new_signal_count
+    new_decision_count = sum(
+        1 for item in decisions_made if item["created"]
+    )
+    reused_decision_count = len(decisions_made) - new_decision_count
+    open_decision_count = sum(
+        1 for item in decisions_made if item["action"] == "open"
+    )
+    ignored_decision_count = len(decisions_made) - open_decision_count
+
+    diagnostics = {
+        "signals": len(signals_created),
+        "new_signals": new_signal_count,
+        "reused_signals": reused_signal_count,
+        "decisions": len(decisions_made),
+        "new_decisions": new_decision_count,
+        "reused_decisions": reused_decision_count,
+        "open_decisions": open_decision_count,
+        "ignored_decisions": ignored_decision_count,
+        "decision_results": decisions_made,
+    }
+
+    strategy_errors = [
+        event for event in strategy_events if event["action"] == "error"
+    ]
+
+    if defer_dispatch and candidates:
+        outcome = "candidate_pending_allocation"
+    elif orders_placed:
+        outcome = "orders_sent"
+    elif decisions_made and open_decision_count == 0:
+        outcome = "decisions_rejected"
+    elif decisions_made:
+        outcome = "decisions_made_no_orders"
+    elif signals_created:
+        outcome = "signals_generated_no_decisions"
+    elif strategy_errors:
+        outcome = "strategy_errors"
+    else:
+        outcome = "no_signals"
+
+    return diagnostics, strategy_errors, outcome
+
 
 @shared_task(
     bind=True,
@@ -1496,16 +1551,16 @@ def _update_scalper_run_allocation(run_log_id: int | None, **values) -> None:
 def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 100):
     """
     High-frequency scalper signal generator.
-    
+
     - Picks bots with engine_mode="scalper", auto_trade=True, status="active"
     - For each bot, scans M1 candles and runs bot.enabled_strategies (price_action_pinbar, trend_pullback, etc.)
     - Emits Signal objects for each strategy match
     - Routes through existing decision + execution pipeline
-    
+
     This is the real "scalper brain" that powers high-frequency trading on XAUUSDm and other liquid assets.
     """
     from bots.models import Bot
-    
+
     bots_qs = (
         Bot.objects.select_related("broker_account", "asset")
         .filter(
@@ -1515,7 +1570,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
             broker_account__connector="mt5_local",
         )
     )
-    
+
     dispatched = 0
     skipped_no_broker = 0
     skipped_no_symbols = 0
@@ -1553,7 +1608,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
         if not getattr(bot, "auto_trade", True) and not enabled_strats:
             skipped_no_strategies += 1
             continue
-        
+
         scalper_cfg = build_scalper_config(bot)
         tf = resolve_scalper_execution_timeframe(
             bot,
@@ -1583,7 +1638,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
                 configured_tf,
                 tf,
             )
-        
+
         # Scan every bot before allocating account slots. This prevents the
         # first/high-frequency symbol from winning merely because of loop order.
         scan_result = trade_scalper_strategies_for_bot.apply(
@@ -1659,7 +1714,7 @@ def run_scalper_engine_for_all_bots(self, timeframe: str = "1m", n_bars: int = 1
                 rejection_reason=dispatch_result["rejection_reason"],
                 dispatch_failures=dispatch_result["failures"],
             )
-    
+
     logger.info(
         "[ScalperRunner] tf=%s dispatched=%s skipped_no_broker=%s skipped_no_symbols=%s skipped_no_strategies=%s skipped_not_accepted=%s skipped_market_closed=%s skipped_unavailable=%s",
         timeframe,
@@ -1923,7 +1978,7 @@ def trade_scalper_strategies_for_bot(
     }
     if not auto_mode:
         enabled_strats = allowed_strategy_pool
-    
+
     tick_snapshot = None
     spread_price = None
     # Get M1 candles
@@ -2005,7 +2060,7 @@ def trade_scalper_strategies_for_bot(
             e,
         )
         raise
-    
+
     if not entry_candles or len(entry_candles) < 20:
         logger.debug(
             "[ScalperTrade] bot=%s symbol=%s insufficient candles: %s",
@@ -2018,7 +2073,7 @@ def trade_scalper_strategies_for_bot(
             {"candles": len(entry_candles) if entry_candles else 0, "strategy_profile": strategy_profile_key},
         )
         return {"status": "ok", "reason": "insufficient_candles"}
-    
+
     last_entry = entry_candles[-1]
     entry_atr_points = _atr_like(entry_candles, period=14)
     bar_range = last_entry["high"] - last_entry["low"]
@@ -2050,7 +2105,7 @@ def trade_scalper_strategies_for_bot(
         "volatility": volatility_snapshot,
         "broker_constraints": broker_snapshot,
     }
-    
+
     signals_created = []
     decisions_made = []
     orders_placed = []
@@ -2104,7 +2159,7 @@ def trade_scalper_strategies_for_bot(
         bot.save(update_fields=["scalper_params"])
     except Exception:
         pass
-    
+
     available_pool: list[str] = []
     if auto_mode:
         available_pool = (
@@ -2159,7 +2214,7 @@ def trade_scalper_strategies_for_bot(
              "htf_status": htf_status, "context": htf_bias_detail},
         )
         return {"status": "ok", "reason": reason}
-    
+
     # Run each enabled strategy
     for strategy_name in enabled_strats:
         strategy_entry = SCALPER_STRATEGY_REGISTRY.get(strategy_name)
@@ -2210,7 +2265,7 @@ def trade_scalper_strategies_for_bot(
                 "metadata": engine_decision.metadata or {},
             }
         )
-        
+
         # Skip if strategy doesn't emit "open"
         if engine_decision.action != "open" or not engine_decision.direction:
             logger.debug(
@@ -2221,16 +2276,16 @@ def trade_scalper_strategies_for_bot(
                 engine_decision.reason,
             )
             continue
-        
+
         # Create deterministic dedupe key per strategy/bar/bot to avoid duplicate signals
         last_bar_time = entry_candles[-1]["time"]
         if hasattr(last_bar_time, "isoformat"):
             time_str = last_bar_time.isoformat()
         else:
             time_str = str(last_bar_time)
-        
+
         dedupe_key = f"scalper:{bot.id}:{symbol}:{timeframe}:{strategy_name}:{time_str}"
-        
+
         # Create or reuse signal
         try:
             strategy_payload = {
@@ -2282,7 +2337,7 @@ def trade_scalper_strategies_for_bot(
                 e,
             )
             continue
-        
+
         # Make or reuse the signal's one authoritative decision.
         try:
             existing_decision = (
@@ -2324,7 +2379,7 @@ def trade_scalper_strategies_for_bot(
                 e,
             )
             raise
-        
+
         if decision.action != "open":
             logger.debug(
                 "[ScalperTrade] decision ignored: bot=%s signal=%s action=%s reason=%s",
@@ -2347,54 +2402,20 @@ def trade_scalper_strategies_for_bot(
         )
         if defer_dispatch:
             continue
-        
+
         # Fanout to orders and dispatch
         dispatch_result = _dispatch_scalper_candidate(decision, strategy_name)
         orders_placed.extend(dispatch_result["orders"])
         dispatch_failures.extend(dispatch_result["failures"])
-        # Aggregate per-cycle observability once and reuse it everywhere.  This
-        # avoids the journal event, ScalperRunLog and task return drifting apart.
-        new_signal_count = sum(
-            1 for _signal_id, created in signals_created if created
-        )
-        reused_signal_count = len(signals_created) - new_signal_count
-        new_decision_count = sum(
-            1 for item in decisions_made if item["created"]
-        )
-        reused_decision_count = len(decisions_made) - new_decision_count
-        open_decision_count = sum(
-            1 for item in decisions_made if item["action"] == "open"
-        )
-        ignored_decision_count = len(decisions_made) - open_decision_count
-        decision_diagnostics = {
-            "signals": len(signals_created),
-            "new_signals": new_signal_count,
-            "reused_signals": reused_signal_count,
-            "decisions": len(decisions_made),
-            "new_decisions": new_decision_count,
-            "reused_decisions": reused_decision_count,
-            "open_decisions": open_decision_count,
-            "ignored_decisions": ignored_decision_count,
-            "decision_results": decisions_made,
-        }
-        # Keep processing failures distinguishable from a valid no-setup scan.
-        strategy_errors = [
-            event for event in strategy_events if event["action"] == "error"
-        ]
-    if defer_dispatch and candidates:
-        outcome = "candidate_pending_allocation"
-    elif orders_placed:
-        outcome = "orders_sent"
-    elif decisions_made and open_decision_count == 0:
-        outcome = "decisions_rejected"
-    elif decisions_made:
-        outcome = "decisions_made_no_orders"
-    elif signals_created:
-        outcome = "signals_generated_no_decisions"
-    elif strategy_errors:
-        outcome = "strategy_errors"
-    else:
-        outcome = "no_signals"
+
+    decision_diagnostics, strategy_errors, outcome = _build_scalper_cycle_diagnostics(
+        signals_created=signals_created,
+        decisions_made=decisions_made,
+        orders_placed=orders_placed,
+        strategy_events=strategy_events,
+        candidates=candidates,
+        defer_dispatch=defer_dispatch,
+    )
 
     cycle_duration_ms = max(
         0,
@@ -2796,10 +2817,10 @@ def cancel_stale_orders_task(self, max_age_seconds: int | None = None):
         try:
             from execution.services.exposure import has_submission_evidence
             if order.status == "new" and not has_submission_evidence(order):
-            # A successfully queued MT5 order is still a valid execution intent even
-            # though the serialized worker has not submitted it to the broker yet.
-            # Do not let stale cleanup cancel an order that is waiting for, or has
-            # already started on, the MT5 execution worker.
+                # A successfully queued MT5 order is still a valid execution intent even
+                # though the serialized worker has not submitted it to the broker yet.
+                # Do not let stale cleanup cancel an order that is waiting for, or has
+                # already started on, the MT5 execution worker.
                 if order.execution_queued_at is not None or order.mt5_worker_started_at is not None:
                     unresolved.append(order.id)
                     continue
@@ -2811,7 +2832,7 @@ def cancel_stale_orders_task(self, max_age_seconds: int | None = None):
                 )
                 canceled_local.append(order.id)
                 continue
-            
+
             if connector.reconcile_order(order):
                 reconciled.append(order.id)
                 continue
