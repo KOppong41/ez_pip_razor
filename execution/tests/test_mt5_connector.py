@@ -68,6 +68,88 @@ class MT5ConnectorTest(TestCase):
             spread_limit_points=Decimal("15"),
             deviation_points=17,
         )
+        
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    @override_settings(MAX_ORDER_NOTIONAL=Decimal("100000"))
+    def test_cross_pair_notional_is_converted_to_account_currency(
+        self,
+        risk,
+        api,
+    ):
+        self._configure_api(api)
+
+        self.order.symbol = "GBPJPY"
+        self.order.qty = Decimal("0.03")
+        self.order.remaining_qty = Decimal("0.03")
+        self.order.sl = Decimal("208.500")
+        self.order.tp = Decimal("210.000")
+        self.order.save(
+            update_fields=[
+                "symbol",
+                "qty",
+                "remaining_qty",
+                "sl",
+                "tp",
+            ]
+        )
+
+        api.symbol_info_tick.return_value = SimpleNamespace(
+            bid=209.020,
+            ask=209.022,
+        )
+
+        api.symbol_info.return_value = SimpleNamespace(
+            point=0.001,
+            trade_tick_size=0.001,
+            digits=3,
+            trade_contract_size=100000,
+            volume_min=0.01,
+            volume_max=100,
+            volume_step=0.01,
+            filling_mode=0,
+            trade_stops_level=0,
+            stops_level=0,
+        )
+
+        # 0.03 lot GBPJPY:
+        # one 0.001 price move = 3 JPY.
+        # At approximately 150 JPY/USD that is about $0.02.
+        # Account-currency notional is therefore about:
+        # 209.022 * ($0.02 / 0.001) ~= $4,180,
+        # not 627,066 JPY.
+        api.order_calc_profit.return_value = 0.02
+        api.order_calc_profit.side_effect = None
+
+        risk_result = self._risk_result()
+        risk.return_value = PreTradeRiskResult(
+            **{
+                **risk_result.__dict__,
+                "volume": Decimal("0.03"),
+                "entry_price": Decimal("209.022"),
+            }
+        )
+
+        api.order_send.return_value = SimpleNamespace(
+            retcode=10009,
+            price=209.022,
+            volume=0.03,
+            order=111,
+            deal=222,
+            position=333,
+            comment="done",
+        )
+
+        connector = MT5Connector()
+
+        with (
+            patch.object(connector, "_login_from_order"),
+            patch.object(connector, "_ensure_symbol"),
+            patch("execution.connectors.mt5._check_ready"),
+        ):
+            connector.place_order(self.order)
+
+        api.order_send.assert_called_once()
 
     def _configure_api(self, api):
         api.TRADE_RETCODE_DONE = 10009
@@ -105,6 +187,12 @@ class MT5ConnectorTest(TestCase):
         api.account_info.return_value = SimpleNamespace(balance=10000)
         api.order_check.return_value = SimpleNamespace(retcode=0, comment="ok")
         api.history_deals_get.return_value = ()
+        api.order_calc_profit.side_effect = (
+            lambda order_type, symbol, volume, open_price, close_price:
+            abs(float(close_price) - float(open_price))
+            * float(volume)
+            * 100000
+        )
         api.last_error.return_value = (0, "ok")
 
     @patch("execution.connectors.mt5.mt5")

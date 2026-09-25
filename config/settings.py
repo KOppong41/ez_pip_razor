@@ -203,7 +203,7 @@ CELERY_TASK_ROUTES = {
     "execution.tasks.run_scalper_engine_for_all_bots": {"queue": "mt5_execution", "priority": 6},
     "execution.tasks.trade_scalper_strategies_for_bot": {"queue": "mt5_execution", "priority": 6},
     "execution.tasks.kill_switch_monitor_task": {"queue": "mt5_execution", "priority": 0},
-    "execution.tasks.cancel_stale_orders_task": {"queue": "mt5_execution", "priority": 3},
+    "execution.tasks.cancel_stale_orders_task": {"queue": "mt5_execution", "priority": 6},
     "execution.tasks.reconcile_broker_positions_task": {"queue": "mt5_execution", "priority": 9},
     "execution.tasks.market_hours_guard_task": {"queue": "mt5_execution", "priority": 9},
     "execution.mt5_tasks.execute_mt5_order_task": {"queue": "mt5_execution", "priority": 6},

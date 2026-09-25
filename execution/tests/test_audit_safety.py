@@ -162,7 +162,65 @@ class DurableExposureTests(TestCase):
         self.assertEqual(submitted.status, "ack")
         self.assertEqual(ambiguous.status, "new")
         self.assertIsNotNone(submitted.risk_reserved_at)
+    @patch("execution.tasks.MT5Connector")
+    
+    def test_stale_worker_does_not_cancel_queued_or_started_new_orders(self, connector):
+        bot = self._bot("queued-stale")
 
+        queued = self._order(bot, suffix="queued")
+        started = self._order(bot, suffix="started")
+        abandoned = self._order(bot, suffix="abandoned")
+
+        stale_at = timezone.now() - timedelta(hours=1)
+
+        # Successfully published to the MT5 execution queue but worker has
+        # not started it yet.
+        Order.objects.filter(pk=queued.pk).update(
+            execution_queued_at=stale_at,
+            updated_at=stale_at,
+        )
+
+        # MT5 worker has already picked the order up, but no broker-submission
+        # evidence exists yet.
+        Order.objects.filter(pk=started.pk).update(
+            execution_queued_at=stale_at,
+            mt5_worker_started_at=stale_at,
+            updated_at=stale_at,
+        )
+
+        # Genuine abandoned local order: never queued and never submitted.
+        Order.objects.filter(pk=abandoned.pk).update(
+            updated_at=stale_at,
+        )
+
+        connector.return_value.reconcile_order.return_value = False
+
+        result = cancel_stale_orders_task.run(max_age_seconds=1)
+
+        self.assertCountEqual(
+            result["unresolved"],
+            [queued.pk, started.pk],
+        )
+        self.assertCountEqual(
+            result["canceled_local"],
+            [abandoned.pk],
+        )
+
+        queued.refresh_from_db()
+        started.refresh_from_db()
+        abandoned.refresh_from_db()
+
+        self.assertEqual(queued.status, "new")
+        self.assertEqual(started.status, "new")
+        self.assertEqual(abandoned.status, "canceled")
+
+        self.assertIsNotNone(queued.execution_queued_at)
+        self.assertIsNotNone(started.execution_queued_at)
+        self.assertIsNotNone(started.mt5_worker_started_at)
+
+        # Waiting locally for the serialized MT5 worker must not be mistaken
+        # for broker submission evidence or sent to broker reconciliation.
+        connector.return_value.reconcile_order.assert_not_called()
 
 class BotLossGuardTests(TestCase):
     setUp = test_kill_switch.KillSwitchRiskDayTests.setUp

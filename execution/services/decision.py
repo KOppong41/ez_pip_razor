@@ -248,9 +248,24 @@ def count_bot_trades_today(bot) -> int:
 
 
 def get_last_bot_trade(bot):
+    """
+    Return the most recent broker-submitted/accepted entry for this bot.
+
+    A Decision(action="open") alone is not a trade. Failed, rejected or
+    locally canceled orders must not start the bot's trade interval.
+
+    ACK is included deliberately because once broker submission has begun,
+    another entry should not be admitted while the first submission may still
+    be live or unresolved.
+    """
     return (
-        Decision.objects.filter(bot=bot, action="open")
-        .order_by("-decided_at")
+        Order.objects.filter(
+            bot=bot,
+            intent="entry",
+            status__in=["ack", "part_filled", "filled"],
+            submitted_at__isnull=False,
+        )
+        .order_by("-submitted_at", "-id")
         .first()
     )
 
@@ -672,11 +687,12 @@ def make_decision_from_signal(signal: Signal) -> Decision:
         if proposed.action != "open" and tmp.action == "open":
             _log_scalper_trace(signal, "daily_limit", proposed.action, proposed.reason)
 
-        # min interval between trades (still based on last 'open' decision)
+        # Minimum interval between broker-submitted/accepted entries.
+        # A Decision alone does not start the cooldown.
         if proposed.action == "open" and bot.trade_interval_minutes:
             last_trade = get_last_bot_trade(bot)
             if last_trade:
-                delta = now - last_trade.decided_at
+                delta = now - last_trade.submitted_at
                 if delta.total_seconds() < bot.trade_interval_minutes * 60:
                     proposed = StrategyDecision(
                         action="ignore",

@@ -679,6 +679,73 @@ class MT5Connector(BaseConnector):
             broker_account,
             lambda: mt5.history_deals_get(position=int(broker_position_ticket)) or (),
         )
+        
+    def _account_currency_notional(self, side: str, symbol: str, volume, price, symbol_info, ) -> Decimal:
+        """
+        Estimate gross market notional in the currently logged-in MT5
+        account currency.
+
+        MT5 order_calc_profit returns P/L already converted into the account
+        currency. A one-tick hypothetical move therefore tells us the
+        account-currency value of one unit of price movement. Multiplying
+        that by the current price gives the gross position notional in the
+        account currency.
+
+        No broker order is submitted.
+        """
+        price_dec = Decimal(str(price))
+        volume_dec = abs(Decimal(str(volume)))
+
+        price_step = Decimal(
+            str(
+                getattr(symbol_info, "trade_tick_size", None)
+                or getattr(symbol_info, "point", None)
+                or 0
+            )
+        )
+
+        if price_dec <= 0 or volume_dec <= 0:
+            raise ConnectorError(
+                f"Cannot calculate notional for {symbol}: invalid price or volume"
+            )
+
+        if price_step <= 0:
+            raise ConnectorError(
+                f"Cannot calculate notional for {symbol}: missing tick/point size"
+            )
+
+        order_type = (
+            mt5.ORDER_TYPE_BUY
+            if side == "buy"
+            else mt5.ORDER_TYPE_SELL
+        )
+
+        probe_close = price_dec + price_step
+
+        probe_profit = mt5.order_calc_profit(
+            order_type,
+            symbol,
+            float(volume_dec),
+            float(price_dec),
+            float(probe_close),
+        )
+
+        if probe_profit is None:
+            raise ConnectorError(
+                f"MT5 order_calc_profit failed while calculating notional "
+                f"for {symbol}: {mt5.last_error()}"
+            )
+
+        account_profit = abs(Decimal(str(probe_profit)))
+
+        if account_profit <= 0:
+            raise ConnectorError(
+                f"MT5 returned zero account-currency value while calculating "
+                f"notional for {symbol}"
+            )
+
+        account_value_per_price_unit = account_profit / price_step
+        return abs(price_dec) * account_value_per_price_unit
 
     def calc_profit_for_account(self, broker_account, side: str, symbol: str, volume, open_price, close_price):
         def operation():
@@ -1675,22 +1742,38 @@ class MT5Connector(BaseConnector):
         if not is_close_order:
             qty_abs = qty_dec.copy_abs()
             px = ask if order.side == "buy" else bid
-            notional = px * qty_abs * contract_size
-            asset_min_notional = Decimal(str(asset.min_notional)) if asset else Decimal("0")
-            # Some brokers (cent/demo) report tiny contract sizes; scale back to the configured default
-            # so that admin-set min/max notionals keep behaving as "standard lot" amounts.
-            # Avoid scaling when contract_size is reasonable (e.g., 100 for metals) to prevent inflating notional.
-            scale = Decimal("1")
-            try:
-                if contract_size > 0:
-                    default_cs = Decimal(str(runtime_cfg.mt5_default_contract_size))
-                    ratio = default_cs / contract_size
-                    # Only scale when the contract size is clearly tiny (<10) and ratio not extreme.
-                    if contract_size < Decimal("10") and ratio <= Decimal("1000"):
-                        scale = ratio
-            except Exception:
-                scale = Decimal("1")
-            effective_notional = notional * scale
+            asset_min_notional = (
+                Decimal(str(asset.min_notional))
+                if asset
+                else Decimal("0")
+            )
+            max_notional = runtime_cfg.max_order_notional
+
+            effective_notional = Decimal("0")
+
+            # Only calculate market notional when a configured notional guard
+            # actually requires it. MT5 converts the hypothetical P/L into the
+            # currently logged-in account currency.
+            if (
+                not test_mode
+                and (asset_min_notional > 0 or max_notional > 0)
+            ):
+                try:
+                    effective_notional = self._account_currency_notional(
+                        order.side,
+                        order.symbol,
+                        qty_abs,
+                        px,
+                        sinfo,
+                    )
+                except ConnectorError as exc:
+                    msg = (
+                        f"Order {order.id} rejected: unable to calculate "
+                        f"account-currency notional: {exc}"
+                    )
+                    _clear_risk_reservation(order)
+                    update_order_status(order, "error", error_msg=msg)
+                    raise ConnectorError(msg) from exc
             if not test_mode and asset_min_notional > 0 and effective_notional < asset_min_notional:
                 msg = (
                     f"Order {order.id} rejected: notional {effective_notional} below minimum "
@@ -1703,7 +1786,7 @@ class MT5Connector(BaseConnector):
             if not test_mode and max_notional > 0 and effective_notional > max_notional:
                 msg = (
                     f"Order {order.id} rejected: notional {effective_notional} exceeds max limit {max_notional} "
-                    f"(contract_size={contract_size})"
+                    f"(account-currency notional)"
                 )
                 _clear_risk_reservation(order)
                 update_order_status(order, "error", error_msg=msg)

@@ -159,16 +159,48 @@ class FlipFlowTests(TestCase):
 
         # A later interval veto must also leave the primary alone.
         entry.created_at = timezone.now() - timedelta(days=1)
-        entry.save(update_fields=["created_at"])
+        entry.submitted_at = timezone.now()
+        entry.save(update_fields=["created_at", "submitted_at"])
+
         self.bot.trade_interval_minutes = 30
         self.bot.save()
-        Decision.objects.create(
-            bot=self.bot, signal=self._signal("sell", 1.0, "recent-entry"),
-            action="open", reason="prior-entry", score=1,
-        )
         decision = make_decision_from_signal(self._signal("buy", 1.0, "interval-limit"))
         self.assertEqual((decision.action, decision.reason), ("ignore", "min_trade_interval_not_elapsed"))
         prepare_flip.assert_not_called()
         primary.refresh_from_db()
         self.assertEqual(primary.status, "open")
         self.assertFalse(Decision.objects.filter(action="close").exists())
+
+    def test_unfilled_open_decision_does_not_start_trade_interval(self):
+        self.bot.trade_interval_minutes = 30
+        self.bot.save(update_fields=["trade_interval_minutes"])
+
+        prior_signal = self._signal(
+            "buy",
+            score=1.0,
+            key="unfilled-prior-signal",
+        )
+
+        Decision.objects.create(
+            bot=self.bot,
+            signal=prior_signal,
+            action="open",
+            reason="prior-unfilled-entry",
+            score=1.0,
+        )
+
+        # No submitted/accepted entry order exists for the prior Decision.
+        # Therefore it must not consume the bot's trade interval.
+        next_signal = self._signal(
+            "buy",
+            score=1.0,
+            key="after-unfilled-prior",
+        )
+
+        decision = make_decision_from_signal(next_signal)
+
+        self.assertEqual(decision.action, "open")
+        self.assertNotEqual(
+            decision.reason,
+            "min_trade_interval_not_elapsed",
+        )

@@ -42,13 +42,13 @@ class MT5TaskPriorityTests(TestCase):
         )
 
     @patch("execution.mt5_tasks.execute_mt5_order_task.apply_async")
-    def test_entry_uses_normal_priority_and_records_queue_time(self, apply_async):
+    def test_entry_uses_high_priority_and_records_queue_time(self, apply_async):
         enqueue_mt5_order(self.entry)
 
         apply_async.assert_called_once_with(
             args=[self.entry.id],
             queue="mt5_execution",
-            priority=MT5_PRIORITY_NORMAL,
+            priority=MT5_PRIORITY_HIGH,
         )
         self.entry.refresh_from_db()
         self.assertIsNotNone(self.entry.execution_queued_at)

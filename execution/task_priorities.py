@@ -20,6 +20,11 @@ MT5_PRIORITY_STEPS = [
 def priority_for_order(order, *, emergency: bool = False) -> int:
     if emergency:
         return MT5_PRIORITY_EMERGENCY
-    if getattr(order, "intent", "entry") == "exit":
+
+    # Actual broker execution must outrank routine scans and maintenance.
+    # Both entries and exits are latency-sensitive once an executable order
+    # has been created.
+    if getattr(order, "intent", "entry") in {"entry", "exit"}:
         return MT5_PRIORITY_HIGH
+
     return MT5_PRIORITY_NORMAL
