@@ -2715,9 +2715,22 @@ def cancel_stale_orders_task(self, max_age_seconds: int | None = None):
         try:
             from execution.services.exposure import has_submission_evidence
             if order.status == "new" and not has_submission_evidence(order):
-                update_order_status(order, "canceled", error_msg="Local order expired before broker submission")
+            # A successfully queued MT5 order is still a valid execution intent even
+            # though the serialized worker has not submitted it to the broker yet.
+            # Do not let stale cleanup cancel an order that is waiting for, or has
+            # already started on, the MT5 execution worker.
+                if order.execution_queued_at is not None or order.mt5_worker_started_at is not None:
+                    unresolved.append(order.id)
+                    continue
+
+                update_order_status(
+                    order,
+                    "canceled",
+                    error_msg="Local order expired before broker submission",
+                )
                 canceled_local.append(order.id)
                 continue
+            
             if connector.reconcile_order(order):
                 reconciled.append(order.id)
                 continue
