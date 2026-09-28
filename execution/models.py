@@ -455,6 +455,7 @@ class BrokerPosition(models.Model):
     closed_at = models.DateTimeField(null=True, blank=True)
     last_reconciled_at = models.DateTimeField(null=True, blank=True)
     broker_metadata = models.JSONField(default=dict, blank=True)
+    cleared_from_positions_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["broker_account_id", "broker_position_ticket"]

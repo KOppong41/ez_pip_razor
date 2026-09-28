@@ -13,6 +13,21 @@ Do not distribute the raw Flutter `Release` directory by itself. Use
 `../desktop/build_desktop.ps1`, which bundles the Python backend and creates the
 complete `dist/EzTradeDesktop.zip` package.
 
+## Markets and positions
+
+Markets and the dashboard's enabled symbols follow the active asset catalog.
+After deleting or deactivating an asset in the same backend's admin dashboard,
+use **Reload markets** to refresh the desktop list. Broker symbol mappings are
+retained for reconciliation but do not make removed assets visible.
+
+Positions refresh every 15 seconds and can be refreshed with **Reload positions**.
+**Clear closed** hides confirmed closed positions from this account's list while
+preserving broker records and trade history. Open positions and tickets awaiting
+broker confirmation remain visible. Clearing persists across app restarts.
+Source backends need `python manage.py migrate` for this update; packaged builds
+apply migrations on startup. The source and installed apps use separate databases
+by default, so changes must be made in the admin dashboard for the relevant backend.
+
 ## Historical backtesting
 
 The Backtesting workspace has two tabs: **Historical backtests** runs isolated

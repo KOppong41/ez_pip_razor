@@ -64,3 +64,36 @@ class PersonalMarketApiTest(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_removed_assets_are_absent_even_when_enabled_mappings_remain(self):
+        for symbol in ("XAUUSD", "OLDUSD", "DELETEDUSD"):
+            BrokerSymbolMapping.objects.create(
+                broker_account=self.account, canonical_symbol=symbol,
+                broker_symbol=f"{symbol}m", enabled=True,
+            )
+        deleted = Asset.objects.create(symbol="DELETEDUSDm", is_active=True)
+        deleted.delete()
+
+        response = self.client.get("/api/personal/markets/")
+        self.assertEqual(response.status_code, 200)
+        symbols = {row["canonical_symbol"] for row in response.json()}
+        self.assertIn("XAUUSD", symbols)
+        self.assertNotIn("OLDUSD", symbols)
+        self.assertNotIn("DELETEDUSD", symbols)
+        dashboard = self.client.get("/api/personal/dashboard/")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertEqual(dashboard.json()["trading"]["enabled_symbols"], ["XAUUSD"])
+        self.assertEqual(BrokerSymbolMapping.objects.filter(broker_account=self.account).count(), 3)
+
+    def test_removing_last_active_asset_does_not_fall_back_to_mappings(self):
+        BrokerSymbolMapping.objects.create(
+            broker_account=self.account, canonical_symbol="XAUUSD", enabled=True,
+        )
+        Asset.objects.all().update(is_active=False)
+        self.assertEqual(self.client.get("/api/personal/markets/").json(), [])
+        response = self.client.patch(
+            "/api/personal/markets/",
+            data={"canonical_symbol": "XAUUSD", "enabled": True},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)

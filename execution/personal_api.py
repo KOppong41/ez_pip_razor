@@ -98,20 +98,22 @@ def _personal_market_rows(account: BrokerAccount) -> list[dict]:
         for row in BrokerSymbolMapping.objects.filter(broker_account=account)
     }
     rows = []
-    for canonical in sorted(set(assets_by_canonical) | set(mappings)):
-        asset = assets_by_canonical.get(canonical)
+    # Broker mappings outlive catalog entries for reconciliation/history. They
+    # must not resurrect deleted or deactivated assets in the desktop catalog.
+    for canonical in sorted(assets_by_canonical):
+        asset = assets_by_canonical[canonical]
         mapping = mappings.get(canonical)
         rows.append(
             {
                 "id": mapping.id if mapping else None,
-                "asset_id": asset.id if asset else None,
+                "asset_id": asset.id,
                 "canonical_symbol": canonical,
-                "symbol": asset.symbol if asset else canonical,
-                "display_name": asset.display_name if asset else canonical,
-                "category": asset.category if asset else "other",
-                "min_qty": asset.min_qty if asset else None,
-                "recommended_qty": asset.recommended_qty if asset else None,
-                "max_spread": asset.max_spread if asset else None,
+                "symbol": asset.symbol,
+                "display_name": asset.display_name,
+                "category": asset.category,
+                "min_qty": asset.min_qty,
+                "recommended_qty": asset.recommended_qty,
+                "max_spread": asset.max_spread,
                 "broker_symbol": mapping.broker_symbol if mapping else "",
                 "enabled": mapping.enabled if mapping else False,
                 "bid": mapping.bid if mapping else None,
@@ -204,11 +206,11 @@ def personal_dashboard(request):
                 "today_entries": entries,
                 "winning_trades_today": completed.filter(pnl__gt=0).count(),
                 "losing_trades_today": completed.filter(pnl__lt=0).count(),
-                "enabled_symbols": list(
-                    BrokerSymbolMapping.objects.filter(broker_account=account, enabled=True).values_list(
-                        "canonical_symbol", flat=True
-                    )
-                ),
+                "enabled_symbols": [
+                    row["canonical_symbol"]
+                    for row in _personal_market_rows(account)
+                    if row["enabled"]
+                ],
             },
         }
     )
@@ -334,15 +336,23 @@ def personal_strategies(request):
     return Response(data)
 
 
-@api_view(["GET"])
+@api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def personal_positions(request):
     try:
         account = _account_for(request)
     except (BrokerAccount.DoesNotExist, ValueError) as exc:
         return Response({"detail": str(exc)}, status=400)
+    if request.method == "POST":
+        if request.data.get("action") != "clear_closed":
+            return Response({"detail": "Unsupported positions action"}, status=400)
+        cleared = BrokerPosition.objects.filter(
+            broker_account=account, status="closed", cleared_from_positions_at__isnull=True,
+        ).update(cleared_from_positions_at=timezone.now())
+        return Response({"cleared": cleared})
     positions = (
         BrokerPosition.objects.filter(broker_account=account)
+        .exclude(status="closed", cleared_from_positions_at__isnull=False)
         .annotate(
             _current_rank=Case(
                 When(status="open", then=Value(0)),
