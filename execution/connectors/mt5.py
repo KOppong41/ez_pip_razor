@@ -704,12 +704,12 @@ class MT5Connector(BaseConnector):
             )
         )
 
-        if price_dec <= 0 or volume_dec <= 0:
+        if not price_dec.is_finite() or not volume_dec.is_finite() or price_dec <= 0 or volume_dec <= 0:
             raise ConnectorError(
                 f"Cannot calculate notional for {symbol}: invalid price or volume"
             )
 
-        if price_step <= 0:
+        if not price_step.is_finite() or price_step <= 0:
             raise ConnectorError(
                 f"Cannot calculate notional for {symbol}: missing tick/point size"
             )
@@ -722,30 +722,37 @@ class MT5Connector(BaseConnector):
 
         probe_close = price_dec + price_step
 
-        probe_profit = mt5.order_calc_profit(
-            order_type,
-            symbol,
-            float(volume_dec),
-            float(price_dec),
-            float(probe_close),
+        probe_volume = volume_dec
+        for _ in range(8):
+            probe_profit = mt5.order_calc_profit(
+                order_type, symbol, float(probe_volume),
+                float(price_dec), float(probe_close),
+            )
+            if probe_profit is None:
+                raise ConnectorError(
+                    f"MT5 order_calc_profit failed while calculating notional "
+                    f"for {symbol}: {mt5.last_error()}"
+                )
+            account_profit = abs(Decimal(str(probe_profit)))
+            if not account_profit.is_finite():
+                raise ConnectorError(f"MT5 returned invalid account-currency value for {symbol}")
+            if account_profit > 0:
+                account_value_per_price_unit = account_profit / price_step
+                return price_dec * account_value_per_price_unit * (volume_dec / probe_volume)
+
+            # Small-lot, one-tick P/L can round to zero in account currency
+            # (ETH: 0.1 lot * $0.01 = $0.001). Enlarge only the hypothetical
+            # volume, within broker bounds, and scale the result back. Actual
+            # order volume and the one-tick conversion price stay unchanged.
+            max_probe_volume = Decimal(str(getattr(symbol_info, "volume_max", 0) or 0))
+            if not max_probe_volume.is_finite() or max_probe_volume <= probe_volume:
+                break
+            probe_volume = min(probe_volume * 10, max_probe_volume)
+
+        raise ConnectorError(
+            f"MT5 returned zero account-currency value while calculating "
+            f"notional for {symbol}"
         )
-
-        if probe_profit is None:
-            raise ConnectorError(
-                f"MT5 order_calc_profit failed while calculating notional "
-                f"for {symbol}: {mt5.last_error()}"
-            )
-
-        account_profit = abs(Decimal(str(probe_profit)))
-
-        if account_profit <= 0:
-            raise ConnectorError(
-                f"MT5 returned zero account-currency value while calculating "
-                f"notional for {symbol}"
-            )
-
-        account_value_per_price_unit = account_profit / price_step
-        return abs(price_dec) * account_value_per_price_unit
 
     def calc_profit_for_account(self, broker_account, side: str, symbol: str, volume, open_price, close_price):
         def operation():
