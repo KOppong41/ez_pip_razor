@@ -221,12 +221,19 @@ def _record_loss_streak(bot_id, realized_pnl, effective_max, effective_cd):
             from execution.services.bot_schedule import set_bot_status
             set_bot_status(bot, "paused")
         bot.status = "paused"
-        bot.pause_reason = "loss_cooldown" if effective_cd > 0 else "manual"
+        bot.pause_reason = "loss_cooldown" if effective_cd > 0 else "loss_lock"
         bot.paused_until = (
             timezone.now() + timezone.timedelta(minutes=effective_cd)
             if effective_cd > 0 else None
         )
         update_fields.extend(["status", "pause_reason", "paused_until"])
+        params = dict(bot.scalper_params or {})
+        if effective_cd > 0:
+            params["_loss_pause_owner"] = {"until": bot.paused_until.isoformat()}
+        else:
+            params.pop("_loss_pause_owner", None)
+        bot.scalper_params = params
+        update_fields.append("scalper_params")
 
     bot.save(update_fields=update_fields)
 

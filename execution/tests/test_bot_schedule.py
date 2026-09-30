@@ -152,11 +152,13 @@ class BotScheduleTests(TestCase):
         self.assertEqual(self.state(), ("paused", False))
         self.assertEqual(self.bot.pause_reason, "loss_cooldown")
         self.assertEqual(self.bot.paused_until, utc(hour=11))
+        self.assertEqual(self.bot.scalper_params["_loss_pause_owner"]["until"], utc(hour=11).isoformat())
         self.assertEqual(reconcile_trading_schedules(now=utc(hour=10, minute=59))["resumed"], 0)
         self.assertEqual(self.state(), ("paused", False))
         self.assertEqual(reconcile_trading_schedules(now=utc(hour=11))["resumed"], 1)
         self.assertEqual(self.state(), ("active", False))
         self.assertIsNone(self.bot.paused_until)
+        self.assertNotIn("_loss_pause_owner", self.bot.scalper_params)
 
     def test_zero_minute_loss_pause_requires_explicit_start(self):
         self.bot.loss_streak_autopause_enabled = True
@@ -172,8 +174,9 @@ class BotScheduleTests(TestCase):
             update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
         self.assertEqual(self.state(), ("paused", False))
         self.assertEqual(self.bot.current_loss_streak, 2)
-        self.assertEqual(self.bot.pause_reason, "manual")
+        self.assertEqual(self.bot.pause_reason, "loss_lock")
         self.assertIsNone(self.bot.paused_until)
+        self.assertNotIn("_loss_pause_owner", self.bot.scalper_params)
         self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
         self.assertEqual(self.state(), ("paused", False))
         with patch("execution.services.bot_schedule.timezone.now", return_value=utc(hour=12)):
@@ -184,6 +187,7 @@ class BotScheduleTests(TestCase):
     def test_manual_pause_cannot_resume_with_stale_schedule_flag(self):
         Bot.objects.filter(pk=self.bot.pk).update(
             status="paused", pause_reason="manual", schedule_paused=True,
+            paused_until=utc(hour=11),
         )
         self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
         self.assertEqual(self.state(), ("paused", True))
@@ -385,6 +389,8 @@ class BotScheduleTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
         self.assertEqual(payload["pause_reason"], "loss_cooldown")
+        self.assertEqual(payload["pause_label"], "LOSS COOLDOWN")
+        self.assertIn("Resumes 2026-09-23", payload["pause_detail"])
         self.assertEqual(payload["current_loss_streak"], 3)
         self.assertIsNotNone(payload["paused_until"])
         self.assertEqual(payload["diagnostic_12h"], {
@@ -399,6 +405,30 @@ class BotScheduleTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()["pause_reason"], "loss_cooldown")
         self.assertEqual(response.json()["current_loss_streak"], 3)
+
+    def test_bot_api_distinguishes_loss_lock_from_manual_pause(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_lock", paused_until=None,
+            current_loss_streak=3,
+        )
+        payload = self.client.get(f"/api/bots/{self.bot.pk}/").json()
+        self.assertEqual(payload["pause_reason"], "loss_lock")
+        self.assertEqual(payload["pause_label"], "LOSS LIMIT PAUSED")
+        self.assertEqual(payload["pause_detail"], "Manual restart required")
+        self.assertIsNone(payload["paused_until"])
+        response = self.client.patch(
+            f"/api/bots/{self.bot.pk}/",
+            {"pause_reason": "manual", "pause_label": "PAUSED"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["pause_reason"], "loss_lock")
+        self.assertEqual(response.json()["pause_label"], "LOSS LIMIT PAUSED")
+        set_bot_status(self.bot, "paused")
+        payload = self.client.get(f"/api/bots/{self.bot.pk}/").json()
+        self.assertEqual(payload["pause_reason"], "manual")
+        self.assertEqual(payload["pause_label"], "PAUSED")
+        self.assertEqual(payload["pause_detail"], "")
 
     def test_settings_save_cannot_overwrite_a_concurrent_schedule_pause(self):
         from bots.serializers import BotSerializer

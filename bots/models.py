@@ -306,6 +306,7 @@ class Bot(models.Model):
             ("manual", "Manual"),
             ("schedule", "Trading schedule"),
             ("loss_cooldown", "Loss cooldown"),
+            ("loss_lock", "Loss limit pause"),
         ],
         help_text="Identifies which pause is eligible for automatic resume.",
     )

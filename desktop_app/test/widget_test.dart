@@ -49,7 +49,7 @@ class FakeApiClient extends ApiClient {
               ? 'paused'
               : 'stopped',
           'schedule_paused': schedulePaused,
-          'pause_reason': pauseReason,
+          'pause_reason': pauseReason ?? (schedulePaused ? 'schedule' : null),
           'paused_until': pausedUntil,
           'current_loss_streak': lossStreak,
           'diagnostic_12h': diagnostic12h,
@@ -677,6 +677,38 @@ void main() {
     expect(find.text('12h: htf bias neutral (8/12)'), findsOneWidget);
     expect(find.textContaining('Resumes 2026-09-30'), findsOneWidget);
     expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('loss lock requires manual restart and manual pause stays distinct', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(
+          body: BotsPage(
+            client: FakeApiClient(pauseReason: 'loss_lock', lossStreak: 3),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('LOSS LIMIT PAUSED'), findsOneWidget);
+    expect(find.text('Manual restart required'), findsOneWidget);
+    expect(find.text('LOSS COOLDOWN'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: BotsPage(client: FakeApiClient(pauseReason: 'manual'))),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('PAUSED'), findsOneWidget);
+    expect(find.text('Manual restart required'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

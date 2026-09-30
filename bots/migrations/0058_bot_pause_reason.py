@@ -5,7 +5,8 @@ def backfill_pause_reasons(apps, schema_editor):
     Bot = apps.get_model("bots", "Bot")
     paused = Bot.objects.using(schema_editor.connection.alias).filter(status="paused", pause_reason="")
     paused.filter(schedule_paused=True).update(pause_reason="schedule")
-    paused.filter(schedule_paused=False, paused_until__isnull=False).update(pause_reason="loss_cooldown")
+    # A legacy timer is not proof of loss ownership: manual pauses used to
+    # leave paused_until intact. Keep uncertain rows operator-owned.
     paused.update(pause_reason="manual")
 
 

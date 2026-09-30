@@ -5060,9 +5060,11 @@ class _BotCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final status = '${bot['status'] ?? 'stopped'}'.toLowerCase();
-    final schedulePaused = status == 'paused' && bot['schedule_paused'] == true;
+    final schedulePaused =
+        status == 'paused' && bot['pause_reason'] == 'schedule';
     final cooldownPaused =
         status == 'paused' && bot['pause_reason'] == 'loss_cooldown';
+    final lossLocked = status == 'paused' && bot['pause_reason'] == 'loss_lock';
     final statusAccent = status == 'active'
         ? green
         : status == 'paused'
@@ -5157,6 +5159,13 @@ class _BotCard extends StatelessWidget {
                   Text(
                     'Resumes ${formatDateTime(bot['paused_until'])}',
                     style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+                if (lossLocked) ...[
+                  const SizedBox(height: 5),
+                  const Text(
+                    'Manual restart required',
+                    style: TextStyle(color: muted, fontSize: 10),
                   ),
                 ],
                 if (asDouble(bot['current_loss_streak']) > 0) ...[
@@ -7491,7 +7500,8 @@ String botStatusLabel(Map<String, dynamic> bot) {
   final status = '${bot['status'] ?? 'stopped'}'.toLowerCase();
   if (status == 'paused') {
     if (bot['pause_reason'] == 'loss_cooldown') return 'LOSS COOLDOWN';
-    if (bot['schedule_paused'] == true) return 'SCHEDULE PAUSED';
+    if (bot['pause_reason'] == 'loss_lock') return 'LOSS LIMIT PAUSED';
+    if (bot['pause_reason'] == 'schedule') return 'SCHEDULE PAUSED';
   }
   return status.toUpperCase();
 }

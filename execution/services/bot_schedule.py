@@ -75,15 +75,19 @@ def reconcile_bot_loss_cooldown(bot_id, *, now=None):
         return None
     if bot.kill_switch_triggered_at:
         return None
+    params = dict(bot.scalper_params or {})
+    params.pop("_loss_pause_owner", None)
     if not is_within_trading_window(bot, now):
         Bot.objects.filter(pk=bot.pk).update(
             schedule_paused=True, pause_reason="schedule", paused_until=None,
+            scalper_params=params,
         )
         return "paused"
     if not can_automatically_resume(bot, now):
         return None
     Bot.objects.filter(pk=bot.pk).update(
         status="active", pause_reason="", paused_until=None,
+        scalper_params=params,
     )
     log_journal_event(
         "bot.loss_cooldown_resumed", bot=bot,
@@ -139,6 +143,9 @@ def set_bot_status(bot, status):
         fields["kill_switch_triggered_at"] = None
     if "_market_guard" in params:
         params.pop("_market_guard")
+        fields["scalper_params"] = params
+    if "_loss_pause_owner" in params:
+        params.pop("_loss_pause_owner")
         fields["scalper_params"] = params
     Bot.objects.filter(pk=bot.pk).update(**fields)
     if status == "active":
