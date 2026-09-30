@@ -874,8 +874,13 @@ class MT5Connector(BaseConnector):
 
     @staticmethod
     def _order_comment(order: Order, *, closing: bool = False) -> str:
-        prefix = "ezc:" if closing else "ez:"
-        return f"{prefix}{order.client_order_id}"[:31]
+        if closing:
+            if not order.pk:
+                raise ConnectorError("Exit order must be saved before building its broker comment")
+            # Exit client IDs include retry delimiters and can exceed MT5's
+            # comment limit. The saved order ID is short and unique per retry.
+            return f"ezc:{order.pk}"
+        return f"ez:{order.client_order_id}"[:31]
 
     @staticmethod
     def _order_from_comment(broker_account, comment: str):
@@ -890,6 +895,12 @@ class MT5Connector(BaseConnector):
             return None
         if not fragment:
             return None
+        if intent == "exit" and fragment.isdecimal():
+            return (
+                Order.objects.filter(
+                    pk=int(fragment), broker_account=broker_account, intent="exit",
+                ).select_related("bot").first()
+            )
         candidates = list(
             Order.objects.filter(
                 broker_account=broker_account,

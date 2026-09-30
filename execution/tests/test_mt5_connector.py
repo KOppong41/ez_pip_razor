@@ -14,7 +14,7 @@ from execution.connectors.mt5 import (
     _MT5Proxy,
     _adjust_stops_to_broker_minimum,
 )
-from execution.models import BrokerPosition, Decision, Execution, ExecutionAttempt, Signal
+from execution.models import BrokerPosition, Decision, Execution, ExecutionAttempt, Order, Signal
 from execution.services.live_risk import PreTradeRiskResult, RiskRejected
 from execution.services.orchestrator import create_order_from_decision
 
@@ -114,6 +114,26 @@ class MT5ConnectorTest(TestCase):
             params={"sl": "1.0900", "tp": "1.1200"},
         )
         self.order, _ = create_order_from_decision(decision, self.account, "0.04")
+
+    def test_close_comments_are_broker_safe_and_unique_across_retries(self):
+        orders = [
+            Order.objects.create(
+                bot=self.bot, broker_account=self.account,
+                client_order_id=f"close:tp1|56bd7f8740daebdb5aa8|retry:{retry}",
+                intent="exit", symbol="EURUSD", side="sell", qty=Decimal("0.01"),
+            )
+            for retry in (1, 2)
+        ]
+        comments = [MT5Connector._order_comment(order, closing=True) for order in orders]
+        self.assertNotEqual(*comments)
+        for order, comment in zip(orders, comments):
+            self.assertEqual(comment, f"ezc:{order.pk}")
+            self.assertLessEqual(len(comment), 31)
+            self.assertEqual(MT5Connector._order_from_comment(self.account, comment).pk, order.pk)
+        # Old truncated retry comments cannot be attributed to one order.
+        self.assertIsNone(MT5Connector._order_from_comment(
+            self.account, "ezc:close:tp1|56bd7f8740daebdb5",
+        ))
 
     def _risk_result(self):
         return PreTradeRiskResult(
@@ -669,6 +689,10 @@ class MT5ConnectorTest(TestCase):
             connector.place_order(self.order)
 
         api.order_send.assert_called_once()
+        expected_comment = f"ezc:{self.order.pk}"
+        self.assertEqual(api.order_check.call_args.args[0]["comment"], expected_comment)
+        self.assertEqual(api.order_send.call_args.args[0]["comment"], expected_comment)
+        self.assertLessEqual(len(expected_comment), 31)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, "filled")
         execution = Execution.objects.get(order=self.order)
