@@ -42,7 +42,7 @@ def reconcile_bot_schedule(bot_id, *, now=None):
     in_window = is_within_trading_window(bot, now)
     if bot.status == "active" and not in_window:
         new_status, schedule_paused, event = "paused", True, "paused"
-    elif bot.status == "paused" and bot.schedule_paused and in_window:
+    elif bot.status == "paused" and bot.schedule_paused and bot.pause_reason == "schedule" and in_window:
         if not can_automatically_resume(bot, now):
             return None
         new_status, schedule_paused, event = "active", False, "resumed"
@@ -98,7 +98,7 @@ def reconcile_trading_schedules(*, now=None, queryset=None):
     now = now or timezone.now()
     bots = queryset if queryset is not None else Bot.objects.all()
     bot_ids = bots.filter(
-        Q(status="active") | Q(status="paused", schedule_paused=True)
+        Q(status="active") | Q(status="paused", schedule_paused=True, pause_reason="schedule")
     ).values_list("pk", flat=True)
     counts = {"paused": 0, "resumed": 0, "errors": 0}
     for bot_id in list(bot_ids):

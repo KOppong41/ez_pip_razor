@@ -137,6 +137,58 @@ class BotScheduleTests(TestCase):
         self.assertIsNone(self.bot.paused_until)
         self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
 
+    def test_timed_loss_pause_resumes_only_after_expiry(self):
+        self.bot.loss_streak_autopause_enabled = True
+        self.bot.max_loss_streak_before_pause = 1
+        self.bot.loss_streak_cooldown_min = 60
+        self.bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        with patch("execution.services.psychology._get_settings", return_value=None), patch(
+            "execution.services.psychology.timezone.now", return_value=utc(hour=10)
+        ):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
+        self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.pause_reason, "loss_cooldown")
+        self.assertEqual(self.bot.paused_until, utc(hour=11))
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=10, minute=59))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=11))["resumed"], 1)
+        self.assertEqual(self.state(), ("active", False))
+        self.assertIsNone(self.bot.paused_until)
+
+    def test_zero_minute_loss_pause_requires_explicit_start(self):
+        self.bot.loss_streak_autopause_enabled = True
+        self.bot.max_loss_streak_before_pause = 2
+        self.bot.loss_streak_cooldown_min = 0
+        self.bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        with patch("execution.services.psychology._get_settings", return_value=None):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
+            self.assertEqual(self.state(), ("active", False))
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
+        self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.current_loss_streak, 2)
+        self.assertEqual(self.bot.pause_reason, "manual")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+        with patch("execution.services.bot_schedule.timezone.now", return_value=utc(hour=12)):
+            set_bot_status(self.bot, "active")
+        self.assertEqual(self.state(), ("active", False))
+        self.assertEqual(self.bot.pause_reason, "")
+
+    def test_manual_pause_cannot_resume_with_stale_schedule_flag(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="manual", schedule_paused=True,
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", True))
+        self.assertEqual(self.bot.pause_reason, "manual")
+
     def test_loss_cooldown_waits_for_expiry_and_preserves_manual_pause(self):
         until = utc(day=22, hour=13)
         Bot.objects.filter(pk=self.bot.pk).update(
@@ -189,6 +241,29 @@ class BotScheduleTests(TestCase):
         Bot.objects.filter(pk=self.bot.pk).update(kill_switch_triggered_at=utc(hour=11))
         self.assertEqual(reconcile_trading_schedules(now=utc(hour=12))["resumed"], 0)
         self.assertEqual(self.state(), ("paused", False))
+
+    def test_kill_switch_latch_cannot_be_replaced_by_loss_pause_or_schedule_resume(self):
+        self.bot.loss_streak_autopause_enabled = True
+        self.bot.max_loss_streak_before_pause = 1
+        self.bot.loss_streak_cooldown_min = 0
+        self.bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="stopped", kill_switch_triggered_at=utc(hour=10),
+        )
+        with patch("execution.services.psychology._get_settings", return_value=None):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
+        self.assertEqual(self.state(), ("stopped", False))
+        self.assertEqual(self.bot.pause_reason, "")
+        self.assertEqual(self.bot.current_loss_streak, 1)
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", schedule_paused=True, pause_reason="schedule",
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", True))
+        self.assertEqual(self.bot.kill_switch_triggered_at, utc(hour=10))
 
     def test_app_exit_cancels_scheduled_and_legacy_market_resume(self):
         self.pause_by_schedule()

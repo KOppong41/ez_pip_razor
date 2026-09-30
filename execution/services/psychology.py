@@ -192,10 +192,6 @@ def update_bot_after_realized_pnl(order, realized_pnl: Decimal) -> None:
     for v in (global_cd, bot_cd):
         if v and v > 0:
             effective_cd = max(effective_cd, v)
-    if effective_cd <= 0:
-        # No sensible cool-down available; keep streak stats but don't auto-pause.
-        effective_cd = 0
-
     _record_loss_streak(bot.pk, Decimal(str(realized_pnl)), effective_max, effective_cd)
 
 
@@ -217,7 +213,7 @@ def _record_loss_streak(bot_id, realized_pnl, effective_max, effective_cd):
     update_fields = ["current_loss_streak"]
     # Auto-pause when streak exceeded. Risk ownership supersedes schedule ownership.
     if (
-        streak >= effective_max and effective_cd > 0
+        streak >= effective_max
         and (bot.status == "active" or bot.schedule_paused)
         and not bot.kill_switch_triggered_at
     ):
@@ -225,8 +221,11 @@ def _record_loss_streak(bot_id, realized_pnl, effective_max, effective_cd):
             from execution.services.bot_schedule import set_bot_status
             set_bot_status(bot, "paused")
         bot.status = "paused"
-        bot.pause_reason = "loss_cooldown"
-        bot.paused_until = timezone.now() + timezone.timedelta(minutes=effective_cd)
+        bot.pause_reason = "loss_cooldown" if effective_cd > 0 else "manual"
+        bot.paused_until = (
+            timezone.now() + timezone.timedelta(minutes=effective_cd)
+            if effective_cd > 0 else None
+        )
         update_fields.extend(["status", "pause_reason", "paused_until"])
 
     bot.save(update_fields=update_fields)
