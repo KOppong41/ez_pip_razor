@@ -19,12 +19,12 @@ def _apply_market_status(bot_id, status, now):
     params = dict(bot.scalper_params or {})
     guard_flag = params.get("_market_guard")
     if bot.status == "active" and not is_within_trading_window(bot, now):
-        Bot.objects.filter(pk=bot.pk).update(status="paused", schedule_paused=True)
+        Bot.objects.filter(pk=bot.pk).update(status="paused", schedule_paused=True, pause_reason="schedule")
         return "paused"
     if not status.is_open and bot.status == "active":
         params["_market_guard"] = {"was": "active", "reason": status.reason}
         Bot.objects.filter(pk=bot.pk).update(
-            status="stopped", schedule_paused=False, scalper_params=params,
+            status="stopped", schedule_paused=False, pause_reason="", scalper_params=params,
         )
         return "stopped"
     if status.is_open and guard_flag and bot.status == "stopped":
@@ -35,6 +35,7 @@ def _apply_market_status(bot_id, status, now):
         Bot.objects.filter(pk=bot.pk).update(
             status="active" if in_window else "paused",
             schedule_paused=not in_window,
+            pause_reason="" if in_window else "schedule",
             scalper_params=params,
         )
         return "resumed" if in_window else None

@@ -9,7 +9,7 @@ from django.test import TestCase
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
-from execution.models import MT5ConnectionState, RiskPolicy
+from execution.models import MT5ConnectionState, RiskPolicy, ScalperRunLog
 from execution.services.bot_schedule import reconcile_trading_schedules, set_bot_status
 from execution.services.market_hours import MarketStatus
 from execution.services.psychology import update_bot_after_realized_pnl
@@ -130,8 +130,144 @@ class BotScheduleTests(TestCase):
         ):
             update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
         self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.pause_reason, "loss_cooldown")
         reconcile_trading_schedules(now=utc(day=23))
+        self.assertEqual(self.state(), ("active", False))
+        self.assertEqual(self.bot.pause_reason, "")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+
+    def test_timed_loss_pause_resumes_only_after_expiry(self):
+        self.bot.loss_streak_autopause_enabled = True
+        self.bot.max_loss_streak_before_pause = 1
+        self.bot.loss_streak_cooldown_min = 60
+        self.bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        with patch("execution.services.psychology._get_settings", return_value=None), patch(
+            "execution.services.psychology.timezone.now", return_value=utc(hour=10)
+        ):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
         self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.pause_reason, "loss_cooldown")
+        self.assertEqual(self.bot.paused_until, utc(hour=11))
+        self.assertEqual(self.bot.scalper_params["_loss_pause_owner"]["until"], utc(hour=11).isoformat())
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=10, minute=59))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=11))["resumed"], 1)
+        self.assertEqual(self.state(), ("active", False))
+        self.assertIsNone(self.bot.paused_until)
+        self.assertNotIn("_loss_pause_owner", self.bot.scalper_params)
+
+    def test_zero_minute_loss_pause_requires_explicit_start(self):
+        self.bot.loss_streak_autopause_enabled = True
+        self.bot.max_loss_streak_before_pause = 2
+        self.bot.loss_streak_cooldown_min = 0
+        self.bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        with patch("execution.services.psychology._get_settings", return_value=None):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
+            self.assertEqual(self.state(), ("active", False))
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
+        self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.current_loss_streak, 2)
+        self.assertEqual(self.bot.pause_reason, "loss_lock")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertNotIn("_loss_pause_owner", self.bot.scalper_params)
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+        with patch("execution.services.bot_schedule.timezone.now", return_value=utc(hour=12)):
+            set_bot_status(self.bot, "active")
+        self.assertEqual(self.state(), ("active", False))
+        self.assertEqual(self.bot.pause_reason, "")
+
+    def test_manual_pause_cannot_resume_with_stale_schedule_flag(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="manual", schedule_paused=True,
+            paused_until=utc(hour=11),
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", True))
+        self.assertEqual(self.bot.pause_reason, "manual")
+
+    def test_loss_cooldown_waits_for_expiry_and_preserves_manual_pause(self):
+        until = utc(day=22, hour=13)
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown", paused_until=until,
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=12))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+        set_bot_status(self.bot, "paused")
+        self.assertEqual(self.bot.pause_reason, "manual")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=14))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+
+    def test_late_loss_update_cannot_take_over_manual_pause(self):
+        stale_bot = Bot.objects.get(pk=self.bot.pk)
+        stale_bot.loss_streak_autopause_enabled = True
+        stale_bot.max_loss_streak_before_pause = 1
+        stale_bot.loss_streak_cooldown_min = 60
+        stale_bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        set_bot_status(self.bot, "paused")
+        with patch("execution.services.psychology._get_settings", return_value=None):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=stale_bot), Decimal("-1"))
+        self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.pause_reason, "manual")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertEqual(self.bot.current_loss_streak, 1)
+
+    def test_loss_cooldown_transfers_to_schedule_outside_window(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown", paused_until=utc(hour=18),
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=19))["paused"], 1)
+        self.assertEqual(self.state(), ("paused", True))
+        self.assertEqual(self.bot.pause_reason, "schedule")
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 1)
+        self.assertEqual(self.state(), ("active", False))
+
+    def test_loss_cooldown_cannot_resume_through_disabled_account_or_kill_switch(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown", paused_until=utc(hour=11),
+        )
+        self.policy.entries_enabled = False
+        self.policy.save(update_fields=["entries_enabled"])
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=12))["resumed"], 0)
+        self.policy.entries_enabled = True
+        self.policy.save(update_fields=["entries_enabled"])
+        Bot.objects.filter(pk=self.bot.pk).update(kill_switch_triggered_at=utc(hour=11))
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=12))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+
+    def test_kill_switch_latch_cannot_be_replaced_by_loss_pause_or_schedule_resume(self):
+        self.bot.loss_streak_autopause_enabled = True
+        self.bot.max_loss_streak_before_pause = 1
+        self.bot.loss_streak_cooldown_min = 0
+        self.bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="stopped", kill_switch_triggered_at=utc(hour=10),
+        )
+        with patch("execution.services.psychology._get_settings", return_value=None):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
+        self.assertEqual(self.state(), ("stopped", False))
+        self.assertEqual(self.bot.pause_reason, "")
+        self.assertEqual(self.bot.current_loss_streak, 1)
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", schedule_paused=True, pause_reason="schedule",
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", True))
+        self.assertEqual(self.bot.kill_switch_triggered_at, utc(hour=10))
 
     def test_app_exit_cancels_scheduled_and_legacy_market_resume(self):
         self.pause_by_schedule()
@@ -238,6 +374,61 @@ class BotScheduleTests(TestCase):
         response = self.client.patch(f"/api/bots/{self.bot.pk}/", {"schedule_paused": False}, content_type="application/json")
         self.assertEqual(response.status_code, 200, response.content)
         self.assertTrue(response.json()["schedule_paused"])
+
+    def test_bot_api_exposes_cooldown_and_dominant_recent_rejection(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown",
+            paused_until=utc(day=23), current_loss_streak=3,
+        )
+        for reason in ("htf_bias_neutral", "htf_bias_neutral", "low_volume"):
+            ScalperRunLog.objects.create(bot=self.bot, summary={"rejection_reason": reason})
+        old = ScalperRunLog.objects.create(bot=self.bot, summary={"rejection_reason": "old_reason"})
+        from django.utils import timezone
+        ScalperRunLog.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(hours=13))
+        response = self.client.get(f"/api/bots/{self.bot.pk}/")
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["pause_reason"], "loss_cooldown")
+        self.assertEqual(payload["pause_label"], "LOSS COOLDOWN")
+        self.assertIn("Resumes 2026-09-23", payload["pause_detail"])
+        self.assertEqual(payload["current_loss_streak"], 3)
+        self.assertIsNotNone(payload["paused_until"])
+        self.assertEqual(payload["diagnostic_12h"], {
+            "scans": 3, "dominant_rejection_reason": "htf_bias_neutral",
+            "dominant_rejection_count": 2,
+        })
+        response = self.client.patch(
+            f"/api/bots/{self.bot.pk}/",
+            {"pause_reason": "manual", "current_loss_streak": 0, "paused_until": None},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["pause_reason"], "loss_cooldown")
+        self.assertEqual(response.json()["current_loss_streak"], 3)
+
+    def test_bot_api_distinguishes_loss_lock_from_manual_pause(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_lock", paused_until=None,
+            current_loss_streak=3,
+        )
+        payload = self.client.get(f"/api/bots/{self.bot.pk}/").json()
+        self.assertEqual(payload["pause_reason"], "loss_lock")
+        self.assertEqual(payload["pause_label"], "LOSS LIMIT PAUSED")
+        self.assertEqual(payload["pause_detail"], "Manual restart required")
+        self.assertIsNone(payload["paused_until"])
+        response = self.client.patch(
+            f"/api/bots/{self.bot.pk}/",
+            {"pause_reason": "manual", "pause_label": "PAUSED"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["pause_reason"], "loss_lock")
+        self.assertEqual(response.json()["pause_label"], "LOSS LIMIT PAUSED")
+        set_bot_status(self.bot, "paused")
+        payload = self.client.get(f"/api/bots/{self.bot.pk}/").json()
+        self.assertEqual(payload["pause_reason"], "manual")
+        self.assertEqual(payload["pause_label"], "PAUSED")
+        self.assertEqual(payload["pause_detail"], "")
 
     def test_settings_save_cannot_overwrite_a_concurrent_schedule_pause(self):
         from bots.serializers import BotSerializer

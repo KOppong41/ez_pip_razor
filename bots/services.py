@@ -166,6 +166,10 @@ def asset_recommendation_state(bot) -> str:
     preset_match = (bot.asset_recommended_config_applied or {}) == (asset.recommended_config or {})
     if direct_match and symbol_match and strategy_match and preset_match:
         return "recommended"
+    if preset_match:
+        # A catalog version bump with identical content must not disguise
+        # existing operator customizations as an update to apply.
+        return "customized"
     if applied_version < asset.recommended_config_version:
         return "update_available"
     return "customized"

@@ -1466,12 +1466,7 @@ class _BotStatusRow extends StatelessWidget {
               ],
             ),
           ),
-          _StatusPill(
-            text: status == 'paused' && row['schedule_paused'] == true
-                ? 'SCHEDULE PAUSED'
-                : status.toUpperCase(),
-            color: color,
-          ),
+          _StatusPill(text: botStatusLabel(row), color: color),
         ],
       ),
     );
@@ -4799,7 +4794,8 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     ),
                     decoration: const InputDecoration(
                       labelText: 'Allocation amount',
-                      helperText: '0 uses equity for sizing and disables allocation-based limits',
+                      helperText:
+                          '0 uses equity for sizing and disables allocation-based limits',
                     ),
                   ),
                   TextField(
@@ -5064,7 +5060,11 @@ class _BotCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final status = '${bot['status'] ?? 'stopped'}'.toLowerCase();
-    final schedulePaused = status == 'paused' && bot['schedule_paused'] == true;
+    final schedulePaused =
+        status == 'paused' && bot['pause_reason'] == 'schedule';
+    final cooldownPaused =
+        status == 'paused' && bot['pause_reason'] == 'loss_cooldown';
+    final lossLocked = status == 'paused' && bot['pause_reason'] == 'loss_lock';
     final statusAccent = status == 'active'
         ? green
         : status == 'paused'
@@ -5120,14 +5120,17 @@ class _BotCard extends StatelessWidget {
                   children: [
                     _PulseDot(color: statusAccent, size: 6),
                     const SizedBox(width: 7),
-                    Text(
-                      schedulePaused ? 'SCHEDULE PAUSED' : status.toUpperCase(),
-                      style: TextStyle(
-                        color: statusAccent,
-                        fontFamily: 'Consolas',
-                        fontSize: 9,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.8,
+                    Flexible(
+                      child: Text(
+                        botStatusLabel(bot),
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: statusAccent,
+                          fontFamily: 'Consolas',
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.8,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 9),
@@ -5151,6 +5154,36 @@ class _BotCard extends StatelessWidget {
                     style: TextStyle(color: muted, fontSize: 10),
                   ),
                 ],
+                if (cooldownPaused) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    'Resumes ${formatDateTime(bot['paused_until'])}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+                if (lossLocked) ...[
+                  const SizedBox(height: 5),
+                  const Text(
+                    'Manual restart required',
+                    style: TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+                if (asDouble(bot['current_loss_streak']) > 0) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    'Loss streak: ${bot['current_loss_streak']}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+                const SizedBox(height: 5),
+                Tooltip(
+                  message: botDiagnosticLabel(bot),
+                  child: Text(
+                    botDiagnosticLabel(bot),
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ),
               ],
             ),
           ),
@@ -5750,6 +5783,57 @@ class PositionsPage extends StatefulWidget {
 
 class _PositionsPageState extends State<PositionsPage> {
   late Future<dynamic> future = widget.client.get('/api/personal/positions/');
+  Timer? refreshTimer;
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!busy) reload();
+    });
+  }
+
+  @override
+  void dispose() {
+    refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  void reload() {
+    if (!mounted) return;
+    final next = widget.client.get('/api/personal/positions/');
+    setState(() {
+      future = next;
+    });
+  }
+
+  Future<void> clearClosed() async {
+    if (!await confirm(
+      context,
+      'Clear closed positions',
+      'Remove closed positions from this list? Trade records are preserved. Open and unconfirmed positions remain visible.',
+    )) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() => busy = true);
+    try {
+      final result = mapOf(
+        await widget.client.post('/api/personal/positions/', {
+          'action': 'clear_closed',
+        }),
+      );
+      if (!mounted) return;
+      message(context, '${result['cleared'] ?? 0} closed positions cleared.');
+      reload();
+    } catch (e) {
+      if (mounted) message(context, e.toString(), isError: true);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
   Future<void> close(Map<String, dynamic> row) async {
     if (!await confirm(
       context,
@@ -5812,6 +5896,8 @@ class _PositionsPageState extends State<PositionsPage> {
     Map<String, dynamic> row,
     Map<String, dynamic> body,
   ) async {
+    if (!mounted || busy) return;
+    setState(() => busy = true);
     try {
       await widget.client.post(
         '/api/personal/positions/${row['id']}/action/',
@@ -5820,11 +5906,11 @@ class _PositionsPageState extends State<PositionsPage> {
       if (mounted) {
         message(context, 'Action queued on the serialized MT5 worker.');
       }
-      setState(() {
-        future = widget.client.get('/api/personal/positions/');
-      });
+      reload();
     } catch (e) {
       if (mounted) message(context, e.toString(), isError: true);
+    } finally {
+      if (mounted) setState(() => busy = false);
     }
   }
 
@@ -5832,35 +5918,89 @@ class _PositionsPageState extends State<PositionsPage> {
   Widget build(BuildContext context) => FutureBuilder(
     future: future,
     builder: (_, snapshot) {
-      if (snapshot.hasError) {
-        return Empty(icon: Icons.cloud_off, text: snapshot.error.toString());
-      }
-      if (!snapshot.hasData) {
-        return const Center(child: CircularProgressIndicator());
-      }
-      return Records(
-        data: snapshot.data,
-        empty: 'No broker positions reconciled.',
-        trailing: (row) => row['manageable'] == true
-            ? Wrap(
-                spacing: 4,
+      final rows = listOfMaps(snapshot.data);
+      return Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
+            child: _WorkspaceHeader(
+              eyebrow: 'BROKER POSITIONS',
+              title: 'Positions',
+              badge:
+                  '${rows.where((row) => row['status'] == 'open').length} OPEN',
+              description:
+                  'Manage open tickets and clear closed positions from this list.',
+              action: Wrap(
+                spacing: 8,
                 children: [
-                  IconButton(
-                    tooltip: 'Modify SL/TP',
-                    onPressed: () => modify(row),
-                    icon: const Icon(Icons.tune),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : reload,
+                    icon: const Icon(Icons.sync_rounded, size: 17),
+                    label: const Text('Reload positions'),
                   ),
-                  IconButton(
-                    tooltip: 'Close ticket',
-                    onPressed: () => close(row),
-                    icon: const Icon(Icons.close, color: danger),
+                  OutlinedButton.icon(
+                    onPressed:
+                        !busy &&
+                            !snapshot.hasError &&
+                            rows.any((row) => row['status'] == 'closed')
+                        ? clearClosed
+                        : null,
+                    icon: const Icon(Icons.clear_all, size: 17),
+                    label: const Text('Clear closed'),
                   ),
                 ],
-              )
-            : const Tooltip(
-                message: 'Manual/external positions are read-only',
-                child: Icon(Icons.lock_outline, color: muted),
               ),
+            ),
+          ),
+          Expanded(
+            child: snapshot.hasError
+                ? Empty(icon: Icons.cloud_off, text: snapshot.error.toString())
+                : !snapshot.hasData
+                ? const Center(child: CircularProgressIndicator())
+                : Records(
+                    data: snapshot.data,
+                    empty: 'No positions to display.',
+                    additionalDetails: (row) => [
+                      Text(
+                        'Opened (local)  ${formatDateTime(row['opened_at'], includeSeconds: true)}',
+                        style: const TextStyle(color: muted, fontSize: 12),
+                      ),
+                      if (row['status'] == 'closed')
+                        Text(
+                          'Closed (local)  ${formatDateTime(row['closed_at'], includeSeconds: true)}',
+                          style: const TextStyle(color: muted, fontSize: 12),
+                        ),
+                    ],
+                    trailing: (row) => row['manageable'] == true
+                        ? Wrap(
+                            spacing: 4,
+                            children: [
+                              IconButton(
+                                tooltip: 'Modify SL/TP',
+                                onPressed: busy ? null : () => modify(row),
+                                icon: const Icon(Icons.tune),
+                              ),
+                              IconButton(
+                                tooltip: 'Close ticket',
+                                onPressed: busy ? null : () => close(row),
+                                icon: const Icon(Icons.close, color: danger),
+                              ),
+                            ],
+                          )
+                        : row['status'] == 'closed'
+                        ? const Text('Closed', style: TextStyle(color: muted))
+                        : row['status'] == 'missing'
+                        ? const Tooltip(
+                            message: 'Awaiting broker confirmation',
+                            child: Icon(Icons.sync_problem, color: muted),
+                          )
+                        : const Tooltip(
+                            message: 'Manual/external positions are read-only',
+                            child: Icon(Icons.lock_outline, color: muted),
+                          ),
+                  ),
+          ),
+        ],
       );
     },
   );
@@ -7080,11 +7220,13 @@ class Records extends StatelessWidget {
     super.key,
     required this.data,
     this.trailing,
+    this.additionalDetails,
     this.empty = 'No records.',
     this.padding = const EdgeInsets.all(28),
   });
   final dynamic data;
   final Widget Function(Map<String, dynamic>)? trailing;
+  final List<Widget> Function(Map<String, dynamic>)? additionalDetails;
   final String empty;
   final EdgeInsets padding;
   @override
@@ -7151,6 +7293,7 @@ class Records extends StatelessWidget {
                           '${label(entry.key)}  ${display(entry.value)}',
                           style: const TextStyle(color: muted, fontSize: 12),
                         ),
+                      ...?additionalDetails?.call(row),
                     ],
                   ),
                 ),
@@ -7353,6 +7496,26 @@ Color valueColor(dynamic value) {
   return blue;
 }
 
+String botStatusLabel(Map<String, dynamic> bot) {
+  final status = '${bot['status'] ?? 'stopped'}'.toLowerCase();
+  if (status == 'paused') {
+    if (bot['pause_reason'] == 'loss_cooldown') return 'LOSS COOLDOWN';
+    if (bot['pause_reason'] == 'loss_lock') return 'LOSS LIMIT PAUSED';
+    if (bot['pause_reason'] == 'schedule') return 'SCHEDULE PAUSED';
+  }
+  return status.toUpperCase();
+}
+
+String botDiagnosticLabel(Map<String, dynamic> bot) {
+  final diagnostic = mapOf(bot['diagnostic_12h']);
+  final scans = (diagnostic['scans'] as num?)?.toInt() ?? 0;
+  if (scans == 0) return 'No scans in last 12h';
+  final reason = diagnostic['dominant_rejection_reason']?.toString();
+  if (reason == null || reason.isEmpty) return '$scans scans in last 12h';
+  final count = (diagnostic['dominant_rejection_count'] as num?)?.toInt() ?? 0;
+  return '12h: ${reason.replaceAll('_', ' ')} ($count/$scans)';
+}
+
 String formatTimestamp(dynamic value) {
   final parsed = DateTime.tryParse(value?.toString() ?? '');
   if (parsed == null) return 'NEVER';
@@ -7361,13 +7524,14 @@ String formatTimestamp(dynamic value) {
   return '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
 }
 
-String formatDateTime(dynamic value) {
+String formatDateTime(dynamic value, {bool includeSeconds = false}) {
   final parsed = DateTime.tryParse(value?.toString() ?? '');
   if (parsed == null) return 'Date unavailable';
   final local = parsed.toLocal();
   String two(int part) => part.toString().padLeft(2, '0');
   return '${local.year}-${two(local.month)}-${two(local.day)}  '
-      '${two(local.hour)}:${two(local.minute)}';
+      '${two(local.hour)}:${two(local.minute)}'
+      '${includeSeconds ? ':${two(local.second)}' : ''}';
 }
 
 Map<String, dynamic> mapOf(dynamic value) =>

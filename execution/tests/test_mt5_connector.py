@@ -2,7 +2,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
@@ -14,9 +14,67 @@ from execution.connectors.mt5 import (
     _MT5Proxy,
     _adjust_stops_to_broker_minimum,
 )
-from execution.models import BrokerPosition, Decision, Execution, ExecutionAttempt, Signal
+from execution.models import BrokerPosition, Decision, Execution, ExecutionAttempt, Order, Signal
 from execution.services.live_risk import PreTradeRiskResult, RiskRejected
 from execution.services.orchestrator import create_order_from_decision
+
+
+class AccountCurrencyNotionalTests(SimpleTestCase):
+    @patch("execution.connectors.mt5.mt5")
+    def test_rounded_zero_crypto_probe_scales_back_to_actual_volume(self, api):
+        api.ORDER_TYPE_BUY = 0
+        api.ORDER_TYPE_SELL = 1
+
+        def broker_profit(side, symbol, volume, entry, close):
+            pnl = Decimal(str(volume)) * (Decimal(str(close)) - Decimal(str(entry)))
+            return float(pnl.quantize(Decimal(".01"))) * (1 if side == 0 else -1)
+
+        api.order_calc_profit.side_effect = broker_profit
+        specs = SimpleNamespace(trade_tick_size=.01, volume_max=2000)
+        for side in ("buy", "sell"):
+            with self.subTest(side=side):
+                api.order_calc_profit.reset_mock()
+                result = MT5Connector()._account_currency_notional(side, "ETHUSDm", Decimal(".1"), Decimal("2706.55"), specs)
+                self.assertEqual(result, Decimal("270.655"))
+                self.assertEqual([call.args[2] for call in api.order_calc_profit.call_args_list], [.1, 1.0])
+                self.assertTrue(all(call.args[3:] == (2706.55, 2706.56) for call in api.order_calc_profit.call_args_list))
+        api.order_send.assert_not_called()
+        api.order_check.assert_not_called()
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_nonzero_account_currency_conversion_is_unchanged(self, api):
+        api.order_calc_profit.return_value = .02
+        result = MT5Connector()._account_currency_notional(
+            "buy", "GBPJPY", Decimal(".03"), Decimal("209.022"),
+            SimpleNamespace(trade_tick_size=.001, volume_max=100),
+        )
+        self.assertEqual(result, Decimal("4180.44"))
+        api.order_calc_profit.assert_called_once()
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_persistent_zero_fails_closed_at_broker_volume_limit(self, api):
+        api.order_calc_profit.return_value = 0
+        with self.assertRaisesRegex(ConnectorError, "zero account-currency"):
+            MT5Connector()._account_currency_notional(
+                "buy", "ETHUSDm", Decimal(".1"), 2700,
+                SimpleNamespace(trade_tick_size=.01, volume_max=.5),
+            )
+        self.assertEqual([call.args[2] for call in api.order_calc_profit.call_args_list], [.1, .5])
+        api.order_send.assert_not_called()
+
+    @patch("execution.connectors.mt5.mt5")
+    def test_unavailable_or_invalid_profit_never_bypasses_notional_guard(self, api):
+        for result in (None, float("nan"), float("inf")):
+            with self.subTest(result=result):
+                api.order_calc_profit.return_value = result
+                api.order_calc_profit.reset_mock()
+                with self.assertRaises(ConnectorError):
+                    MT5Connector()._account_currency_notional(
+                        "buy", "ETHUSDm", Decimal(".1"), 2700,
+                        SimpleNamespace(trade_tick_size=.01, volume_max=2000),
+                    )
+                api.order_calc_profit.assert_called_once()
+        api.order_send.assert_not_called()
 
 
 class MT5ConnectorTest(TestCase):
@@ -56,6 +114,26 @@ class MT5ConnectorTest(TestCase):
             params={"sl": "1.0900", "tp": "1.1200"},
         )
         self.order, _ = create_order_from_decision(decision, self.account, "0.04")
+
+    def test_close_comments_are_broker_safe_and_unique_across_retries(self):
+        orders = [
+            Order.objects.create(
+                bot=self.bot, broker_account=self.account,
+                client_order_id=f"close:tp1|56bd7f8740daebdb5aa8|retry:{retry}",
+                intent="exit", symbol="EURUSD", side="sell", qty=Decimal("0.01"),
+            )
+            for retry in (1, 2)
+        ]
+        comments = [MT5Connector._order_comment(order, closing=True) for order in orders]
+        self.assertNotEqual(*comments)
+        for order, comment in zip(orders, comments):
+            self.assertEqual(comment, f"ezc:{order.pk}")
+            self.assertLessEqual(len(comment), 31)
+            self.assertEqual(MT5Connector._order_from_comment(self.account, comment).pk, order.pk)
+        # Old truncated retry comments cannot be attributed to one order.
+        self.assertIsNone(MT5Connector._order_from_comment(
+            self.account, "ezc:close:tp1|56bd7f8740daebdb5",
+        ))
 
     def _risk_result(self):
         return PreTradeRiskResult(
@@ -150,6 +228,39 @@ class MT5ConnectorTest(TestCase):
             connector.place_order(self.order)
 
         api.order_send.assert_called_once()
+
+    @patch("execution.connectors.mt5.mt5")
+    @patch("execution.services.live_risk.enforce_pretrade_risk")
+    @override_settings(MAX_ORDER_NOTIONAL=Decimal("100"), MAX_ORDER_LOT=Decimal(".1"))
+    def test_scaled_notional_probe_still_enforces_cap_without_resizing_order(self, risk, api):
+        self._configure_api(api)
+        self.order.symbol = "ETHUSDm"
+        self.order.qty = self.order.remaining_qty = Decimal(".1")
+        self.order.sl, self.order.tp = Decimal(2600), Decimal(2800)
+        self.order.save()
+        api.symbol_info_tick.return_value = SimpleNamespace(bid=2705.55, ask=2706.55)
+        api.symbol_info.return_value = SimpleNamespace(
+            point=.01, trade_tick_size=.01, digits=2, trade_contract_size=1,
+            volume_min=.1, volume_max=2000, volume_step=.01, filling_mode=0,
+            trade_stops_level=0, stops_level=0,
+        )
+        api.order_calc_profit.side_effect = [0.0, .01]
+        risk.return_value = PreTradeRiskResult(**{
+            **self._risk_result().__dict__, "volume": Decimal(".1"),
+            "entry_price": Decimal("2706.55"),
+        })
+        connector = MT5Connector()
+        with (
+            patch.object(connector, "_login_from_order"),
+            patch.object(connector, "_ensure_symbol"),
+            patch("execution.connectors.mt5._check_ready"),
+        ):
+            with self.assertRaisesRegex(ConnectorError, "notional 270.655.*exceeds max limit 100"):
+                connector.place_order(self.order)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.qty, Decimal(".1"))
+        self.assertEqual(self.order.status, "error")
+        api.order_send.assert_not_called()
 
     def _configure_api(self, api):
         api.TRADE_RETCODE_DONE = 10009
@@ -578,6 +689,10 @@ class MT5ConnectorTest(TestCase):
             connector.place_order(self.order)
 
         api.order_send.assert_called_once()
+        expected_comment = f"ezc:{self.order.pk}"
+        self.assertEqual(api.order_check.call_args.args[0]["comment"], expected_comment)
+        self.assertEqual(api.order_send.call_args.args[0]["comment"], expected_comment)
+        self.assertLessEqual(len(expected_comment), 31)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, "filled")
         execution = Execution.objects.get(order=self.order)

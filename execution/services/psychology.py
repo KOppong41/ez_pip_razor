@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -191,12 +192,14 @@ def update_bot_after_realized_pnl(order, realized_pnl: Decimal) -> None:
     for v in (global_cd, bot_cd):
         if v and v > 0:
             effective_cd = max(effective_cd, v)
-    if effective_cd <= 0:
-        # No sensible cool-down available; keep streak stats but don't auto-pause.
-        effective_cd = 0
+    _record_loss_streak(bot.pk, Decimal(str(realized_pnl)), effective_max, effective_cd)
 
-    # Normalize to Decimal for safe comparisons
-    realized_pnl = Decimal(str(realized_pnl))
+
+@transaction.atomic
+def _record_loss_streak(bot_id, realized_pnl, effective_max, effective_cd):
+    from bots.models import Bot
+
+    bot = Bot.objects.select_for_update().get(pk=bot_id)
 
     # Update streak: increment on loss, reset on win; breakeven leaves it unchanged.
     streak = getattr(bot, "current_loss_streak", 0) or 0
@@ -209,13 +212,28 @@ def update_bot_after_realized_pnl(order, realized_pnl: Decimal) -> None:
 
     update_fields = ["current_loss_streak"]
     # Auto-pause when streak exceeded. Risk ownership supersedes schedule ownership.
-    if streak >= effective_max and effective_cd > 0:
+    if (
+        streak >= effective_max
+        and (bot.status == "active" or bot.schedule_paused)
+        and not bot.kill_switch_triggered_at
+    ):
         if hasattr(bot, "schedule_paused"):
             from execution.services.bot_schedule import set_bot_status
             set_bot_status(bot, "paused")
         bot.status = "paused"
-        bot.paused_until = timezone.now() + timezone.timedelta(minutes=effective_cd)
-        update_fields.extend(["status", "paused_until"])
+        bot.pause_reason = "loss_cooldown" if effective_cd > 0 else "loss_lock"
+        bot.paused_until = (
+            timezone.now() + timezone.timedelta(minutes=effective_cd)
+            if effective_cd > 0 else None
+        )
+        update_fields.extend(["status", "pause_reason", "paused_until"])
+        params = dict(bot.scalper_params or {})
+        if effective_cd > 0:
+            params["_loss_pause_owner"] = {"until": bot.paused_until.isoformat()}
+        else:
+            params.pop("_loss_pause_owner", None)
+        bot.scalper_params = params
+        update_fields.append("scalper_params")
 
     bot.save(update_fields=update_fields)
 
