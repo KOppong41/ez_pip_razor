@@ -78,6 +78,7 @@ def _position_dict(position: BrokerPosition) -> dict:
         "floating_pnl": position.profit,
         "swap": position.swap,
         "opened_at": position.opened_at,
+        "closed_at": position.closed_at,
         "strategy": position.strategy_name,
         "manageable": position.is_manageable,
         "status": position.status,

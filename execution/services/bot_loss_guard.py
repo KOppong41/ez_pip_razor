@@ -44,11 +44,11 @@ def latch_bot_losses(account, account_info, broker_positions):
                 continue
             new_trigger = bot.kill_switch_triggered_at is None
             bot.kill_switch_triggered_at = bot.kill_switch_triggered_at or timezone.now()
-            bot.status, bot.schedule_paused = "stopped", False
+            bot.status, bot.schedule_paused, bot.pause_reason = "stopped", False, ""
             # Emergency state must not depend on unrelated model validation
             # after an operator has tightened an account limit.
             Bot.objects.filter(pk=bot.pk).update(kill_switch_triggered_at=bot.kill_switch_triggered_at,
-                                                status="stopped", schedule_paused=False)
+                                                status="stopped", schedule_paused=False, pause_reason="")
             for position, raw in fresh:
                 position.volume = _finite(raw.volume)
                 position.profit = _finite(raw.profit)

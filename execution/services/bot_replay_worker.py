@@ -254,7 +254,7 @@ def replay(payload):
                                            account_ref="replay", is_active=True, is_verified=True, timezone=snap["broker_timezone"])
     profile = ScalperProfile.objects.create(slug="replay-snapshot", name="Replay snapshot", config=snap["profile"])
     values = model_values(Bot, snap["bot"])
-    values.update(status="active", auto_trade=True, paused_until=None, current_loss_streak=0,
+    values.update(status="active", pause_reason="", auto_trade=True, paused_until=None, current_loss_streak=0,
                   allocation_start_pnl=ZERO, allocation_started_at=bars[dataset["first_index"]]["time"])
     for key in ("last_htf_bias", "flip_history", "_allocation_guard"):
         values["scalper_params"].pop(key, None)

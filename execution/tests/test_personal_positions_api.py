@@ -1,7 +1,10 @@
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from brokers.models import BrokerAccount
 from execution.models import BrokerPosition
@@ -36,9 +39,16 @@ class PersonalPositionsApiTest(TestCase):
 
     def test_clear_preserves_records_and_only_hides_closed_positions_for_account(self):
         closed = self.position(1, "closed")
+        closed.opened_at = timezone.now() - timedelta(minutes=10)
+        closed.closed_at = timezone.now()
+        closed.save(update_fields=["opened_at", "closed_at"])
         opened = self.position(2, "open")
         missing = self.position(3, "missing")
         other = self.position(4, "closed", self.other_account)
+        rows = self.client.get("/api/personal/positions/").json()
+        closed_row = next(row for row in rows if row["id"] == closed.id)
+        self.assertEqual(parse_datetime(closed_row["opened_at"]), closed.opened_at)
+        self.assertEqual(parse_datetime(closed_row["closed_at"]), closed.closed_at)
         response = self.clear()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"cleared": 1})

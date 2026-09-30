@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -195,8 +196,14 @@ def update_bot_after_realized_pnl(order, realized_pnl: Decimal) -> None:
         # No sensible cool-down available; keep streak stats but don't auto-pause.
         effective_cd = 0
 
-    # Normalize to Decimal for safe comparisons
-    realized_pnl = Decimal(str(realized_pnl))
+    _record_loss_streak(bot.pk, Decimal(str(realized_pnl)), effective_max, effective_cd)
+
+
+@transaction.atomic
+def _record_loss_streak(bot_id, realized_pnl, effective_max, effective_cd):
+    from bots.models import Bot
+
+    bot = Bot.objects.select_for_update().get(pk=bot_id)
 
     # Update streak: increment on loss, reset on win; breakeven leaves it unchanged.
     streak = getattr(bot, "current_loss_streak", 0) or 0
@@ -209,13 +216,18 @@ def update_bot_after_realized_pnl(order, realized_pnl: Decimal) -> None:
 
     update_fields = ["current_loss_streak"]
     # Auto-pause when streak exceeded. Risk ownership supersedes schedule ownership.
-    if streak >= effective_max and effective_cd > 0:
+    if (
+        streak >= effective_max and effective_cd > 0
+        and (bot.status == "active" or bot.schedule_paused)
+        and not bot.kill_switch_triggered_at
+    ):
         if hasattr(bot, "schedule_paused"):
             from execution.services.bot_schedule import set_bot_status
             set_bot_status(bot, "paused")
         bot.status = "paused"
+        bot.pause_reason = "loss_cooldown"
         bot.paused_until = timezone.now() + timezone.timedelta(minutes=effective_cd)
-        update_fields.extend(["status", "paused_until"])
+        update_fields.extend(["status", "pause_reason", "paused_until"])
 
     bot.save(update_fields=update_fields)
 

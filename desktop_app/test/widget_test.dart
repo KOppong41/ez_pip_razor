@@ -9,11 +9,19 @@ class FakeApiClient extends ApiClient {
     this.markets,
     this.assetPresetState,
     this.schedulePaused = false,
+    this.pauseReason,
+    this.pausedUntil,
+    this.lossStreak = 0,
+    this.diagnostic12h,
   }) : super('http://127.0.0.1:8000');
 
   final List<Map<String, dynamic>>? markets;
   final String? assetPresetState;
   bool schedulePaused;
+  final String? pauseReason;
+  final String? pausedUntil;
+  final int lossStreak;
+  final Map<String, dynamic>? diagnostic12h;
   String? lastControlAction;
 
   @override
@@ -34,10 +42,17 @@ class FakeApiClient extends ApiClient {
           'id': 10,
           'bot_id': 'DEMO123',
           'name': 'Gold London Scalper',
-          'status': schedulePaused || lastControlAction == 'pause'
+          'status':
+              schedulePaused ||
+                  pauseReason != null ||
+                  lastControlAction == 'pause'
               ? 'paused'
               : 'stopped',
           'schedule_paused': schedulePaused,
+          'pause_reason': pauseReason,
+          'paused_until': pausedUntil,
+          'current_loss_streak': lossStreak,
+          'diagnostic_12h': diagnostic12h,
           'asset': 1,
           'asset_details': {
             'id': 1,
@@ -628,6 +643,39 @@ void main() {
     expect(client.lastControlAction, 'pause');
     expect(find.text('SCHEDULE PAUSED'), findsNothing);
     expect(find.text('PAUSED'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('loss cooldown and recent scan reason are visible on bot card', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1400, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(
+          body: BotsPage(
+            client: FakeApiClient(
+              pauseReason: 'loss_cooldown',
+              pausedUntil: '2026-09-30T10:14:00Z',
+              lossStreak: 3,
+              diagnostic12h: {
+                'scans': 12,
+                'dominant_rejection_reason': 'htf_bias_neutral',
+                'dominant_rejection_count': 8,
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('LOSS COOLDOWN'), findsOneWidget);
+    expect(find.text('Loss streak: 3'), findsOneWidget);
+    expect(find.text('12h: htf bias neutral (8/12)'), findsOneWidget);
+    expect(find.textContaining('Resumes 2026-09-30'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

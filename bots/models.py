@@ -286,6 +286,19 @@ class Bot(models.Model):
         editable=False,
         help_text="Paused by the trading schedule and eligible to resume in its next window.",
     )
+    pause_reason = models.CharField(
+        max_length=24,
+        blank=True,
+        default="",
+        editable=False,
+        choices=[
+            ("", "None"),
+            ("manual", "Manual"),
+            ("schedule", "Trading schedule"),
+            ("loss_cooldown", "Loss cooldown"),
+        ],
+        help_text="Identifies which pause is eligible for automatic resume.",
+    )
 
     default_timeframe = models.CharField(
         max_length=10,

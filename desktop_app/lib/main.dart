@@ -1466,12 +1466,7 @@ class _BotStatusRow extends StatelessWidget {
               ],
             ),
           ),
-          _StatusPill(
-            text: status == 'paused' && row['schedule_paused'] == true
-                ? 'SCHEDULE PAUSED'
-                : status.toUpperCase(),
-            color: color,
-          ),
+          _StatusPill(text: botStatusLabel(row), color: color),
         ],
       ),
     );
@@ -4799,7 +4794,8 @@ class _BotEditorDialogState extends State<_BotEditorDialog> {
                     ),
                     decoration: const InputDecoration(
                       labelText: 'Allocation amount',
-                      helperText: '0 uses equity for sizing and disables allocation-based limits',
+                      helperText:
+                          '0 uses equity for sizing and disables allocation-based limits',
                     ),
                   ),
                   TextField(
@@ -5065,6 +5061,8 @@ class _BotCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final status = '${bot['status'] ?? 'stopped'}'.toLowerCase();
     final schedulePaused = status == 'paused' && bot['schedule_paused'] == true;
+    final cooldownPaused =
+        status == 'paused' && bot['pause_reason'] == 'loss_cooldown';
     final statusAccent = status == 'active'
         ? green
         : status == 'paused'
@@ -5120,14 +5118,17 @@ class _BotCard extends StatelessWidget {
                   children: [
                     _PulseDot(color: statusAccent, size: 6),
                     const SizedBox(width: 7),
-                    Text(
-                      schedulePaused ? 'SCHEDULE PAUSED' : status.toUpperCase(),
-                      style: TextStyle(
-                        color: statusAccent,
-                        fontFamily: 'Consolas',
-                        fontSize: 9,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.8,
+                    Flexible(
+                      child: Text(
+                        botStatusLabel(bot),
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: statusAccent,
+                          fontFamily: 'Consolas',
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.8,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 9),
@@ -5151,6 +5152,29 @@ class _BotCard extends StatelessWidget {
                     style: TextStyle(color: muted, fontSize: 10),
                   ),
                 ],
+                if (cooldownPaused) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    'Resumes ${formatDateTime(bot['paused_until'])}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+                if (asDouble(bot['current_loss_streak']) > 0) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    'Loss streak: ${bot['current_loss_streak']}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
+                const SizedBox(height: 5),
+                Tooltip(
+                  message: botDiagnosticLabel(bot),
+                  child: Text(
+                    botDiagnosticLabel(bot),
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ),
               ],
             ),
           ),
@@ -5927,6 +5951,17 @@ class _PositionsPageState extends State<PositionsPage> {
                 : Records(
                     data: snapshot.data,
                     empty: 'No positions to display.',
+                    additionalDetails: (row) => [
+                      Text(
+                        'Opened (local)  ${formatDateTime(row['opened_at'], includeSeconds: true)}',
+                        style: const TextStyle(color: muted, fontSize: 12),
+                      ),
+                      if (row['status'] == 'closed')
+                        Text(
+                          'Closed (local)  ${formatDateTime(row['closed_at'], includeSeconds: true)}',
+                          style: const TextStyle(color: muted, fontSize: 12),
+                        ),
+                    ],
                     trailing: (row) => row['manageable'] == true
                         ? Wrap(
                             spacing: 4,
@@ -7176,11 +7211,13 @@ class Records extends StatelessWidget {
     super.key,
     required this.data,
     this.trailing,
+    this.additionalDetails,
     this.empty = 'No records.',
     this.padding = const EdgeInsets.all(28),
   });
   final dynamic data;
   final Widget Function(Map<String, dynamic>)? trailing;
+  final List<Widget> Function(Map<String, dynamic>)? additionalDetails;
   final String empty;
   final EdgeInsets padding;
   @override
@@ -7247,6 +7284,7 @@ class Records extends StatelessWidget {
                           '${label(entry.key)}  ${display(entry.value)}',
                           style: const TextStyle(color: muted, fontSize: 12),
                         ),
+                      ...?additionalDetails?.call(row),
                     ],
                   ),
                 ),
@@ -7449,6 +7487,25 @@ Color valueColor(dynamic value) {
   return blue;
 }
 
+String botStatusLabel(Map<String, dynamic> bot) {
+  final status = '${bot['status'] ?? 'stopped'}'.toLowerCase();
+  if (status == 'paused') {
+    if (bot['pause_reason'] == 'loss_cooldown') return 'LOSS COOLDOWN';
+    if (bot['schedule_paused'] == true) return 'SCHEDULE PAUSED';
+  }
+  return status.toUpperCase();
+}
+
+String botDiagnosticLabel(Map<String, dynamic> bot) {
+  final diagnostic = mapOf(bot['diagnostic_12h']);
+  final scans = (diagnostic['scans'] as num?)?.toInt() ?? 0;
+  if (scans == 0) return 'No scans in last 12h';
+  final reason = diagnostic['dominant_rejection_reason']?.toString();
+  if (reason == null || reason.isEmpty) return '$scans scans in last 12h';
+  final count = (diagnostic['dominant_rejection_count'] as num?)?.toInt() ?? 0;
+  return '12h: ${reason.replaceAll('_', ' ')} ($count/$scans)';
+}
+
 String formatTimestamp(dynamic value) {
   final parsed = DateTime.tryParse(value?.toString() ?? '');
   if (parsed == null) return 'NEVER';
@@ -7457,13 +7514,14 @@ String formatTimestamp(dynamic value) {
   return '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
 }
 
-String formatDateTime(dynamic value) {
+String formatDateTime(dynamic value, {bool includeSeconds = false}) {
   final parsed = DateTime.tryParse(value?.toString() ?? '');
   if (parsed == null) return 'Date unavailable';
   final local = parsed.toLocal();
   String two(int part) => part.toString().padLeft(2, '0');
   return '${local.year}-${two(local.month)}-${two(local.day)}  '
-      '${two(local.hour)}:${two(local.minute)}';
+      '${two(local.hour)}:${two(local.minute)}'
+      '${includeSeconds ? ':${two(local.second)}' : ''}';
 }
 
 Map<String, dynamic> mapOf(dynamic value) =>

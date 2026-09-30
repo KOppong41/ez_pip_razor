@@ -761,6 +761,8 @@ class BotAdmin(admin.ModelAdmin):
         new_bot.name = f"{bot.name} (Copy)"
         new_bot.status = "stopped"
         new_bot.schedule_paused = False
+        new_bot.pause_reason = ""
+        new_bot.paused_until = None
         new_bot.scalper_params = dict(new_bot.scalper_params or {})
         new_bot.scalper_params.pop("_market_guard", None)
         new_bot.save()

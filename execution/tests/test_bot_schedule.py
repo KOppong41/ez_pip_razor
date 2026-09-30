@@ -9,7 +9,7 @@ from django.test import TestCase
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
-from execution.models import MT5ConnectionState, RiskPolicy
+from execution.models import MT5ConnectionState, RiskPolicy, ScalperRunLog
 from execution.services.bot_schedule import reconcile_trading_schedules, set_bot_status
 from execution.services.market_hours import MarketStatus
 from execution.services.psychology import update_bot_after_realized_pnl
@@ -130,7 +130,64 @@ class BotScheduleTests(TestCase):
         ):
             update_bot_after_realized_pnl(SimpleNamespace(bot=self.bot), Decimal("-1"))
         self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.pause_reason, "loss_cooldown")
         reconcile_trading_schedules(now=utc(day=23))
+        self.assertEqual(self.state(), ("active", False))
+        self.assertEqual(self.bot.pause_reason, "")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 0)
+
+    def test_loss_cooldown_waits_for_expiry_and_preserves_manual_pause(self):
+        until = utc(day=22, hour=13)
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown", paused_until=until,
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=12))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+        set_bot_status(self.bot, "paused")
+        self.assertEqual(self.bot.pause_reason, "manual")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=14))["resumed"], 0)
+        self.assertEqual(self.state(), ("paused", False))
+
+    def test_late_loss_update_cannot_take_over_manual_pause(self):
+        stale_bot = Bot.objects.get(pk=self.bot.pk)
+        stale_bot.loss_streak_autopause_enabled = True
+        stale_bot.max_loss_streak_before_pause = 1
+        stale_bot.loss_streak_cooldown_min = 60
+        stale_bot.save(update_fields=[
+            "loss_streak_autopause_enabled", "max_loss_streak_before_pause",
+            "loss_streak_cooldown_min",
+        ])
+        set_bot_status(self.bot, "paused")
+        with patch("execution.services.psychology._get_settings", return_value=None):
+            update_bot_after_realized_pnl(SimpleNamespace(bot=stale_bot), Decimal("-1"))
+        self.assertEqual(self.state(), ("paused", False))
+        self.assertEqual(self.bot.pause_reason, "manual")
+        self.assertIsNone(self.bot.paused_until)
+        self.assertEqual(self.bot.current_loss_streak, 1)
+
+    def test_loss_cooldown_transfers_to_schedule_outside_window(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown", paused_until=utc(hour=18),
+        )
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=19))["paused"], 1)
+        self.assertEqual(self.state(), ("paused", True))
+        self.assertEqual(self.bot.pause_reason, "schedule")
+        self.assertEqual(reconcile_trading_schedules(now=utc(day=23))["resumed"], 1)
+        self.assertEqual(self.state(), ("active", False))
+
+    def test_loss_cooldown_cannot_resume_through_disabled_account_or_kill_switch(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown", paused_until=utc(hour=11),
+        )
+        self.policy.entries_enabled = False
+        self.policy.save(update_fields=["entries_enabled"])
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=12))["resumed"], 0)
+        self.policy.entries_enabled = True
+        self.policy.save(update_fields=["entries_enabled"])
+        Bot.objects.filter(pk=self.bot.pk).update(kill_switch_triggered_at=utc(hour=11))
+        self.assertEqual(reconcile_trading_schedules(now=utc(hour=12))["resumed"], 0)
         self.assertEqual(self.state(), ("paused", False))
 
     def test_app_exit_cancels_scheduled_and_legacy_market_resume(self):
@@ -238,6 +295,35 @@ class BotScheduleTests(TestCase):
         response = self.client.patch(f"/api/bots/{self.bot.pk}/", {"schedule_paused": False}, content_type="application/json")
         self.assertEqual(response.status_code, 200, response.content)
         self.assertTrue(response.json()["schedule_paused"])
+
+    def test_bot_api_exposes_cooldown_and_dominant_recent_rejection(self):
+        Bot.objects.filter(pk=self.bot.pk).update(
+            status="paused", pause_reason="loss_cooldown",
+            paused_until=utc(day=23), current_loss_streak=3,
+        )
+        for reason in ("htf_bias_neutral", "htf_bias_neutral", "low_volume"):
+            ScalperRunLog.objects.create(bot=self.bot, summary={"rejection_reason": reason})
+        old = ScalperRunLog.objects.create(bot=self.bot, summary={"rejection_reason": "old_reason"})
+        from django.utils import timezone
+        ScalperRunLog.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(hours=13))
+        response = self.client.get(f"/api/bots/{self.bot.pk}/")
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["pause_reason"], "loss_cooldown")
+        self.assertEqual(payload["current_loss_streak"], 3)
+        self.assertIsNotNone(payload["paused_until"])
+        self.assertEqual(payload["diagnostic_12h"], {
+            "scans": 3, "dominant_rejection_reason": "htf_bias_neutral",
+            "dominant_rejection_count": 2,
+        })
+        response = self.client.patch(
+            f"/api/bots/{self.bot.pk}/",
+            {"pause_reason": "manual", "current_loss_streak": 0, "paused_until": None},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["pause_reason"], "loss_cooldown")
+        self.assertEqual(response.json()["current_loss_streak"], 3)
 
     def test_settings_save_cannot_overwrite_a_concurrent_schedule_pause(self):
         from bots.serializers import BotSerializer

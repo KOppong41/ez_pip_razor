@@ -2,6 +2,7 @@ from copy import deepcopy
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.db.models import Count
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -29,6 +30,7 @@ class BotSerializer(serializers.ModelSerializer):
     asset_details = serializers.SerializerMethodField()
     broker_account_details = serializers.SerializerMethodField()
     asset_preset_state = serializers.SerializerMethodField()
+    diagnostic_12h = serializers.SerializerMethodField()
     enabled_strategies = serializers.ListField(
         child=serializers.ChoiceField(choices=STRATEGY_CHOICES),
         required=False,
@@ -55,6 +57,10 @@ class BotSerializer(serializers.ModelSerializer):
             "name",
             "status",
             "schedule_paused",
+            "pause_reason",
+            "paused_until",
+            "current_loss_streak",
+            "diagnostic_12h",
             "asset",
             "asset_details",
             "broker_account",
@@ -110,6 +116,10 @@ class BotSerializer(serializers.ModelSerializer):
             "bot_id",
             "status",
             "schedule_paused",
+            "pause_reason",
+            "paused_until",
+            "current_loss_streak",
+            "diagnostic_12h",
             "asset_preset_version_applied",
             "asset_preset_applied_at",
             "asset_preset_state",
@@ -156,6 +166,27 @@ class BotSerializer(serializers.ModelSerializer):
 
     def get_asset_preset_state(self, obj):
         return asset_recommendation_state(obj)
+
+    def get_diagnostic_12h(self, obj):
+        from execution.models import ScalperRunLog
+
+        logs = ScalperRunLog.objects.filter(
+            bot_id=obj.pk, created_at__gte=timezone.now() - timezone.timedelta(hours=12),
+        )
+        total = logs.count()
+        top = (
+            logs.exclude(summary__rejection_reason__isnull=True)
+            .exclude(summary__rejection_reason="")
+            .values("summary__rejection_reason")
+            .annotate(count=Count("id"))
+            .order_by("-count", "summary__rejection_reason")
+            .first()
+        )
+        return {
+            "scans": total,
+            "dominant_rejection_reason": top["summary__rejection_reason"] if top else None,
+            "dominant_rejection_count": top["count"] if top else 0,
+        }
 
     @staticmethod
     def _account_risk_limits(account):

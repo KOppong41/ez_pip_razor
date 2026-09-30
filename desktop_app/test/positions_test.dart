@@ -6,7 +6,21 @@ import 'package:flutter_test/flutter_test.dart';
 class PositionsClient extends ApiClient {
   PositionsClient() : super('http://127.0.0.1');
   final rows = <Map<String, dynamic>>[
-    {'id': 1, 'symbol': 'CLOSEDUSD', 'status': 'closed', 'manageable': false},
+    {
+      'id': 1,
+      'broker_position_ticket': 3301519613,
+      'ownership': 'ez_trade',
+      'symbol': 'CLOSEDUSD',
+      'side': 'sell',
+      'volume': 0,
+      'entry': 2668.35,
+      'current_price': 2673.25,
+      'sl': 2673.25,
+      'opened_at': '2026-09-29T15:04:03Z',
+      'closed_at': '2026-09-29T15:12:45Z',
+      'status': 'closed',
+      'manageable': false,
+    },
     {'id': 2, 'symbol': 'OPENUSD', 'status': 'open', 'manageable': true},
     {'id': 3, 'symbol': 'MISSINGUSD', 'status': 'missing', 'manageable': false},
   ];
@@ -53,6 +67,19 @@ void main() {
       final client = PositionsClient();
       await showPositions(tester, client);
       expect(find.text('Closed'), findsOneWidget);
+      expect(
+        find.text(
+          'Opened (local)  ${formatDateTime(client.rows.first['opened_at'], includeSeconds: true)}',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Closed (local)  ${formatDateTime(client.rows.first['closed_at'], includeSeconds: true)}',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Opened (local)  Date unavailable'), findsNWidgets(2));
       expect(find.byTooltip('Close ticket'), findsOneWidget);
       expect(find.byTooltip('Awaiting broker confirmation'), findsOneWidget);
       await tester.tap(find.text('Clear closed'));
