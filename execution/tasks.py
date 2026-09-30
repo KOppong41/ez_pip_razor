@@ -45,6 +45,7 @@ from execution.services.daily_risk import (
 from execution.services.ai_strategy_selector import effective_spread_allowance, select_ai_strategies
 from execution.services.engine import run_engine_on_candles
 from execution.services.fanout import fanout_orders
+from execution.services.exposure import has_submission_evidence
 from execution.services.marketdata import get_candles_for_account
 from execution.services.economic_news import refresh_economic_calendar
 from execution.services.monitor import (
@@ -1429,7 +1430,12 @@ def _dispatch_scalper_candidate(decision: Decision, strategy_name: str) -> dict:
     rejection_reason = None
     try:
         for order, _created in fanout_orders(decision, master_qty=None):
-            if order.status != "new" or order.submitted_at is not None:
+            if (
+                order.status != "new"
+                or has_submission_evidence(order)
+                or order.execution_queued_at is not None
+                or order.mt5_worker_started_at is not None
+            ):
                 rejection_reason = "order_not_dispatchable"
                 continue
             constraints = get_broker_symbol_constraints(
@@ -1468,6 +1474,22 @@ def _dispatch_scalper_candidate(decision: Decision, strategy_name: str) -> dict:
             )
             if not guard.ok:
                 rejection_reason = guard.reason
+                # The guard runs after fanout creates an order. Resolve a local
+                # rejection now so it cannot reserve an entry slot until stale
+                # cleanup runs. Never reject a concurrently queued/submitted order.
+                with transaction.atomic():
+                    current = Order.objects.select_for_update().get(pk=order.pk)
+                    if (
+                        current.status == "new"
+                        and not has_submission_evidence(current)
+                        and current.execution_queued_at is None
+                        and current.mt5_worker_started_at is None
+                    ):
+                        update_order_status(
+                            current,
+                            "rejected",
+                            error_msg=f"Local scalper dispatch guard rejected: {guard.reason}",
+                        )
                 log_journal_event(
                     "order.dispatch_error",
                     severity="warning",
