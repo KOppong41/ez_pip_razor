@@ -1,17 +1,24 @@
 from copy import deepcopy
 from decimal import Decimal
+import hashlib
+from importlib import import_module
+import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.apps import apps
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase
 
 from bots.models import Asset, Bot
-from bots.services import asset_recommendation_state, recommended_bot_defaults
+from bots.services import apply_recommendations_to_bot, asset_recommendation_state, recommended_bot_defaults
 from brokers.models import BrokerAccount
 from core.asset_trading_presets import (
     ASSET_CATALOG,
     ASSET_PRESET_VERSION,
     ASSET_TRADING_PRESETS,
+    recommended_config_for,
 )
 from execution.models import RiskPolicy
 from execution.services.brokers import BrokerSymbolConstraints
@@ -28,6 +35,97 @@ from execution.services.strategy_registry import (
 
 
 class AssetPresetCatalogTests(TestCase):
+    def test_reference_gold_and_btc_presets_are_unchanged(self):
+        for symbol, expected in {
+            "XAUUSDm": "2765bcd712eedc4c51bebaf1fe5d97b5680f259c1d3a387951e05f54908d8aa1",
+            "BTCUSDm": "92e0770618463c92ff86ca232f640d95c4ca696c5cb0043277587e483001f3d3",
+        }.items():
+            with self.subTest(symbol=symbol):
+                digest = hashlib.sha256(json.dumps(
+                    ASSET_TRADING_PRESETS[symbol], sort_keys=True, separators=(",", ":"),
+                ).encode()).hexdigest()
+                self.assertEqual(digest, expected)
+
+    def test_new_assets_inherit_independent_category_recommendations(self):
+        for category, symbol in (
+            ("forex", "SEKUSDm"), ("commodities", "PLATINUMm"),
+            ("indices", "JPN225m"), ("crypto", "SOLUSDm"),
+        ):
+            with self.subTest(category=category):
+                asset = Asset.objects.create(symbol=symbol, category=category)
+                preset = asset.recommended_config
+                self.assertEqual(asset.recommended_config_version, ASSET_PRESET_VERSION)
+                self.assertEqual(preset["preset_origin"], "category")
+                self.assertEqual(preset["engine_mode"], "scalper")
+                self.assertEqual(preset["position_sizing_mode"], "risk")
+                self.assertEqual(preset["strategy_overrides"]["momentum_ignition"]["min_relative_volume"], 1.0)
+                self.assertEqual(preset["strategy_overrides"]["breakout_retest"]["require_retest_rejection"], True)
+                self.assertEqual(preset["trading_schedule"]["enabled"], category != "crypto")
+                self.assertEqual(preset, recommended_config_for(symbol, category))
+                bot = Bot(name=f"{symbol} bot", asset=asset)
+                apply_recommendations_to_bot(bot, save=False)
+                self.assertIsNotNone(build_scalper_config(bot).resolve_symbol(symbol))
+                self.assertEqual(build_strategy_config_for_bot("momentum_ignition", bot).min_relative_volume, 1)
+                self.assertTrue(build_strategy_config_for_bot("breakout_retest", bot).require_retest_rejection)
+        first = Asset.objects.get(symbol="SEKUSDm")
+        second = Asset.objects.create(symbol="NOKUSDm", category="forex")
+        first.recommended_config["strategy_overrides"]["momentum_ignition"]["min_relative_volume"] = 99
+        self.assertEqual(second.recommended_config["strategy_overrides"]["momentum_ignition"]["min_relative_volume"], 1.0)
+
+    def test_explicit_asset_recommendation_is_not_replaced(self):
+        asset = Asset.objects.create(
+            symbol="CUSTOMm", category="indices",
+            recommended_config={"custom": True}, recommended_config_version=42,
+        )
+        self.assertEqual(asset.recommended_config, {"custom": True})
+        self.assertEqual(asset.recommended_config_version, 42)
+
+    def test_identical_version_bump_keeps_customized_bot_state(self):
+        asset = Asset.objects.get(symbol="BTCUSDm")
+        bot = Bot(
+            name="Custom BTC", asset=asset,
+            asset_preset_version_applied=asset.recommended_config_version - 1,
+            asset_recommended_config_applied=deepcopy(asset.recommended_config),
+            asset_strategy_overrides_applied=deepcopy(asset.recommended_config["strategy_overrides"]),
+            **recommended_bot_defaults(asset),
+        )
+        bot.risk_per_trade_pct = Decimal("0.5")
+        self.assertEqual(asset_recommendation_state(bot), "customized")
+
+    def test_v5_upgrade_preserves_custom_recommendations_and_bot_snapshot(self):
+        migration = import_module("bots.migrations.0059_category_quality_presets")
+        self.assertEqual(set(migration.V5_HASHES), set(ASSET_TRADING_PRESETS))
+        quality_keys = {
+            "momentum_ignition": ("min_relative_volume", "volume_lookback", "require_confirmation"),
+            "breakout_retest": ("min_relative_volume", "volume_lookback", "require_retest_rejection"),
+        }
+        def v5_copy(symbol):
+            old = deepcopy(ASSET_TRADING_PRESETS[symbol])
+            for strategy, keys in quality_keys.items():
+                for key in keys:
+                    old["strategy_overrides"][strategy].pop(key)
+            return old
+
+        eur = Asset.objects.get(symbol="EURUSDm")
+        gbp = Asset.objects.get(symbol="GBPJPYm")
+        old_eur = v5_copy("EURUSDm")
+        custom_gbp = v5_copy("GBPJPYm")
+        custom_gbp["risk_per_trade_pct"] = .13
+        Asset.objects.filter(pk=eur.pk).update(recommended_config=old_eur, recommended_config_version=5)
+        Asset.objects.filter(pk=gbp.pk).update(recommended_config=custom_gbp, recommended_config_version=5)
+        bot = Bot.objects.create(name="Frozen EUR bot", asset=eur, asset_preset_version_applied=5,
+                                 asset_recommended_config_applied=deepcopy(old_eur))
+        migration.upgrade_unchanged_recommendations(apps, SimpleNamespace(connection=connection))
+        eur.refresh_from_db()
+        gbp.refresh_from_db()
+        bot.refresh_from_db()
+        self.assertEqual(eur.recommended_config, ASSET_TRADING_PRESETS["EURUSDm"])
+        self.assertEqual(eur.recommended_config_version, 6)
+        self.assertEqual(gbp.recommended_config, custom_gbp)
+        self.assertEqual(gbp.recommended_config_version, 5)
+        self.assertEqual(bot.asset_recommended_config_applied, old_eur)
+        self.assertEqual(bot.asset_preset_version_applied, 5)
+
     def test_all_assets_have_valid_categories_strategies_and_m5(self):
         self.assertEqual(len(ASSET_CATALOG), 34)
         self.assertEqual(set(ASSET_CATALOG), set(ASSET_TRADING_PRESETS))
@@ -73,6 +171,26 @@ class AssetPresetCatalogTests(TestCase):
                 asset.symbol,
             )
 
+    def test_linked_assets_inherit_quality_without_losing_symbol_tuning(self):
+        for symbol in ("EURUSDm", "ETHUSDm", "GBPJPYm", "USOILm"):
+            with self.subTest(symbol=symbol):
+                preset = ASSET_TRADING_PRESETS[symbol]
+                overrides = preset["strategy_overrides"]
+                self.assertEqual(overrides["momentum_ignition"]["min_relative_volume"], 1.0)
+                self.assertTrue(overrides["momentum_ignition"]["require_confirmation"])
+                self.assertEqual(overrides["breakout_retest"]["min_relative_volume"], 1.0)
+                self.assertTrue(overrides["breakout_retest"]["require_retest_rejection"])
+                if symbol in {"ETHUSDm", "USOILm"}:
+                    self.assertTrue(overrides["trend_pullback"]["require_confirmation"])
+        self.assertEqual(
+            ASSET_TRADING_PRESETS["ETHUSDm"]["strategy_overrides"]["momentum_ignition"]["min_impulse_pct"],
+            .0017,
+        )
+        self.assertEqual(
+            ASSET_TRADING_PRESETS["USOILm"]["strategy_overrides"]["momentum_ignition"]["min_impulse_pct"],
+            .0012,
+        )
+
 
 class AssetPresetApiTests(TestCase):
     def setUp(self):
@@ -103,6 +221,21 @@ class AssetPresetApiTests(TestCase):
             {row["value"] for row in response.json()["scalper_strategies"]},
             set(SCALPER_STRATEGY_REGISTRY),
         )
+
+    def test_new_category_asset_flows_into_bot_without_changing_existing_bots(self):
+        asset = Asset.objects.create(symbol="SOLUSDm", category="crypto")
+        response = self.client.post(
+            "/api/bots/",
+            {"name": "New crypto", "asset": asset.pk, "broker_account": self.account.pk},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        bot = Bot.objects.get(pk=response.json()["id"])
+        self.assertEqual(bot.asset_preset_version_applied, ASSET_PRESET_VERSION)
+        self.assertFalse(bot.trading_schedule_enabled)
+        self.assertEqual(bot.asset_strategy_overrides_applied["momentum_ignition"]["min_relative_volume"], 1.0)
+        self.assertTrue(bot.asset_strategy_overrides_applied["trend_pullback"]["require_confirmation"])
+        self.assertEqual(response.json()["asset_preset_state"], "recommended")
 
     @patch("bots.views.get_broker_symbol_constraints")
     def test_fixed_lot_hint_uses_connected_broker_constraints(self, constraints):

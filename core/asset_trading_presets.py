@@ -7,7 +7,7 @@ copy stored on ``Asset.recommended_config`` so administrators can adjust it.
 from copy import deepcopy
 
 
-ASSET_PRESET_VERSION = 5
+ASSET_PRESET_VERSION = 6
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"]
 ALL_DAYS = WEEKDAYS + ["sat", "sun"]
 
@@ -247,8 +247,33 @@ ASSET_STRATEGY_OVERRIDES = {
 }
 
 
+# Shared setup-quality rules for newly recommended assets. The two reference
+# presets predate this layer and retain their proven, explicitly tested tuning.
+CATEGORY_QUALITY_OVERRIDES = {
+    category: {
+        "momentum_ignition": {
+            "min_relative_volume": 1.0,
+            "volume_lookback": 20,
+            "require_confirmation": True,
+        },
+        "breakout_retest": {
+            "min_relative_volume": 1.0,
+            "volume_lookback": 20,
+            "require_retest_rejection": True,
+        },
+        **({"trend_pullback": {"require_confirmation": True}} if category != "forex" else {}),
+    }
+    for category in ("forex", "commodities", "indices", "crypto")
+}
+
+REFERENCE_PRESET_SYMBOLS = frozenset({"XAUUSDm", "BTCUSDm"})
+
+
 def _merged_strategy_overrides(symbol, category):
     result = deepcopy(CATEGORY_STRATEGY_OVERRIDES.get(category, {}))
+    if symbol not in REFERENCE_PRESET_SYMBOLS:
+        for strategy, values in CATEGORY_QUALITY_OVERRIDES.get(category, {}).items():
+            result.setdefault(strategy, {}).update(deepcopy(values))
     for strategy, values in ASSET_STRATEGY_OVERRIDES.get(symbol, {}).items():
         result.setdefault(strategy, {}).update(deepcopy(values))
     return result
@@ -353,6 +378,28 @@ _SPECS = {
 }
 
 
+# For assets absent from the catalog, use a conservative category template.
+# Symbol-specific broker and session details can still be adjusted in admin.
+CATEGORY_FALLBACK_SPECS = {
+    "forex": dict(category="forex", strategies=["trend_pullback", "breakout_retest", "range_reversion"],
+                  risk=.25, score=.68, sl=(8, 20, "pips"), tp_r=1.5, exit_name="fixed_tp",
+                  spread=(2.0, "pips"), slippage=(.8, "pips"), interval=15, max_trades=4,
+                  schedule="ln_overlap"),
+    "commodities": dict(category="commodities", strategies=["trend_pullback", "breakout_retest", "momentum_ignition"],
+                        risk=.25, score=.68, sl=(.20, .60, "percent"), tp_r=1.8, exit_name="hybrid",
+                        spread=(.08, "percent"), slippage=(.04, "percent"), interval=15, max_trades=4,
+                        schedule="ny_metals"),
+    "indices": dict(category="indices", strategies=["trend_pullback", "breakout_retest", "momentum_ignition"],
+                    risk=.25, score=.68, sl=(.12, .35, "percent"), tp_r=1.8, exit_name="hybrid",
+                    spread=(.035, "percent"), slippage=(.018, "percent"), interval=15, max_trades=4,
+                    schedule="ny_cash"),
+    "crypto": dict(category="crypto", strategies=["trend_pullback", "breakout_retest", "momentum_ignition"],
+                   risk=.25, score=.68, sl=(.40, 1.00, "percent"), tp_r=1.8, exit_name="hybrid_crypto",
+                   spread=(.10, "percent"), slippage=(.05, "percent"), interval=15, max_trades=6,
+                   schedule="crypto"),
+}
+
+
 ASSET_CATALOG = {}
 ASSET_TRADING_PRESETS = {}
 for _symbol, _spec in _SPECS.items():
@@ -396,6 +443,14 @@ ASSET_TRADING_PRESETS["XAUUSDm"]["trading_schedule"]["windows"] = [
 ]
 
 
-def recommended_config_for(symbol):
-    """Return a caller-safe copy of the canonical preset for ``symbol``."""
-    return deepcopy(ASSET_TRADING_PRESETS.get(symbol, {}))
+def recommended_config_for(symbol, category=None):
+    """Return a symbol preset or a caller-safe category fallback."""
+    if symbol in ASSET_TRADING_PRESETS:
+        return deepcopy(ASSET_TRADING_PRESETS[symbol])
+    spec = CATEGORY_FALLBACK_SPECS.get(category)
+    if spec is None:
+        return {}
+    config = _preset(**spec)
+    config["strategy_overrides"] = _merged_strategy_overrides(symbol, category)
+    config["preset_origin"] = "category"
+    return config

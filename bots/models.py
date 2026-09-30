@@ -204,6 +204,16 @@ class Asset(models.Model):
     class Meta:
         ordering = ["symbol"]
 
+    def save(self, *args, **kwargs):
+        if self._state.adding and not self.recommended_config:
+            from core.asset_trading_presets import ASSET_PRESET_VERSION, recommended_config_for
+
+            preset = recommended_config_for(self.symbol, self.category)
+            if preset:
+                self.recommended_config = preset
+                self.recommended_config_version = ASSET_PRESET_VERSION
+        return super().save(*args, **kwargs)
+
     def __str__(self):
         return self.display_name or self.symbol
 
