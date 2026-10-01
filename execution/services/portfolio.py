@@ -1,8 +1,9 @@
 
 from decimal import Decimal
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
-from execution.models import Order, Execution, Position, TradeLog
+from execution.models import BrokerPosition, Order, Execution, Position, TradeLog
 from execution.services.journal import log_journal_event
 from execution.services.psychology import update_bot_after_realized_pnl
 from execution.services.timezones import to_broker_timezone
@@ -97,6 +98,7 @@ def _apply_paper_position_fill(
     new_qty = old_qty + delta
     if old_qty == 0:
         pos.avg_price = price
+        pos.trade_pnl = Decimal("0")
     elif (old_qty > 0 and delta > 0) or (old_qty < 0 and delta < 0):
         total = abs(old_qty) + abs(delta)
         pos.avg_price = (old_avg * abs(old_qty) + price * abs(delta)) / total
@@ -124,8 +126,57 @@ def _apply_paper_position_fill(
                 * direction
                 * _resolve_contract_size(order, contract_size)
             ) - Decimal(str(fee or 0))
+            pos.trade_pnl += realized_pnl
     pos.save()
     return pos, realized_pnl, closing_qty
+
+
+@transaction.atomic
+def record_closed_position_outcome(position_id: int, *, update_bot_state: bool = True) -> bool:
+    """Count one confirmed, fully accounted broker position as one trade outcome."""
+    position = BrokerPosition.objects.select_for_update().get(pk=position_id)
+    if (position.status != "closed" or position.ownership != "ez_trade"
+            or not position.bot_id or position.loss_streak_accounted_at):
+        return False
+
+    reconciled = (position.broker_metadata or {}).get("reconciled_close") or {}
+    if reconciled.get("source") == "mt5_position_history":
+        entry_qty = Decimal(str(reconciled.get("entry_volume", 0)))
+        exit_qty = Decimal(str(reconciled.get("exit_volume", 0)))
+        if entry_qty <= 0 or entry_qty != exit_qty:
+            return False
+        total = position.profit + position.commission + position.swap
+    else:
+        fills = Execution.objects.filter(
+            order__broker_account_id=position.broker_account_id,
+            broker_position_ticket=position.broker_position_ticket,
+        )
+        entry_qty = fills.filter(order__intent="entry").aggregate(total=Sum("qty"))["total"] or Decimal(0)
+        exits = fills.filter(order__intent="exit")
+        exit_qty = exits.aggregate(total=Sum("qty"))["total"] or Decimal(0)
+        if entry_qty <= 0 or entry_qty != exit_qty or exits.filter(profit__isnull=True).exists():
+            return False
+        total = sum(
+            (fill.profit or Decimal(0)) + fill.commission + fill.swap - fill.fee
+            for fill in fills
+        )
+
+    # The position lock and durable marker make repeated broker deliveries and
+    # reconciliation retries unable to advance the streak a second time.
+    position.loss_streak_accounted_at = timezone.now()
+    position.save(update_fields=["loss_streak_accounted_at"])
+    if update_bot_state:
+        from execution.services.daily_risk import risk_day_window
+        closed_at = position.closed_at or timezone.now()
+        current_day = risk_day_window(position.broker_account)
+        later_exit = Execution.objects.filter(
+            order__bot_id=position.bot_id,
+            order__intent="exit",
+            exec_time__gt=closed_at,
+        ).exclude(broker_position_ticket=position.broker_position_ticket).exists()
+        if current_day.start <= closed_at < current_day.end and not later_exit:
+            update_bot_after_realized_pnl(position, total)
+    return True
 
 @transaction.atomic
 def record_fill(
@@ -256,10 +307,10 @@ def record_fill(
             )
         prior_pnl = tl.pnl or Decimal("0")
         tl.pnl = prior_pnl + realized_pnl
-        # Classify outcome for easier analytics
-        if realized_pnl > 0:
+        # The row accumulates fills, so classify its cumulative result.
+        if tl.pnl > 0:
             tl.status = "win"
-        elif realized_pnl < 0:
+        elif tl.pnl < 0:
             tl.status = "loss"
         else:
             tl.status = "breakeven"
@@ -302,12 +353,17 @@ def record_fill(
             },
         )
 
-        # Update bot-level psychology state (loss streak / pause) based on this realized result.
-        try:
-            if update_bot_state:
-                update_bot_after_realized_pnl(order, realized_pnl)
-        except Exception:
-            # Fail-soft: PnL recording should never block portfolio updates.
-            pass
+        # A partial fill is not a completed trade. Paper uses its position
+        # ledger; MT5 waits for a confirmed closed BrokerPosition and a
+        # balanced execution chain (or complete position-scoped history).
+        if update_bot_state and pos is not None and pos.status == "closed":
+            update_bot_after_realized_pnl(order, pos.trade_pnl)
+        elif broker_position_ticket and order.intent == "exit":
+            broker_position = BrokerPosition.objects.filter(
+                broker_account=order.broker_account,
+                broker_position_ticket=broker_position_ticket,
+            ).first()
+            if broker_position:
+                record_closed_position_outcome(broker_position.pk, update_bot_state=update_bot_state)
 
     return exe
