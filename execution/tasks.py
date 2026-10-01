@@ -3056,10 +3056,10 @@ def market_hours_guard_task(self):
     """
     result = apply_market_guard()
     logger.info(
-        "[MarketGuard] stopped=%s resumed=%s skipped_crypto=%s skipped_no_asset=%s errors=%s",
+        "[MarketGuard] stopped=%s resumed=%s crypto_without_mt5_probe=%s skipped_no_asset=%s errors=%s",
         result["stopped"],
         result["resumed"],
-        result["skipped_crypto"],
+        result["crypto_without_mt5_probe"],
         result["skipped_no_asset"],
         len(result["errors"]),
     )

@@ -171,7 +171,10 @@ def personal_dashboard(request):
         {
             "bot": {
                 "running": bots.filter(status="active").exists() and risk.entries_enabled and not risk.emergency_stop,
-                "statuses": list(bots.values("id", "name", "status", "schedule_paused", "engine_mode")),
+                "statuses": list(bots.values(
+                    "id", "name", "status", "schedule_paused", "engine_mode",
+                    "pause_reason", "paused_until", "current_loss_streak",
+                )),
                 "emergency_stop": risk.emergency_stop,
             },
             "mt5": {

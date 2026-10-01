@@ -459,17 +459,35 @@ def get_size_multiplier(bot) -> Decimal:
     if hard_multiplier <= ZERO:
         hard_multiplier = ONE
 
-    start_balance = _settings_decimal(
-        settings,
-        "paper_start_balance",
-        Decimal("100000"),
-    )
-    if start_balance <= ZERO:
-        return ONE
-
     realized_today = _get_today_realized_pnl(bot)
     if realized_today >= ZERO:
         return ONE
+
+    account = getattr(bot, "broker_account", None)
+    if account and account.connector != "paper":
+        from execution.models import AccountRiskDay
+        from execution.services.daily_risk import risk_day_window
+
+        risk_day = AccountRiskDay.objects.filter(
+            broker_account=account,
+            risk_date=risk_day_window(account).risk_date,
+            baseline_locked=True,
+        ).first()
+        start_balance = risk_day.starting_equity if risk_day else None
+        if start_balance is None or start_balance <= ZERO:
+            # Missing live account equity must not silently inherit paper capital.
+            enabled = [multiplier for limit, multiplier in (
+                (soft_limit, soft_multiplier), (hard_limit, hard_multiplier),
+            ) if limit > ZERO]
+            return min(enabled) if enabled else ONE
+    else:
+        start_balance = _settings_decimal(
+            settings,
+            "paper_start_balance",
+            Decimal("100000"),
+        )
+        if start_balance <= ZERO:
+            return ONE
 
     drawdown_pct = (-realized_today / start_balance) * HUNDRED
 

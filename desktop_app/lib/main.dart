@@ -1512,6 +1512,19 @@ class _BotStatusRow extends StatelessWidget {
                     fontSize: 10,
                   ),
                 ),
+                if (status == 'paused' && row['pause_reason'] == 'loss_cooldown' && row['paused_until'] != null) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    'Resumes ${formatDateTime(row['paused_until'])}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ] else if (status == 'paused' && row['pause_reason'] == 'loss_lock') ...[
+                  const SizedBox(height: 3),
+                  const Text(
+                    'Manual restart required',
+                    style: TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
               ],
             ),
           ),
