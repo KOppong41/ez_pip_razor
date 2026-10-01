@@ -675,10 +675,13 @@ class MT5Connector(BaseConnector):
 
     def history_deals_for_position_account(self, broker_account, broker_position_ticket: int):
         """Load a position's complete deal chain without relying on broker clock alignment."""
-        return self._call_for_account(
-            broker_account,
-            lambda: mt5.history_deals_get(position=int(broker_position_ticket)) or (),
-        )
+        def operation():
+            result = mt5.history_deals_get(position=int(broker_position_ticket))
+            if result is None:
+                raise ConnectorError(f"MT5 history_deals_get failed: {mt5.last_error()}")
+            return result
+
+        return self._call_for_account(broker_account, operation)
         
     def _account_currency_notional(self, side: str, symbol: str, volume, price, symbol_info, ) -> Decimal:
         """
@@ -1571,6 +1574,8 @@ class MT5Connector(BaseConnector):
                 owned.closed_at = timezone.now()
                 owned.last_reconciled_at = timezone.now()
                 owned.save(update_fields=["status", "volume", "closed_at", "last_reconciled_at"])
+                from execution.services.portfolio import record_closed_position_outcome
+                record_closed_position_outcome(owned.pk)
             update_order_status(
                 order,
                 "filled" if order.remaining_qty == 0 else "part_filled",
