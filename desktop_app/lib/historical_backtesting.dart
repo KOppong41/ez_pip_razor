@@ -89,7 +89,9 @@ class _HistoricalBacktests extends StatefulWidget {
 }
 
 class _HistoricalBacktestsState extends State<_HistoricalBacktests>
-    with AutomaticKeepAliveClientMixin {
+    with
+        AutomaticKeepAliveClientMixin,
+        _AutoRefreshRecords<_HistoricalBacktests> {
   final _form = GlobalKey<FormState>();
   final _resultsKey = GlobalKey();
   final _scroll = ScrollController();
@@ -143,6 +145,19 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
 
   @override
   bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    startRecordRefresh(() => busy ? Future<void>.value() : refreshHistory());
+  }
+
+  Future<void> refreshHistory() => refreshRecordFuture(
+    () => widget.client.get('/api/personal/backtests/?page=$historyPage'),
+    (next) => setState(() {
+      history = next;
+    }),
+  );
 
   void _showError(String value) {
     if (!mounted) return;
@@ -920,13 +935,7 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
                     ),
                   ),
                   TextButton.icon(
-                    onPressed: busy
-                        ? null
-                        : () => setState(
-                            () => history = widget.client.get(
-                              '/api/personal/backtests/?page=$historyPage',
-                            ),
-                          ),
+                    onPressed: busy ? null : refreshHistory,
                     icon: const Icon(Icons.refresh, size: 17),
                     label: const Text('Refresh history'),
                   ),

@@ -12,7 +12,8 @@ class HistoryPage extends StatefulWidget {
   State<HistoryPage> createState() => _HistoryPageState();
 }
 
-class _HistoryPageState extends State<HistoryPage> {
+class _HistoryPageState extends State<HistoryPage>
+    with _AutoRefreshRecords<HistoryPage> {
   List<Map<String, dynamic>> accounts = [];
   String? accountId;
   String? baselineId;
@@ -21,6 +22,12 @@ class _HistoryPageState extends State<HistoryPage> {
   String? to;
   int page = 1;
   late Future<dynamic> future = load();
+
+  @override
+  void initState() {
+    super.initState();
+    startRecordRefresh(reload);
+  }
 
   Future<dynamic> load() async {
     if (accounts.isEmpty) {
@@ -45,11 +52,12 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Future<void> reload({bool resetPage = false}) {
     if (resetPage) page = 1;
-    final next = load();
-    setState(() {
-      future = next;
-    });
-    return next.then<void>((_) {}, onError: (Object _) {});
+    return refreshRecordFuture(
+      load,
+      (next) => setState(() {
+        future = next;
+      }),
+    );
   }
 
   void setFilter(String key, String? value) {

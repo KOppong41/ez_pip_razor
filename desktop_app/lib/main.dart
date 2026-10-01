@@ -25,6 +25,55 @@ const amber = Color(0xFFF4B860);
 const muted = Color(0xFF82949E);
 const danger = Color(0xFFFF6070);
 
+// Refresh visible record lists without remounting the page or losing filters.
+mixin _AutoRefreshRecords<T extends StatefulWidget> on State<T> {
+  Timer? _recordRefreshTimer;
+  bool _automaticRefreshInFlight = false;
+
+  void startRecordRefresh(Future<void> Function() reload) {
+    _recordRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      final lifecycle = WidgetsBinding.instance.lifecycleState;
+      if (!mounted ||
+          (lifecycle != null && lifecycle != AppLifecycleState.resumed) ||
+          ModalRoute.of(context)?.isCurrent == false ||
+          !TickerMode.valuesOf(context).enabled ||
+          _automaticRefreshInFlight) {
+        return;
+      }
+      _automaticRefreshInFlight = true;
+      unawaited(() async {
+        try {
+          await reload();
+        } catch (_) {
+          // The page shows the error and the next interval retries it.
+        } finally {
+          _automaticRefreshInFlight = false;
+        }
+      }());
+    });
+  }
+
+  Future<void> refreshRecordFuture(
+    Future<dynamic> Function() fetch,
+    void Function(Future<dynamic>) show,
+  ) async {
+    if (!mounted) return;
+    try {
+      final next = fetch();
+      show(next);
+      await next;
+    } catch (_) {
+      // The FutureBuilder displays the error; the next poll retries it.
+    }
+  }
+
+  @override
+  void dispose() {
+    _recordRefreshTimer?.cancel();
+    super.dispose();
+  }
+}
+
 class EzTradeApp extends StatefulWidget {
   const EzTradeApp({super.key, this.backendManager});
 
@@ -1805,7 +1854,8 @@ class LogsPage extends StatefulWidget {
   State<LogsPage> createState() => _LogsPageState();
 }
 
-class _LogsPageState extends State<LogsPage> {
+class _LogsPageState extends State<LogsPage>
+    with _AutoRefreshRecords<LogsPage> {
   late Future<dynamic> future;
   final search = TextEditingController();
   String severity = 'all';
@@ -1814,6 +1864,7 @@ class _LogsPageState extends State<LogsPage> {
   void initState() {
     super.initState();
     future = widget.client.get('/api/personal/logs/');
+    startRecordRefresh(reload);
   }
 
   @override
@@ -1822,9 +1873,12 @@ class _LogsPageState extends State<LogsPage> {
     super.dispose();
   }
 
-  void reload() => setState(() {
-    future = widget.client.get('/api/personal/logs/');
-  });
+  Future<void> reload() => refreshRecordFuture(
+    () => widget.client.get('/api/personal/logs/'),
+    (next) => setState(() {
+      future = next;
+    }),
+  );
 
   List<Map<String, dynamic>> visibleRows(List<Map<String, dynamic>> rows) {
     final query = search.text.trim().toLowerCase();
@@ -2431,7 +2485,8 @@ class OrdersPage extends StatefulWidget {
   State<OrdersPage> createState() => _OrdersPageState();
 }
 
-class _OrdersPageState extends State<OrdersPage> {
+class _OrdersPageState extends State<OrdersPage>
+    with _AutoRefreshRecords<OrdersPage> {
   late Future<dynamic> future = widget.client.get('/api/orders/');
   final searchController = TextEditingController();
   String statusFilter = 'all';
@@ -2439,16 +2494,23 @@ class _OrdersPageState extends State<OrdersPage> {
   String sideFilter = 'all';
 
   @override
+  void initState() {
+    super.initState();
+    startRecordRefresh(reload);
+  }
+
+  @override
   void dispose() {
     searchController.dispose();
     super.dispose();
   }
 
-  Future<void> reload() async {
-    final next = widget.client.get('/api/orders/');
-    setState(() => future = next);
-    await next;
-  }
+  Future<void> reload() => refreshRecordFuture(
+    () => widget.client.get('/api/orders/'),
+    (next) => setState(() {
+      future = next;
+    }),
+  );
 
   List<Map<String, dynamic>> _filteredRows(dynamic data) {
     dynamic raw = data;
@@ -2485,6 +2547,7 @@ class _OrdersPageState extends State<OrdersPage> {
     child: DropdownButtonFormField<String>(
       initialValue: value,
       isDense: true,
+      isExpanded: true,
       decoration: const InputDecoration(labelText: 'Filter'),
       items: [
         for (final option in values)
@@ -5435,22 +5498,32 @@ class MarketsPage extends StatefulWidget {
   State<MarketsPage> createState() => _MarketsPageState();
 }
 
-class _MarketsPageState extends State<MarketsPage> {
+class _MarketsPageState extends State<MarketsPage>
+    with _AutoRefreshRecords<MarketsPage> {
   late Future<dynamic> future = widget.client.get('/api/personal/markets/');
+  bool updating = false;
 
-  void reload() {
-    setState(() {
-      future = widget.client.get('/api/personal/markets/');
-    });
+  @override
+  void initState() {
+    super.initState();
+    startRecordRefresh(() => updating ? Future<void>.value() : reload());
   }
 
+  Future<void> reload() => refreshRecordFuture(
+    () => widget.client.get('/api/personal/markets/'),
+    (next) => setState(() {
+      future = next;
+    }),
+  );
+
   Future<void> toggle(Map<String, dynamic> row, bool enabled) async {
+    updating = true;
     try {
       await widget.client.patch('/api/personal/markets/', {
         'canonical_symbol': row['canonical_symbol'],
         'enabled': enabled,
       });
-      reload();
+      await reload();
       if (mounted) {
         message(
           context,
@@ -5459,6 +5532,8 @@ class _MarketsPageState extends State<MarketsPage> {
       }
     } catch (e) {
       if (mounted) message(context, e.toString(), isError: true);
+    } finally {
+      updating = false;
     }
   }
 
@@ -6014,14 +6089,22 @@ class RunEvidencePage extends StatefulWidget {
   State<RunEvidencePage> createState() => _RunEvidencePageState();
 }
 
-class _RunEvidencePageState extends State<RunEvidencePage> {
+class _RunEvidencePageState extends State<RunEvidencePage>
+    with _AutoRefreshRecords<RunEvidencePage> {
   late Future<dynamic> future = widget.client.get('/api/personal/backtesting/');
 
-  Future<void> reload() async {
-    final next = widget.client.get('/api/personal/backtesting/');
-    setState(() => future = next);
-    await next;
+  @override
+  void initState() {
+    super.initState();
+    startRecordRefresh(reload);
   }
+
+  Future<void> reload() => refreshRecordFuture(
+    () => widget.client.get('/api/personal/backtesting/'),
+    (next) => setState(() {
+      future = next;
+    }),
+  );
 
   @override
   Widget build(BuildContext context) => FutureBuilder(
@@ -7012,9 +7095,26 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
+class _SettingsPageState extends State<SettingsPage>
+    with _AutoRefreshRecords<SettingsPage> {
   late Future<dynamic> future = widget.client.get('/api/personal/accounts/');
   int? testingAccountId;
+
+  @override
+  void initState() {
+    super.initState();
+    startRecordRefresh(
+      () => testingAccountId == null ? reload() : Future<void>.value(),
+    );
+  }
+
+  Future<void> reload() => refreshRecordFuture(
+    () => widget.client.get('/api/personal/accounts/'),
+    (next) => setState(() {
+      future = next;
+    }),
+  );
+
   Future<void> edit([Map<String, dynamic>? row]) async {
     final name = TextEditingController(
       text: row?['name']?.toString() ?? 'MT5 Account',
@@ -7088,9 +7188,7 @@ class _SettingsPageState extends State<SettingsPage> {
           if (password.text.isNotEmpty) 'password': password.text,
         },
       );
-      setState(() {
-        future = widget.client.get('/api/personal/accounts/');
-      });
+      await reload();
       if (mounted) {
         message(
           context,
@@ -7133,9 +7231,7 @@ class _SettingsPageState extends State<SettingsPage> {
             isError: true,
           );
         }
-        setState(() {
-          future = widget.client.get('/api/personal/accounts/');
-        });
+        await reload();
         return;
       }
       throw const ApiException(
