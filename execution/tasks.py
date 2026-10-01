@@ -477,6 +477,14 @@ def _reconcile_missing_owned_position(connector: MT5Connector, local: BrokerPosi
             "status", "volume", "current_price", "profit", "commission", "swap",
             "closed_at", "last_reconciled_at", "broker_metadata",
         ])
+        from execution.services.portfolio import record_closed_position_outcome
+        update_bot_state = (
+            final_closed_at >= risk_day_window(local.broker_account).start
+            and not Execution.objects.filter(
+                order__bot_id=local.bot_id, order__intent="exit", exec_time__gt=final_closed_at,
+            ).exclude(broker_position_ticket=local.broker_position_ticket).exists()
+        )
+        record_closed_position_outcome(local.pk, update_bot_state=update_bot_state)
     else:
         # A fully imported ledger is not proof that the position is closed.
         # Retain uncertain exposure rather than subtracting historical exits

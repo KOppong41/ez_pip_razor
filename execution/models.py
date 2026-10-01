@@ -318,6 +318,7 @@ class Position(models.Model):
     sl = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     tp = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     status = models.CharField(max_length=12, choices=[("open","open"),("closed","closed")], default="open")
+    trade_pnl = models.DecimalField(max_digits=20, decimal_places=8, default=0)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -456,6 +457,7 @@ class BrokerPosition(models.Model):
     last_reconciled_at = models.DateTimeField(null=True, blank=True)
     broker_metadata = models.JSONField(default=dict, blank=True)
     cleared_from_positions_at = models.DateTimeField(null=True, blank=True)
+    loss_streak_accounted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["broker_account_id", "broker_position_ticket"]
