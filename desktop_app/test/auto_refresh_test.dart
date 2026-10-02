@@ -70,6 +70,8 @@ void main() {
       expect(client.marketReads, 2);
       expect(client.delayedMarketResponse, isNull);
       expect(delayed.isCompleted, isFalse);
+      expect(find.text('OLDUSD'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
       await tester.pump(const Duration(seconds: 15));
       expect(client.marketReads, 2);
 
@@ -89,6 +91,29 @@ void main() {
       expect(client.marketReads, 2);
     },
   );
+
+  testWidgets('failed background refresh keeps the last good market list', (
+    tester,
+  ) async {
+    final client = RefreshClient();
+    await showPage(tester, MarketsPage(client: client));
+    final delayed = Completer<dynamic>();
+    client.delayedMarketResponse = delayed;
+
+    await tester.pump(const Duration(seconds: 15));
+    delayed.completeError(StateError('Temporary outage'));
+    await tester.pumpAndSettle();
+    expect(find.text('OLDUSD'), findsOneWidget);
+    expect(find.textContaining('Temporary outage'), findsNothing);
+
+    client.markets = [
+      {'canonical_symbol': 'NEWUSD', 'enabled': true, 'trading_status': 'open'},
+    ];
+    await tester.pump(const Duration(seconds: 15));
+    await tester.pumpAndSettle();
+    expect(find.text('NEWUSD'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('orders refresh while preserving the active search filter', (
     tester,
