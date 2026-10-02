@@ -196,6 +196,10 @@ class BotSerializer(serializers.ModelSerializer):
     def get_diagnostic_12h(self, obj):
         from execution.models import ScalperRunLog
 
+        batched = self.context.get("diagnostic_12h_by_bot")
+        if batched is not None and obj.pk in batched:
+            return batched[obj.pk]
+
         logs = ScalperRunLog.objects.filter(
             bot_id=obj.pk, created_at__gte=timezone.now() - timezone.timedelta(hours=12),
         )

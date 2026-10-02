@@ -318,7 +318,7 @@ class Position(models.Model):
     sl = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     tp = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     status = models.CharField(max_length=12, choices=[("open","open"),("closed","closed")], default="open")
-    trade_pnl = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    trade_pnl = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

@@ -26,7 +26,7 @@ class _HistoryPageState extends State<HistoryPage>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(reload);
+    startRecordRefresh(() => reload(silent: true));
   }
 
   Future<dynamic> load() async {
@@ -50,13 +50,14 @@ class _HistoryPageState extends State<HistoryPage>
     );
   }
 
-  Future<void> reload({bool resetPage = false}) {
+  Future<void> reload({bool resetPage = false, bool silent = false}) {
     if (resetPage) page = 1;
     return refreshRecordFuture(
       load,
       (next) => setState(() {
         future = next;
       }),
+      silent: silent,
     );
   }
 

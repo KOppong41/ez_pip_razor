@@ -1,4 +1,5 @@
 
+import logging
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Sum
@@ -8,6 +9,9 @@ from execution.services.journal import log_journal_event
 from execution.services.psychology import update_bot_after_realized_pnl
 from execution.services.timezones import to_broker_timezone
 from execution.services.runtime_config import get_runtime_config
+
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_contract_size(order: Order, provided: Decimal | None) -> Decimal:
@@ -126,7 +130,8 @@ def _apply_paper_position_fill(
                 * direction
                 * _resolve_contract_size(order, contract_size)
             ) - Decimal(str(fee or 0))
-            pos.trade_pnl += realized_pnl
+            if pos.trade_pnl is not None:
+                pos.trade_pnl += realized_pnl
     pos.save()
     return pos, realized_pnl, closing_qty
 
@@ -161,10 +166,6 @@ def record_closed_position_outcome(position_id: int, *, update_bot_state: bool =
             for fill in fills
         )
 
-    # The position lock and durable marker make repeated broker deliveries and
-    # reconciliation retries unable to advance the streak a second time.
-    position.loss_streak_accounted_at = timezone.now()
-    position.save(update_fields=["loss_streak_accounted_at"])
     if update_bot_state:
         from execution.services.daily_risk import risk_day_window
         closed_at = position.closed_at or timezone.now()
@@ -175,7 +176,15 @@ def record_closed_position_outcome(position_id: int, *, update_bot_state: bool =
             exec_time__gt=closed_at,
         ).exclude(broker_position_ticket=position.broker_position_ticket).exists()
         if current_day.start <= closed_at < current_day.end and not later_exit:
-            update_bot_after_realized_pnl(position, total)
+            try:
+                update_bot_after_realized_pnl(position, total)
+            except Exception:
+                logger.exception("Could not account for closed position %s outcome", position.pk)
+                return False
+    # The position lock and durable marker make repeated broker deliveries and
+    # reconciliation retries unable to advance the streak a second time.
+    position.loss_streak_accounted_at = timezone.now()
+    position.save(update_fields=["loss_streak_accounted_at"])
     return True
 
 @transaction.atomic
@@ -356,8 +365,12 @@ def record_fill(
         # A partial fill is not a completed trade. Paper uses its position
         # ledger; MT5 waits for a confirmed closed BrokerPosition and a
         # balanced execution chain (or complete position-scoped history).
-        if update_bot_state and pos is not None and pos.status == "closed":
-            update_bot_after_realized_pnl(order, pos.trade_pnl)
+        if (update_bot_state and pos is not None and pos.status == "closed"
+                and pos.trade_pnl is not None):
+            try:
+                update_bot_after_realized_pnl(order, pos.trade_pnl)
+            except Exception:
+                logger.exception("Could not account for paper position outcome on order %s", order.pk)
         elif broker_position_ticket and order.intent == "exit":
             broker_position = BrokerPosition.objects.filter(
                 broker_account=order.broker_account,

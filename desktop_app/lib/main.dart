@@ -29,6 +29,7 @@ const danger = Color(0xFFFF6070);
 mixin _AutoRefreshRecords<T extends StatefulWidget> on State<T> {
   Timer? _recordRefreshTimer;
   bool _automaticRefreshInFlight = false;
+  int _refreshRequestId = 0;
 
   void startRecordRefresh(Future<void> Function() reload) {
     _recordRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
@@ -55,15 +56,24 @@ mixin _AutoRefreshRecords<T extends StatefulWidget> on State<T> {
 
   Future<void> refreshRecordFuture(
     Future<dynamic> Function() fetch,
-    void Function(Future<dynamic>) show,
-  ) async {
+    void Function(Future<dynamic>) show, {
+    bool silent = false,
+  }) async {
     if (!mounted) return;
+    final requestId = ++_refreshRequestId;
     try {
       final next = fetch();
-      show(next);
-      await next;
+      if (silent) {
+        final value = await next;
+        if (mounted && requestId == _refreshRequestId) {
+          show(Future<dynamic>.value(value));
+        }
+      } else {
+        show(next);
+        await next;
+      }
     } catch (_) {
-      // The FutureBuilder displays the error; the next poll retries it.
+      // Manual requests display their error; background polls keep old data.
     }
   }
 
@@ -857,7 +867,7 @@ class _DashboardPageState extends State<DashboardPage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => error = e.toString());
+      if (mounted && data == null) setState(() => error = e.toString());
     }
   }
 
@@ -1512,6 +1522,19 @@ class _BotStatusRow extends StatelessWidget {
                     fontSize: 10,
                   ),
                 ),
+                if (status == 'paused' && row['pause_reason'] == 'loss_cooldown' && row['paused_until'] != null) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    'Resumes ${formatDateTime(row['paused_until'])}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ] else if (status == 'paused' && row['pause_reason'] == 'loss_lock') ...[
+                  const SizedBox(height: 3),
+                  const Text(
+                    'Manual restart required',
+                    style: TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1864,7 +1887,7 @@ class _LogsPageState extends State<LogsPage>
   void initState() {
     super.initState();
     future = widget.client.get('/api/personal/logs/');
-    startRecordRefresh(reload);
+    startRecordRefresh(() => reload(silent: true));
   }
 
   @override
@@ -1873,11 +1896,12 @@ class _LogsPageState extends State<LogsPage>
     super.dispose();
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/logs/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   List<Map<String, dynamic>> visibleRows(List<Map<String, dynamic>> rows) {
@@ -2496,7 +2520,7 @@ class _OrdersPageState extends State<OrdersPage>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(reload);
+    startRecordRefresh(() => reload(silent: true));
   }
 
   @override
@@ -2505,11 +2529,12 @@ class _OrdersPageState extends State<OrdersPage>
     super.dispose();
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/orders/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   List<Map<String, dynamic>> _filteredRows(dynamic data) {
@@ -5506,14 +5531,17 @@ class _MarketsPageState extends State<MarketsPage>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(() => updating ? Future<void>.value() : reload());
+    startRecordRefresh(
+      () => updating ? Future<void>.value() : reload(silent: true),
+    );
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/markets/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   Future<void> toggle(Map<String, dynamic> row, bool enabled) async {
@@ -5856,32 +5884,26 @@ class PositionsPage extends StatefulWidget {
   State<PositionsPage> createState() => _PositionsPageState();
 }
 
-class _PositionsPageState extends State<PositionsPage> {
+class _PositionsPageState extends State<PositionsPage>
+    with _AutoRefreshRecords<PositionsPage> {
   late Future<dynamic> future = widget.client.get('/api/personal/positions/');
-  Timer? refreshTimer;
   bool busy = false;
 
   @override
   void initState() {
     super.initState();
-    refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (!busy) reload();
-    });
+    startRecordRefresh(
+      () => busy ? Future<void>.value() : reload(silent: true),
+    );
   }
 
-  @override
-  void dispose() {
-    refreshTimer?.cancel();
-    super.dispose();
-  }
-
-  void reload() {
-    if (!mounted) return;
-    final next = widget.client.get('/api/personal/positions/');
-    setState(() {
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
+    () => widget.client.get('/api/personal/positions/'),
+    (next) => setState(() {
       future = next;
-    });
-  }
+    }),
+    silent: silent,
+  );
 
   Future<void> clearClosed() async {
     if (!await confirm(
@@ -6096,14 +6118,15 @@ class _RunEvidencePageState extends State<RunEvidencePage>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(reload);
+    startRecordRefresh(() => reload(silent: true));
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/backtesting/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   @override
@@ -7104,15 +7127,18 @@ class _SettingsPageState extends State<SettingsPage>
   void initState() {
     super.initState();
     startRecordRefresh(
-      () => testingAccountId == null ? reload() : Future<void>.value(),
+      () => testingAccountId == null
+          ? reload(silent: true)
+          : Future<void>.value(),
     );
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/accounts/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   Future<void> edit([Map<String, dynamic>? row]) async {

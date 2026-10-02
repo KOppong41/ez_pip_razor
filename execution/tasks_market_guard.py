@@ -52,7 +52,7 @@ def apply_market_guard() -> dict:
     )
     stopped = 0
     resumed = 0
-    skipped_crypto = 0
+    crypto_without_mt5_probe = 0
     skipped_no_asset = 0
     errors = []
     now = timezone.now()
@@ -64,7 +64,7 @@ def apply_market_guard() -> dict:
             continue
         crypto = is_crypto_symbol(symbol)
         if crypto:
-            skipped_crypto += 1
+            crypto_without_mt5_probe += 1
         try:
             status = get_market_status_for_bot(bot, now=now, use_mt5_probe=not crypto)
             if status:
@@ -79,7 +79,7 @@ def apply_market_guard() -> dict:
     return {
         "stopped": stopped,
         "resumed": resumed,
-        "skipped_crypto": skipped_crypto,
+        "crypto_without_mt5_probe": crypto_without_mt5_probe,
         "skipped_no_asset": skipped_no_asset,
         "errors": errors,
     }
