@@ -272,14 +272,14 @@ def get_last_bot_trade(bot):
 
 def get_today_filled_trades(bot, symbol: str | None = None) -> int:
     """
-    Count today's broker-accepted entry orders for this bot. Exit/protection
-    orders never consume the daily entry allowance.
+    Count today's accepted or filled entry orders for this bot. Pending broker
+    acknowledgments reserve a daily slot until resolved.
     """
     today = timezone.now().date()
     qs = Order.objects.filter(
         bot=bot,
         intent="entry",
-        status__in=["part_filled", "filled"],
+        status__in=["ack", "part_filled", "filled"],
         created_at__date=today,
     )
     if symbol:
@@ -293,13 +293,13 @@ def apply_daily_limit(
     symbol: str,
 ) -> StrategyDecision:
     """
-    Apply per-bot daily limit based on *filled* orders, not just decisions.
+    Apply per-bot daily limit based on accepted entries, not just decisions.
     """
     if not bot or not bot.max_trades_per_day:
         return proposed
 
-    filled_today = get_today_filled_trades(bot, symbol=symbol)
-    if filled_today >= bot.max_trades_per_day:
+    accepted_today = get_today_filled_trades(bot, symbol=symbol)
+    if accepted_today >= bot.max_trades_per_day:
         return StrategyDecision(
             action="ignore",
             reason="daily_trade_limit_reached",
@@ -681,7 +681,7 @@ def make_decision_from_signal(signal: Signal) -> Decision:
     if proposed.action == "open" and bot:
         now = timezone.now()
 
-        # Daily limit based on *filled* orders
+        # Daily limit includes accepted orders that are still awaiting fills.
         tmp = proposed
         proposed = apply_daily_limit(proposed, bot=bot, symbol=signal.symbol)
         if proposed.action != "open" and tmp.action == "open":

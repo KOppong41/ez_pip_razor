@@ -7391,7 +7391,9 @@ class _SettingsPageState extends State<SettingsPage>
       text: row?['mt5_server']?.toString() ?? '',
     );
     final path = TextEditingController(
-      text: row?['mt5_path']?.toString() ?? '',
+      text: row == null
+          ? r'C:\Program Files\MetaTrader 5\terminal64.exe'
+          : row['mt5_path']?.toString() ?? '',
     );
     final password = TextEditingController();
     final controls = [

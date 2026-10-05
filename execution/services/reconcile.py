@@ -1,5 +1,6 @@
 from collections import defaultdict
 from decimal import Decimal
+from django.db import transaction
 from execution.models import BrokerPosition, Order, Execution, Position
 from execution.services.portfolio import record_fill
 
@@ -14,14 +15,20 @@ def reconcile_orders_and_positions(apply: bool = False) -> dict:
 
     filled_orders = Order.objects.filter(status="filled")
     for order in filled_orders:
-        if order.executions.exists():
-            continue
-        if order.price is None:
-            skipped_missing_price += 1
-            continue
         if apply:
-            record_fill(order, order.qty, order.price)
-            created_execs += 1
+            with transaction.atomic():
+                # Serialize the absence check with every other reconciliation
+                # pass before recording a fill without a broker deal ticket.
+                locked = Order.objects.select_for_update().get(pk=order.pk)
+                if locked.status != "filled" or locked.executions.exists():
+                    continue
+                if locked.price is None:
+                    skipped_missing_price += 1
+                    continue
+                record_fill(locked, locked.qty, locked.price)
+                created_execs += 1
+        elif not order.executions.exists() and order.price is None:
+            skipped_missing_price += 1
 
     # Paper positions use the simulator ledger; live positions come only from
     # the broker-reconciled ticket model.

@@ -26,6 +26,26 @@ class PersonalAccountApiTest(TestCase):
         )
         self.client.force_login(self.user)
 
+    def test_new_account_uses_default_terminal_path_when_blank(self):
+        self.account.delete()
+        response = self.client.post(
+            "/api/personal/accounts/",
+            data={
+                "name": "Second MT5",
+                "mt5_login": "30002",
+                "mt5_server": "Broker-Demo",
+                "mt5_path": "",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        account = BrokerAccount.objects.get(pk=response.json()["id"])
+        self.assertEqual(
+            account.mt5_path,
+            BrokerAccount._meta.get_field("mt5_path").get_default(),
+        )
+
     def test_connection_requires_a_decryptable_password(self):
         response = self.client.post(
             "/api/personal/accounts/test/",

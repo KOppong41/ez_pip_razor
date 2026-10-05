@@ -4,14 +4,16 @@ from decimal import Decimal
 from threading import Event
 from types import SimpleNamespace
 from unittest import skipUnless
+from unittest.mock import patch
 
 from django.db import close_old_connections, connection, transaction
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
-from execution.models import JournalEntry, Order, RiskPolicy
+from execution.models import Execution, JournalEntry, Order, RiskPolicy
 from execution.services.account_loss_guard import latch_account_loss
 from execution.services.live_risk import RiskRejected, enforce_pretrade_risk
 from execution.services.risk_policy import update_risk_limits
+from execution.services.reconcile import reconcile_orders_and_positions
 from execution.tests import test_live_risk
 
 
@@ -28,6 +30,43 @@ class PostgresAdmissionConcurrencyTests(TransactionTestCase):
     _bot = test_live_risk.LiveRiskTest._bot
     _order = test_live_risk.LiveRiskTest._order
     _risk_day = test_live_risk.LiveRiskTest._risk_day
+
+    def test_concurrent_reconciliation_records_one_fill(self):
+        from execution.services.portfolio import record_fill
+
+        order = self._order(self._bot(), status="filled", price=Decimal("100"))
+        holding, release, second_started, second_finished = Event(), Event(), Event(), Event()
+
+        def slow_record_fill(*args, **kwargs):
+            holding.set()
+            if not release.wait(10):
+                raise RuntimeError("Test reconciliation lock was not released")
+            return record_fill(*args, **kwargs)
+
+        def reconcile(second=False):
+            close_old_connections()
+            if second:
+                second_started.set()
+            try:
+                return reconcile_orders_and_positions(apply=True)
+            finally:
+                if second:
+                    second_finished.set()
+                close_old_connections()
+
+        with patch("execution.services.reconcile.record_fill", side_effect=slow_record_fill):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(reconcile)
+                try:
+                    self.assertTrue(holding.wait(10))
+                    second = pool.submit(reconcile, True)
+                    self.assertTrue(second_started.wait(3))
+                    self.assertFalse(second_finished.wait(.25))
+                finally:
+                    release.set()
+                self.assertEqual(first.result(timeout=12)["executions_created"], 1)
+                self.assertEqual(second.result(timeout=12)["executions_created"], 0)
+        self.assertEqual(Execution.objects.filter(order=order).count(), 1)
 
     def concurrent_admission(self, *, position_limit, lot_limit, expected_code):
         self._risk_day(Decimal(10000))

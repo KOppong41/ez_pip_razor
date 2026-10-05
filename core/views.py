@@ -1,4 +1,5 @@
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -25,11 +26,26 @@ def desktop_bootstrap(request):
         return Response(status=status.HTTP_404_NOT_FOUND)
     if request.META.get("REMOTE_ADDR") not in {"127.0.0.1", "::1"}:
         return Response(status=status.HTTP_403_FORBIDDEN)
+    host = request.get_host()
+    if urlsplit(f"http://{host}").hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return Response(status=status.HTTP_403_FORBIDDEN)
 
     user_model = get_user_model()
     needs_setup = not user_model.objects.exists()
     if request.method == "GET":
         return Response({"needs_setup": needs_setup})
+    expected_origin = f"{request.scheme}://{host}"
+    for header in ("HTTP_ORIGIN", "HTTP_REFERER"):
+        value = request.META.get(header)
+        if value:
+            parsed = urlsplit(value)
+            if f"{parsed.scheme}://{parsed.netloc}" != expected_origin:
+                return Response(status=status.HTTP_403_FORBIDDEN)
+    if request.content_type != "application/json":
+        return Response(
+            {"detail": "Desktop setup requires JSON."},
+            status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        )
     if not needs_setup:
         return Response(
             {"detail": "Desktop setup has already been completed."},

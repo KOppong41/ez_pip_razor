@@ -565,7 +565,10 @@ def personal_accounts(request):
     account.mt5_login = str(request.data.get("mt5_login", account.mt5_login or ""))
     account.account_ref = account.mt5_login
     account.mt5_server = request.data.get("mt5_server", account.mt5_server or "")
-    account.mt5_path = request.data.get("mt5_path", account.mt5_path or "")
+    mt5_path = request.data.get("mt5_path", account.mt5_path)
+    if account.pk is None and not str(mt5_path or "").strip():
+        mt5_path = BrokerAccount._meta.get_field("mt5_path").get_default()
+    account.mt5_path = mt5_path
     if request.data.get("password"):
         account.set_mt5_password(str(request.data["password"]))
     account.full_clean()

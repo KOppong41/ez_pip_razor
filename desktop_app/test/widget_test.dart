@@ -1026,6 +1026,33 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('new MT5 accounts show the default terminal path', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 830));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: SettingsPage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add account'));
+    await tester.pumpAndSettle();
+
+    final terminalPath = tester.widget<TextField>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Terminal path',
+      ),
+    );
+    expect(
+      terminalPath.controller?.text,
+      r'C:\Program Files\MetaTrader 5\terminal64.exe',
+    );
+  });
+
   testWidgets('renders polished trading workspaces without raw records', (
     tester,
   ) async {

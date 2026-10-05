@@ -9,6 +9,7 @@ from rest_framework.test import APITestCase
 class DesktopBootstrapTests(APITestCase):
     def setUp(self):
         self.url = reverse("desktop-bootstrap")
+        self.client.defaults["HTTP_HOST"] = "localhost"
 
     def test_first_local_user_can_be_created_once(self):
         response = self.client.get(self.url)
@@ -38,6 +39,34 @@ class DesktopBootstrapTests(APITestCase):
 
     def test_non_loopback_requests_are_rejected(self):
         response = self.client.get(self.url, REMOTE_ADDR="192.0.2.10")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cross_origin_and_form_posts_cannot_claim_first_account(self):
+        payload = {"username": "intruder", "password": "Another-Strong-Password-29!"}
+        response = self.client.post(
+            self.url, payload, format="json", HTTP_ORIGIN="https://attacker.example"
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self.client.post(self.url, payload)
+        self.assertEqual(response.status_code, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+        self.assertFalse(get_user_model().objects.exists())
+
+    def test_same_origin_json_post_can_complete_setup(self):
+        response = self.client.post(
+            self.url,
+            {"username": "owner", "password": "Strong-Local-Passphrase-741!"},
+            format="json",
+            HTTP_ORIGIN="http://localhost",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_non_loopback_host_is_rejected(self):
+        response = self.client.post(
+            self.url,
+            {"username": "owner", "password": "Strong-Local-Passphrase-741!"},
+            format="json",
+            HTTP_HOST="testserver",
+        )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     @override_settings(DESKTOP_MODE=False)
