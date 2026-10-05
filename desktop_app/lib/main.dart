@@ -29,6 +29,7 @@ const danger = Color(0xFFFF6070);
 mixin _AutoRefreshRecords<T extends StatefulWidget> on State<T> {
   Timer? _recordRefreshTimer;
   bool _automaticRefreshInFlight = false;
+  int _refreshRequestId = 0;
 
   void startRecordRefresh(Future<void> Function() reload) {
     _recordRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
@@ -55,15 +56,24 @@ mixin _AutoRefreshRecords<T extends StatefulWidget> on State<T> {
 
   Future<void> refreshRecordFuture(
     Future<dynamic> Function() fetch,
-    void Function(Future<dynamic>) show,
-  ) async {
+    void Function(Future<dynamic>) show, {
+    bool silent = false,
+  }) async {
     if (!mounted) return;
+    final requestId = ++_refreshRequestId;
     try {
       final next = fetch();
-      show(next);
-      await next;
+      if (silent) {
+        final value = await next;
+        if (mounted && requestId == _refreshRequestId) {
+          show(Future<dynamic>.value(value));
+        }
+      } else {
+        show(next);
+        await next;
+      }
     } catch (_) {
-      // The FutureBuilder displays the error; the next poll retries it.
+      // Manual requests display their error; background polls keep old data.
     }
   }
 
@@ -857,7 +867,7 @@ class _DashboardPageState extends State<DashboardPage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => error = e.toString());
+      if (mounted && data == null) setState(() => error = e.toString());
     }
   }
 
@@ -1512,6 +1522,22 @@ class _BotStatusRow extends StatelessWidget {
                     fontSize: 10,
                   ),
                 ),
+                if (status == 'paused' &&
+                    row['pause_reason'] == 'loss_cooldown' &&
+                    row['paused_until'] != null) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    'Resumes ${formatDateTime(row['paused_until'])}',
+                    style: const TextStyle(color: muted, fontSize: 10),
+                  ),
+                ] else if (status == 'paused' &&
+                    row['pause_reason'] == 'loss_lock') ...[
+                  const SizedBox(height: 3),
+                  const Text(
+                    'Manual restart required',
+                    style: TextStyle(color: muted, fontSize: 10),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1859,12 +1885,123 @@ class _LogsPageState extends State<LogsPage>
   late Future<dynamic> future;
   final search = TextEditingController();
   String severity = 'all';
+  String? botId;
+  String? asset;
+  DateTime? fromDate;
+  DateTime? toDate;
+
+  String formatDate(DateTime day) =>
+      '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+
+  Future<dynamic> optionalGet(String path) async {
+    try {
+      return await widget.client.get(path);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<dynamic> load() async {
+    final query = <String, String>{
+      'include_options': '1',
+      'bot_id': ?botId,
+      'symbol': ?asset,
+      if (fromDate != null)
+        'from': DateTime(
+          fromDate!.year,
+          fromDate!.month,
+          fromDate!.day,
+        ).toUtc().toIso8601String(),
+      if (toDate != null)
+        'to': DateTime(
+          toDate!.year,
+          toDate!.month,
+          toDate!.day + 1,
+        ).toUtc().toIso8601String(),
+    };
+    final logRequest = widget.client.get(
+      Uri(path: '/api/personal/logs/', queryParameters: query).toString(),
+    );
+    final values = await Future.wait([
+      logRequest,
+      optionalGet('/api/bots/'),
+      optionalGet('/api/bots/options/'),
+    ]);
+    final legacy = values[0] is List;
+    final result = mapOf(values[0]);
+    final rawRows = legacy ? listOfMaps(values[0]) : listOfMaps(result['rows']);
+    final rows = legacy ? rawRows.where((row) {
+      final timestamp = DateTime.tryParse('${row['created_at'] ?? ''}')?.toLocal();
+      final day = timestamp == null
+          ? null
+          : DateTime(timestamp.year, timestamp.month, timestamp.day);
+      final rowBot = row['bot_id'] ?? mapOf(row['context'])['bot_id'];
+      return (botId == null || '$rowBot' == botId) &&
+          (asset == null || row['symbol'] == asset) &&
+          (fromDate == null || (day != null && !day.isBefore(fromDate!))) &&
+          (toDate == null || (day != null && !day.isAfter(toDate!)));
+    }).toList() : rawRows;
+    final journalOptions = mapOf(result['options']);
+    final botChoices = <String, String>{};
+    for (final row in listOfMaps(values[1])) {
+      if (row['id'] != null) botChoices['${row['id']}'] = '${row['name'] ?? row['id']}';
+    }
+    for (final row in listOfMaps(journalOptions['bots'])) {
+      if (row['bot_id'] != null) {
+        botChoices['${row['bot_id']}'] = '${row['bot__name'] ?? row['bot_id']}';
+      }
+    }
+    final assets = <String>{};
+    for (final row in listOfMaps(mapOf(values[2])['assets'])) {
+      final symbol = '${row['symbol'] ?? ''}'.trim();
+      if (symbol.isNotEmpty) assets.add(symbol);
+    }
+    for (final row in listOfMaps(values[1])) {
+      final symbol = '${mapOf(row['asset_details'])['symbol'] ?? ''}'.trim();
+      if (symbol.isNotEmpty) assets.add(symbol);
+    }
+    for (final symbol in journalOptions['assets'] as List? ?? []) {
+      if ('$symbol'.isNotEmpty) assets.add('$symbol');
+    }
+    for (final row in rawRows) {
+      final symbol = '${row['symbol'] ?? ''}'.trim();
+      if (symbol.isNotEmpty) assets.add(symbol);
+    }
+    return {
+      'rows': rows,
+      'bots': botChoices,
+      'assets': assets.toList()..sort(),
+      'legacy': legacy,
+    };
+  }
+
+  Future<void> pickDate({required bool isFrom}) async {
+    final now = DateTime.now();
+    final first = isFrom ? DateTime(2000) : (fromDate ?? DateTime(2000));
+    final last = isFrom && toDate != null ? toDate! : now;
+    final current = isFrom ? fromDate : toDate;
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: current ?? last,
+      firstDate: first,
+      lastDate: last,
+    );
+    if (selected == null || !mounted) return;
+    setState(() {
+      if (isFrom) {
+        fromDate = selected;
+      } else {
+        toDate = selected;
+      }
+    });
+    reload();
+  }
 
   @override
   void initState() {
     super.initState();
-    future = widget.client.get('/api/personal/logs/');
-    startRecordRefresh(reload);
+    future = load();
+    startRecordRefresh(() => reload(silent: true));
   }
 
   @override
@@ -1873,11 +2010,12 @@ class _LogsPageState extends State<LogsPage>
     super.dispose();
   }
 
-  Future<void> reload() => refreshRecordFuture(
-    () => widget.client.get('/api/personal/logs/'),
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
+    load,
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   List<Map<String, dynamic>> visibleRows(List<Map<String, dynamic>> rows) {
@@ -1906,7 +2044,12 @@ class _LogsPageState extends State<LogsPage>
       if (!snapshot.hasData) {
         return const Center(child: CircularProgressIndicator());
       }
-      final rows = listOfMaps(snapshot.data);
+      final result = mapOf(snapshot.data);
+      final rows = listOfMaps(result['rows']);
+      final bots = Map<String, String>.from(mapOf(result['bots']));
+      final assets = (result['assets'] as List? ?? [])
+          .map((item) => '$item')
+          .toList();
       final filtered = visibleRows(rows);
       final warnings = rows
           .where((row) => '${row['severity']}'.toLowerCase() == 'warning')
@@ -1926,6 +2069,87 @@ class _LogsPageState extends State<LogsPage>
               onRefresh: reload,
             ),
             const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                _JournalDropdown(
+                  key: ValueKey('bot-$botId'),
+                  label: 'Bot',
+                  value: botId,
+                  width: 220,
+                  choices: {
+                    '': 'All bots',
+                    ...bots,
+                  },
+                  onChanged: (value) {
+                    setState(
+                      () => botId = value?.isEmpty == true ? null : value,
+                    );
+                    reload();
+                  },
+                ),
+                _JournalDropdown(
+                  key: ValueKey('asset-$asset'),
+                  label: 'Asset',
+                  value: asset,
+                  width: 180,
+                  choices: {
+                    '': 'All assets',
+                    for (final symbol in assets) symbol: symbol,
+                  },
+                  onChanged: (value) {
+                    setState(
+                      () => asset = value?.isEmpty == true ? null : value,
+                    );
+                    reload();
+                  },
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => pickDate(isFrom: true),
+                  icon: const Icon(Icons.calendar_today_outlined, size: 15),
+                  label: Text(
+                    fromDate == null
+                        ? 'From date'
+                        : 'From ${formatDate(fromDate!)}',
+                  ),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => pickDate(isFrom: false),
+                  icon: const Icon(Icons.calendar_today_outlined, size: 15),
+                  label: Text(
+                    toDate == null ? 'To date' : 'To ${formatDate(toDate!)}',
+                  ),
+                ),
+                if (botId != null ||
+                    asset != null ||
+                    fromDate != null ||
+                    toDate != null)
+                  TextButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        botId = null;
+                        asset = null;
+                        fromDate = null;
+                        toDate = null;
+                      });
+                      reload();
+                    },
+                    icon: const Icon(Icons.close_rounded, size: 16),
+                    label: const Text('Clear filters'),
+                  ),
+              ],
+            ),
+            if (result['legacy'] == true && botId != null) ...[
+              const SizedBox(height: 8),
+              const _InlineNotice(
+                icon: Icons.info_outline,
+                text: 'Restart the local backend to filter journal entries by bot.',
+                color: amber,
+              ),
+            ],
+            const SizedBox(height: 10),
             LayoutBuilder(
               builder: (_, constraints) {
                 final searchBox = SizedBox(
@@ -2152,6 +2376,45 @@ class _JournalStat extends StatelessWidget {
           ),
         ),
       ],
+    ),
+  );
+}
+
+class _JournalDropdown extends StatelessWidget {
+  const _JournalDropdown({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.width,
+    required this.choices,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String? value;
+  final double width;
+  final Map<String, String> choices;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: width,
+    height: 42,
+    child: DropdownButtonFormField<String>(
+      initialValue: choices.containsKey(value) ? value : '',
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: label,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      items: [
+        for (final choice in choices.entries)
+          DropdownMenuItem(
+            value: choice.key,
+            child: Text(choice.value, overflow: TextOverflow.ellipsis),
+          ),
+      ],
+      onChanged: onChanged,
     ),
   );
 }
@@ -2496,7 +2759,7 @@ class _OrdersPageState extends State<OrdersPage>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(reload);
+    startRecordRefresh(() => reload(silent: true));
   }
 
   @override
@@ -2505,11 +2768,12 @@ class _OrdersPageState extends State<OrdersPage>
     super.dispose();
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/orders/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   List<Map<String, dynamic>> _filteredRows(dynamic data) {
@@ -5506,14 +5770,17 @@ class _MarketsPageState extends State<MarketsPage>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(() => updating ? Future<void>.value() : reload());
+    startRecordRefresh(
+      () => updating ? Future<void>.value() : reload(silent: true),
+    );
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/markets/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   Future<void> toggle(Map<String, dynamic> row, bool enabled) async {
@@ -5856,32 +6123,26 @@ class PositionsPage extends StatefulWidget {
   State<PositionsPage> createState() => _PositionsPageState();
 }
 
-class _PositionsPageState extends State<PositionsPage> {
+class _PositionsPageState extends State<PositionsPage>
+    with _AutoRefreshRecords<PositionsPage> {
   late Future<dynamic> future = widget.client.get('/api/personal/positions/');
-  Timer? refreshTimer;
   bool busy = false;
 
   @override
   void initState() {
     super.initState();
-    refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (!busy) reload();
-    });
+    startRecordRefresh(
+      () => busy ? Future<void>.value() : reload(silent: true),
+    );
   }
 
-  @override
-  void dispose() {
-    refreshTimer?.cancel();
-    super.dispose();
-  }
-
-  void reload() {
-    if (!mounted) return;
-    final next = widget.client.get('/api/personal/positions/');
-    setState(() {
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
+    () => widget.client.get('/api/personal/positions/'),
+    (next) => setState(() {
       future = next;
-    });
-  }
+    }),
+    silent: silent,
+  );
 
   Future<void> clearClosed() async {
     if (!await confirm(
@@ -6096,14 +6357,15 @@ class _RunEvidencePageState extends State<RunEvidencePage>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(reload);
+    startRecordRefresh(() => reload(silent: true));
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/backtesting/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   @override
@@ -7104,15 +7366,18 @@ class _SettingsPageState extends State<SettingsPage>
   void initState() {
     super.initState();
     startRecordRefresh(
-      () => testingAccountId == null ? reload() : Future<void>.value(),
+      () => testingAccountId == null
+          ? reload(silent: true)
+          : Future<void>.value(),
     );
   }
 
-  Future<void> reload() => refreshRecordFuture(
+  Future<void> reload({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/accounts/'),
     (next) => setState(() {
       future = next;
     }),
+    silent: silent,
   );
 
   Future<void> edit([Map<String, dynamic>? row]) async {
@@ -7126,7 +7391,9 @@ class _SettingsPageState extends State<SettingsPage>
       text: row?['mt5_server']?.toString() ?? '',
     );
     final path = TextEditingController(
-      text: row?['mt5_path']?.toString() ?? '',
+      text: row == null
+          ? r'C:\Program Files\MetaTrader 5\terminal64.exe'
+          : row['mt5_path']?.toString() ?? '',
     );
     final password = TextEditingController();
     final controls = [

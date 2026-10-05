@@ -259,6 +259,9 @@ def dispatch_place_order(order: Order) -> None:
     """Place order with pre-flight validation."""
     from execution.services.orchestrator import validate_order_account_scope
 
+    order.refresh_from_db(fields=["status"])
+    if order.status in {"canceled", "rejected", "error", "filled"}:
+        raise ValueError(f"Order {order.pk} is no longer dispatchable ({order.status})")
     validate_order_account_scope(order)
     connector, connector_key = _resolve_connector(order)
     if not connector:

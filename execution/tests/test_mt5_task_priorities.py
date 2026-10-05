@@ -5,7 +5,9 @@ from django.test import TestCase
 from bots.models import Bot
 from brokers.models import BrokerAccount
 from execution.models import Order
-from execution.mt5_tasks import enqueue_mt5_order, execute_mt5_order_task
+from execution.mt5_tasks import (
+    enqueue_mt5_order, execute_mt5_order_task, modify_mt5_position_task,
+)
 from execution.task_priorities import (
     MT5_PRIORITY_EMERGENCY,
     MT5_PRIORITY_HIGH,
@@ -88,3 +90,6 @@ class MT5TaskPriorityTests(TestCase):
         dispatch.assert_called_once()
         self.entry.refresh_from_db()
         self.assertIsNotNone(self.entry.mt5_worker_started_at)
+
+    def test_ambiguous_protection_change_is_not_automatically_retried(self):
+        self.assertFalse(getattr(modify_mt5_position_task, "autoretry_for", ()))

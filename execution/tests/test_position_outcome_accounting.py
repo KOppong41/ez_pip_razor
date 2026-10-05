@@ -6,8 +6,10 @@ from django.utils import timezone
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
-from execution.models import BrokerPosition, Order, TradeLog
+from execution.models import AccountRiskDay, BrokerPosition, ExecutionSetting, Order, TradeLog
 from execution.services.portfolio import record_closed_position_outcome, record_fill
+from execution.services.psychology import get_size_multiplier
+from execution.services.daily_risk import risk_day_window
 
 
 class PositionOutcomeAccountingTests(TestCase):
@@ -106,3 +108,51 @@ class PositionOutcomeAccountingTests(TestCase):
         self.assertEqual(self.bot.current_loss_streak, 0)
         position.refresh_from_db()
         self.assertIsNone(position.loss_streak_accounted_at)
+
+    def test_paper_partial_exits_count_at_flat_position_only(self):
+        self.account.connector = "paper"
+        self.account.save(update_fields=["connector"])
+        entry = Order.objects.create(
+            owner=self.owner, bot=self.bot, broker_account=self.account,
+            client_order_id="paper-entry-outcome", symbol="OUTCOMEUSD",
+            side="buy", intent="entry", qty=Decimal(".3"), status="filled",
+        )
+        record_fill(entry, Decimal(".3"), Decimal("100"), contract_size=Decimal(1))
+        for suffix, qty in ((1, ".1"), (2, ".2")):
+            exit_order = Order.objects.create(
+                owner=self.owner, bot=self.bot, broker_account=self.account,
+                client_order_id=f"paper-exit-outcome-{suffix}", symbol="OUTCOMEUSD",
+                side="sell", intent="exit", qty=Decimal(qty), status="filled",
+            )
+            record_fill(exit_order, Decimal(qty), Decimal("90"), contract_size=Decimal(1))
+            self.bot.refresh_from_db()
+            self.assertEqual(self.bot.current_loss_streak, 0 if suffix == 1 else 1)
+
+    def test_live_drawdown_sizing_uses_locked_account_equity_not_paper_capital(self):
+        ExecutionSetting.objects.update_or_create(
+            key="default", defaults={
+                "paper_start_balance": Decimal("100000"),
+                "drawdown_soft_limit_pct": Decimal("1"),
+                "drawdown_hard_limit_pct": Decimal("5"),
+                "soft_size_multiplier": Decimal(".8"),
+                "hard_size_multiplier": Decimal(".4"),
+            },
+        )
+        order = Order.objects.create(
+            owner=self.owner, bot=self.bot, broker_account=self.account,
+            client_order_id="sizing-outcome", symbol="OUTCOMEUSD", side="sell",
+            intent="exit", qty=Decimal(".1"), status="filled",
+        )
+        TradeLog.objects.create(
+            order=order, bot=self.bot, broker_account=self.account,
+            symbol="OUTCOMEUSD", side="sell", qty=Decimal(".1"), pnl=Decimal("-20"),
+        )
+        risk_day = AccountRiskDay.objects.create(
+            broker_account=self.account,
+            risk_date=risk_day_window(self.account).risk_date,
+            starting_balance=Decimal("1000"), starting_equity=Decimal("1000"),
+            baseline_source="manual", baseline_locked=True,
+        )
+        self.assertEqual(get_size_multiplier(self.bot), Decimal(".8"))
+        risk_day.delete()
+        self.assertEqual(get_size_multiplier(self.bot), Decimal(".4"))

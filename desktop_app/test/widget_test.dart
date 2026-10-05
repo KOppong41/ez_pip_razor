@@ -13,6 +13,8 @@ class FakeApiClient extends ApiClient {
     this.pausedUntil,
     this.lossStreak = 0,
     this.diagnostic12h,
+    this.legacyLogs = false,
+    this.emptyLogs = false,
   }) : super('http://127.0.0.1:8000');
 
   final List<Map<String, dynamic>>? markets;
@@ -22,6 +24,8 @@ class FakeApiClient extends ApiClient {
   final String? pausedUntil;
   final int lossStreak;
   final Map<String, dynamic>? diagnostic12h;
+  final bool legacyLogs;
+  final bool emptyLogs;
   String? lastControlAction;
 
   @override
@@ -338,35 +342,60 @@ class FakeApiClient extends ApiClient {
             },
           ];
     }
-    if (path == '/api/personal/logs/') {
-      return [
-        {
-          'id': 101,
-          'created_at': '2026-08-26T23:48:08Z',
-          'event_type': 'scalper_engine_run',
-          'severity': 'info',
-          'message':
-              'Scalper run tf=5m signals=0 decisions=0 orders=0 profile=eth_momentum',
-          'symbol': 'ETHUSDm',
-          'context': {
-            'outcome': 'no_signals',
-            'session': 'overnight',
-            'timeframe': '5m',
-            'signals': 0,
-            'decisions': 0,
-            'orders': 0,
-          },
+    if (Uri.parse(path).path == '/api/personal/logs/') {
+      final query = Uri.parse(path).queryParameters;
+      if (emptyLogs && legacyLogs) return <Map<String, dynamic>>[];
+      final journal = [
+            {
+              'id': 101,
+              'bot_id': 10,
+              'created_at': '2026-08-26T23:48:08Z',
+              'event_type': 'scalper_engine_run',
+              'severity': 'info',
+              'message':
+                  'Scalper run tf=5m signals=0 decisions=0 orders=0 profile=eth_momentum',
+              'symbol': 'ETHUSDm',
+              'context': {
+                'outcome': 'no_signals',
+                'session': 'overnight',
+                'timeframe': '5m',
+                'signals': 0,
+                'decisions': 0,
+                'orders': 0,
+              },
+            },
+            {
+              'id': 102,
+              'bot_id': 20,
+              'created_at': '2026-08-26T23:47:08Z',
+              'event_type': 'risk.rejection',
+              'severity': 'warning',
+              'message': 'Spread exceeds configured limit',
+              'symbol': 'XAUUSDm',
+              'context': {'reason': 'spread_limit', 'spread_points': '52'},
+            },
+          ];
+      final filtered = journal.where((row) {
+        final created = DateTime.parse('${row['created_at']}');
+        final from = DateTime.tryParse(query['from'] ?? '');
+        final to = DateTime.tryParse(query['to'] ?? '');
+        return (query['bot_id'] == null ||
+                '${row['bot_id']}' == query['bot_id']) &&
+            (query['symbol'] == null || row['symbol'] == query['symbol']) &&
+            (from == null || !created.isBefore(from)) &&
+            (to == null || created.isBefore(to));
+      }).toList();
+      if (legacyLogs) return journal;
+      return {
+        'rows': emptyLogs ? <Map<String, dynamic>>[] : filtered,
+        'options': {
+          'bots': [
+            {'bot_id': 10, 'bot__name': 'ETH Scalper'},
+            {'bot_id': 20, 'bot__name': 'Gold Scalper'},
+          ],
+          'assets': ['ETHUSDm', 'XAUUSDm'],
         },
-        {
-          'id': 102,
-          'created_at': '2026-08-26T23:47:08Z',
-          'event_type': 'risk.rejection',
-          'severity': 'warning',
-          'message': 'Spread exceeds configured limit',
-          'symbol': 'XAUUSDm',
-          'context': {'reason': 'spread_limit', 'spread_points': '52'},
-        },
-      ];
+      };
     }
     return {
       'bot': {
@@ -574,6 +603,93 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Risk Rejection'), findsOneWidget);
     expect(find.text('Scalper Engine Run'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('journal filters by bot, asset, and date and can clear filters', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 830));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: LogsPage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('All bots'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('ETH Scalper').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Scalper Engine Run'), findsOneWidget);
+    expect(find.text('Risk Rejection'), findsNothing);
+
+    await tester.tap(find.text('All assets'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('XAUUSDm').last);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('No journal events match the current filters.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Clear filters'));
+    await tester.pumpAndSettle();
+    expect(find.text('Risk Rejection'), findsOneWidget);
+
+    await tester.tap(find.text('From date'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('No journal events match the current filters.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Clear filters'));
+    await tester.pumpAndSettle();
+    expect(find.text('Scalper Engine Run'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('journal keeps entries and choices with an older backend', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 830));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: LogsPage(client: FakeApiClient(legacyLogs: true))),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Scalper Engine Run'), findsOneWidget);
+    expect(find.text('Risk Rejection'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(
+          body: LogsPage(
+            client: FakeApiClient(legacyLogs: true, emptyLogs: true),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('All bots'));
+    await tester.pumpAndSettle();
+    expect(find.text('Gold London Scalper'), findsOneWidget);
+    await tester.tap(find.text('Gold London Scalper'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Restart the local backend'), findsOneWidget);
+    await tester.tap(find.text('All assets'));
+    await tester.pumpAndSettle();
+    expect(find.text('XAUUSDm'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 
@@ -908,6 +1024,33 @@ void main() {
     expect(find.text('ACCOUNT SLOT'), findsOneWidget);
     expect(find.text('Lost to bot 2'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('new MT5 accounts show the default terminal path', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1100, 830));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: Scaffold(body: SettingsPage(client: FakeApiClient())),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add account'));
+    await tester.pumpAndSettle();
+
+    final terminalPath = tester.widget<TextField>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField &&
+            widget.decoration?.labelText == 'Terminal path',
+      ),
+    );
+    expect(
+      terminalPath.controller?.text,
+      r'C:\Program Files\MetaTrader 5\terminal64.exe',
+    );
   });
 
   testWidgets('renders polished trading workspaces without raw records', (

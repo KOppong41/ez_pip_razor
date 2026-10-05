@@ -11,6 +11,7 @@ from brokers.models import BrokerAccount
 from execution.models import BrokerPosition, Execution, Order, Position, TradeLog
 from execution.services.orchestrator import create_close_order_for_position
 from execution.services.portfolio import record_fill
+from execution.connectors.mt5 import ConnectorError, MT5Connector
 from execution.tasks import _reconcile_missing_owned_position
 
 
@@ -133,6 +134,20 @@ class BrokerPositionReconciliationTests(TestCase):
                 profit=Decimal("-1.88"),
             ).exists()
         )
+
+    def test_mt5_history_failure_is_not_treated_as_empty_history(self):
+        connector = MT5Connector()
+        mt5 = SimpleNamespace(
+            history_deals_get=Mock(return_value=None),
+            last_error=Mock(return_value=(500, "history unavailable")),
+        )
+        with patch("execution.connectors.mt5.mt5", mt5), patch.object(
+            connector, "_call_for_account", side_effect=lambda account, action: action(),
+        ):
+            with self.assertRaisesRegex(ConnectorError, "history unavailable"):
+                connector.history_deals_for_position_account(self.account, 333)
+            mt5.history_deals_get.return_value = ()
+            self.assertEqual(connector.history_deals_for_position_account(self.account, 333), ())
 
     def test_multiple_partial_exits_never_overfill_order_sized_from_stale_snapshot(self):
         history = self.partial_history()

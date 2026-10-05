@@ -149,14 +149,17 @@ class _HistoricalBacktestsState extends State<_HistoricalBacktests>
   @override
   void initState() {
     super.initState();
-    startRecordRefresh(() => busy ? Future<void>.value() : refreshHistory());
+    startRecordRefresh(
+      () => busy ? Future<void>.value() : refreshHistory(silent: true),
+    );
   }
 
-  Future<void> refreshHistory() => refreshRecordFuture(
+  Future<void> refreshHistory({bool silent = false}) => refreshRecordFuture(
     () => widget.client.get('/api/personal/backtests/?page=$historyPage'),
     (next) => setState(() {
       history = next;
     }),
+    silent: silent,
   );
 
   void _showError(String value) {

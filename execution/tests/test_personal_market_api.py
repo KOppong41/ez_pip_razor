@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from bots.models import Asset
+from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
 from execution.models import BrokerSymbolMapping
 
@@ -97,3 +97,20 @@ class PersonalMarketApiTest(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_dashboard_reports_pause_ownership_and_cooldown_details(self):
+        from django.utils import timezone
+
+        resume_at = timezone.now() + timezone.timedelta(minutes=30)
+        bot = Bot.objects.create(
+            owner=self.user, name="Gold paused", asset=self.gold,
+            broker_account=self.account, status="paused",
+            pause_reason="loss_cooldown", paused_until=resume_at,
+            current_loss_streak=3,
+        )
+        response = self.client.get("/api/personal/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        row = next(row for row in response.json()["bot"]["statuses"] if row["id"] == bot.id)
+        self.assertEqual(row["pause_reason"], "loss_cooldown")
+        self.assertEqual(row["current_loss_streak"], 3)
+        self.assertEqual(row["paused_until"], resume_at.isoformat().replace("+00:00", "Z"))

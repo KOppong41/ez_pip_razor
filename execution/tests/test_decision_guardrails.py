@@ -6,8 +6,8 @@ from django.test import TestCase, override_settings
 
 from bots.models import Asset, Bot
 from brokers.models import BrokerAccount
-from execution.models import Signal, Decision, Position
-from execution.services.decision import make_decision_from_signal
+from execution.models import Signal, Decision, Position, Order
+from execution.services.decision import make_decision_from_signal, get_today_filled_trades
 
 
 class DecisionGuardrailTests(TestCase):
@@ -47,6 +47,14 @@ class DecisionGuardrailTests(TestCase):
             payload={"tp": "1.2", "sl": "1.0", "score": score},
             dedupe_key=dedupe_key,
         )
+
+    def test_pending_ack_reserves_daily_trade_slot(self):
+        Order.objects.create(
+            owner=self.user, bot=self.bot, broker_account=self.account,
+            client_order_id="pending-daily-slot", symbol="EURUSDm", side="buy",
+            intent="entry", qty=Decimal("0.01"), status="ack",
+        )
+        self.assertEqual(get_today_filled_trades(self.bot, symbol="EURUSDm"), 1)
 
     def test_blocks_same_direction_when_position_exists(self):
         Position.objects.create(

@@ -89,11 +89,9 @@ def cancel_mt5_order_task(self, order_id: int):
     bind=True,
     queue="mt5_execution",
     priority=MT5_PRIORITY_HIGH,
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 3},
 )
 def modify_mt5_position_task(self, broker_position_id: int, *, sl=None, tp=None):
+    """Apply protection once; an ambiguous broker response needs reconciliation."""
     position = BrokerPosition.objects.select_related("broker_account").get(pk=broker_position_id)
     MT5Connector().modify_broker_position(position, sl=sl, tp=tp)
     return {

@@ -9,6 +9,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Case, F, IntegerField, Value, When
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -171,7 +172,10 @@ def personal_dashboard(request):
         {
             "bot": {
                 "running": bots.filter(status="active").exists() and risk.entries_enabled and not risk.emergency_stop,
-                "statuses": list(bots.values("id", "name", "status", "schedule_paused", "engine_mode")),
+                "statuses": list(bots.values(
+                    "id", "name", "status", "schedule_paused", "engine_mode",
+                    "pause_reason", "paused_until", "current_loss_streak",
+                )),
                 "emergency_stop": risk.emergency_stop,
             },
             "mt5": {
@@ -473,13 +477,45 @@ def personal_history_baseline(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def personal_logs(request):
-    queryset = JournalEntry.objects.select_related("broker_account")
+    queryset = JournalEntry.objects.all()
     if not request.user.is_superuser:
         queryset = queryset.filter(owner=request.user)
+    options = None
+    if request.query_params.get("include_options") == "1":
+        bots = Bot.objects.all()
+        if not request.user.is_superuser:
+            bots = bots.filter(owner=request.user)
+        symbols = set(
+            queryset.exclude(symbol="").values_list("symbol", flat=True).distinct()
+        )
+        symbols.update(Asset.objects.filter(is_active=True).values_list("symbol", flat=True))
+        options = {
+            "bots": [
+                {"bot_id": row["id"], "bot__name": row["name"]}
+                for row in bots.order_by("name", "id").values("id", "name")
+            ],
+            "assets": sorted(symbols),
+        }
+    bot_id = request.query_params.get("bot_id")
+    if bot_id:
+        if not bot_id.isdecimal():
+            return Response({"detail": "bot_id must be a positive integer."}, status=400)
+        queryset = queryset.filter(bot_id=bot_id)
+    symbol = request.query_params.get("symbol")
+    if symbol:
+        queryset = queryset.filter(symbol=symbol)
+    for parameter, lookup in (("from", "created_at__gte"), ("to", "created_at__lt")):
+        value = request.query_params.get(parameter)
+        if value:
+            parsed = parse_datetime(value)
+            if parsed is None or timezone.is_naive(parsed):
+                return Response({"detail": f"{parameter} must be an ISO 8601 datetime with timezone."}, status=400)
+            queryset = queryset.filter(**{lookup: parsed})
     level = request.query_params.get("level")
     if level:
         queryset = queryset.filter(severity=level.lower())
-    return Response(list(queryset[:500].values("id", "created_at", "event_type", "severity", "message", "symbol", "context")))
+    rows = list(queryset[:500].values("id", "created_at", "event_type", "severity", "message", "symbol", "context", "bot_id"))
+    return Response({"rows": rows, "options": options} if options is not None else rows)
 
 
 @api_view(["GET"])
@@ -529,7 +565,10 @@ def personal_accounts(request):
     account.mt5_login = str(request.data.get("mt5_login", account.mt5_login or ""))
     account.account_ref = account.mt5_login
     account.mt5_server = request.data.get("mt5_server", account.mt5_server or "")
-    account.mt5_path = request.data.get("mt5_path", account.mt5_path or "")
+    mt5_path = request.data.get("mt5_path", account.mt5_path)
+    if account.pk is None and not str(mt5_path or "").strip():
+        mt5_path = BrokerAccount._meta.get_field("mt5_path").get_default()
+    account.mt5_path = mt5_path
     if request.data.get("password"):
         account.set_mt5_password(str(request.data["password"]))
     account.full_clean()

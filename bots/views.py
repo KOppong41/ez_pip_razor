@@ -1,5 +1,6 @@
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
+from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -7,7 +8,7 @@ from rest_framework.response import Response
 
 from brokers.models import BrokerAccount
 from core.utils import structured_log
-from execution.models import MT5ConnectionState, RiskPolicy
+from execution.models import MT5ConnectionState, RiskPolicy, ScalperRunLog
 from execution.services.brokers import get_broker_symbol_constraints
 from execution.services.bot_schedule import set_bot_status
 from execution.services.strategy_registry import SCALPER_STRATEGY_REGISTRY
@@ -45,6 +46,40 @@ class BotViewSet(
 
     def get_queryset(self):
         return super().get_queryset().filter(owner=self.request.user)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        bots = list(page if page is not None else queryset)
+        diagnostics = {bot.pk: {
+            "scans": 0,
+            "dominant_rejection_reason": None,
+            "dominant_rejection_count": 0,
+        } for bot in bots}
+        if diagnostics:
+            rows = ScalperRunLog.objects.filter(
+                bot_id__in=diagnostics,
+                created_at__gte=timezone.now() - timezone.timedelta(hours=12),
+            ).values("bot_id", "summary__rejection_reason").annotate(count=Count("id"))
+            for row in rows:
+                result = diagnostics[row["bot_id"]]
+                count = row["count"]
+                result["scans"] += count
+                reason = row["summary__rejection_reason"]
+                if reason and (count > result["dominant_rejection_count"] or (
+                    count == result["dominant_rejection_count"] and (
+                        result["dominant_rejection_reason"] is None
+                        or reason < result["dominant_rejection_reason"]
+                    )
+                )):
+                    result["dominant_rejection_reason"] = reason
+                    result["dominant_rejection_count"] = count
+        context = self.get_serializer_context()
+        context["diagnostic_12h_by_bot"] = diagnostics
+        serializer = self.get_serializer(bots, many=True, context=context)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=False, methods=["get"], url_path="options")
     def options(self, request):
